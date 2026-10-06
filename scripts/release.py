@@ -62,7 +62,8 @@ def main():
         return
     if not os.environ.get('CARGO_REGISTRY_TOKEN'):
         raise SystemExit('CARGO_REGISTRY_TOKEN is required for publishing')
-    for attempt in range(4):
+    max_attempts = len(packages) + 2
+    for attempt in range(max_attempts):
         command = ['cargo', 'publish', '--workspace', '--locked']
         missing = []
         for package in packages:
@@ -93,7 +94,7 @@ def main():
             return
         output = ''.join(tail)
         retry = re.search(r'Please try again after ([^\n]+? GMT)', output)
-        if '429 Too Many Requests' not in output or not retry or attempt == 3:
+        if '429 Too Many Requests' not in output or not retry or attempt == max_attempts - 1:
             raise SystemExit(result)
         deadline = parsedate_to_datetime(retry[1]).timestamp() + 5
         while time.time() < deadline:
