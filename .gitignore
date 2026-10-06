@@ -3,3 +3,4 @@
 *.sock
 *.sqlite*
 .DS_Store
+/dist/

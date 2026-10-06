@@ -65,6 +65,9 @@ This is an implementation roadmap, not a claim that every phase is complete.
 
 ## Phase 6 — Release
 
+- [x] Universal macOS app/DMG workflow with bundled helpers and optional signing/notarization.
+- [ ] Configure Apple Developer ID credentials and qualify signed downloads.
+
 - [ ] Terminal compatibility matrix with observed results on macOS and Linux.
 - [ ] Settings UI and OS keychain token storage.
 - [ ] Linux packages, AppImage and Homebrew tap.

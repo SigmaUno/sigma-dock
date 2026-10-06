@@ -123,10 +123,9 @@ with open('received.txt','w') as out:
         assert preview['includes_job_logs'] and 'assertion failed' in preview['text']
         received = Path(worker['worktree'])/'received.txt'
         rpc('configure_feedback', {'worker_id': worker['id'], 'auto_ci': True})
-        # Exercise the automatic gate directly, then prove retry deduplication and persistence.
-        wait_for(lambda: rpc('get_worker_status', {'worker_id': worker['id']})['worker']['facts']['session'] == 'idle')
-        rpc('send_ci_feedback', {'worker_id': worker['id'], 'automatic': True})
-        wait_for(lambda: received.exists() and 'assertion failed' in received.read_text())
+        # Let the production poller deliver feedback; a manual send races that poller.
+        wait_for(lambda: received.exists() and 'assertion failed' in received.read_text(), timeout=60)
+        assert rpc('get_worker_status', {'worker_id': worker['id']})['worker']['feedback']['last_ci_head'] == sha
         rpc('send_ci_feedback', {'worker_id': worker['id'], 'automatic': True}, error=True)
         assert received.read_text().count('CI feedback for commit') == 1
         assert mcp(p['id'], 'get_worker_status', {'worker_id': other['id']})['isError'] is True

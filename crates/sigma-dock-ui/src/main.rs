@@ -1,4 +1,6 @@
 //! Native board and reconnectable terminal, backed by the daemon's PTYs.
+mod bootstrap;
+
 use anyhow::Result;
 use clap::Parser;
 use gpui::{
@@ -22,6 +24,9 @@ use std::{
 struct Args {
     #[arg(long, env = "SIGMA_DOCK_SOCKET", default_value_os_t = socket_path())]
     socket: PathBuf,
+    /// Connect to an existing daemon without starting bundled helpers.
+    #[arg(long)]
+    no_daemon: bool,
 }
 struct RemoteWriter {
     client: Client,
@@ -575,6 +580,13 @@ fn main() -> Result<()> {
     let client = Client {
         socket: args.socket,
     };
+    let startup_error = if args.no_daemon {
+        None
+    } else {
+        bootstrap::ensure_bundled_daemon(&client, &std::env::current_exe()?)
+            .err()
+            .map(|error| error.to_string())
+    };
     Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
         cx.open_window(
@@ -586,7 +598,15 @@ fn main() -> Result<()> {
                 }),
                 ..Default::default()
             },
-            |_, cx| cx.new(|cx| Workspace::new(client, cx)),
+            |_, cx| {
+                cx.new(|cx| {
+                    let mut workspace = Workspace::new(client, cx);
+                    if startup_error.is_some() {
+                        workspace.error = startup_error;
+                    }
+                    workspace
+                })
+            },
         )
         .expect("open SigmaDock window");
         cx.activate(true);

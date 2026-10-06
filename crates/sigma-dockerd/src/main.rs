@@ -171,7 +171,9 @@ impl Daemon {
     fn dispatch(&mut self, method: &str, params: Value) -> Result<Value> {
         self.sync()?;
         match method {
-            "ping" => Ok(json!({"version": API_VERSION, "name":"SigmaDock"})),
+            "ping" => {
+                Ok(json!({"version": API_VERSION, "name":"SigmaDock", "pid":std::process::id()}))
+            }
             "add_project" => {
                 let path = sigma_dock_git::root(&PathBuf::from(string(&params, "path")?))?;
                 if let Some(project) = self.store.projects()?.into_iter().find(|p| p.path == path) {

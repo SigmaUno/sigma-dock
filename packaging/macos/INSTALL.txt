@@ -1,0 +1,24 @@
+SigmaDock — macOS test build
+
+1. Open the DMG and drag SigmaDock.app into Applications.
+2. Open SigmaDock from Applications. The local daemon starts automatically.
+3. Add a committed git repository and create a worker in the app.
+
+Rust is not required. Git and your chosen agent CLI must already be installed.
+The shell adapter can be used without an agent subscription.
+Closing the window leaves workers running. macOS logout/restart stops processes.
+
+Test builds are signed locally with an ad-hoc signature, not an Apple Developer ID.
+macOS may block opening downloaded test builds. Public distribution requires
+Developer ID signing and notarization. Follow your organization's security policy.
+
+State and local daemon logs: ~/Library/Application Support/SigmaDock/
+Agent commands are found in ~/.local/bin, ~/.cargo/bin, Homebrew and the inherited PATH.
+Custom shell initialization and forge tokens are not imported from your shell.
+To use a custom environment, start the bundled daemon from Terminal first.
+
+Optional CLI (no system-wide install is needed):
+/Applications/SigmaDock.app/Contents/MacOS/sdk --help
+
+This is an early prototype; terminal compatibility is still being qualified.
+https://github.com/SigmaUno/sigma-dock

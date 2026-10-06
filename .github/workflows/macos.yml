@@ -1,0 +1,140 @@
+name: Build macOS installer
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+concurrency:
+  group: macos-installer-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            arch: arm64
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-${{ matrix.arch }}
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+      - name: Build native binaries
+        run: cargo build --locked --release --target '${{ matrix.target }}' -p sigma-dock-ui -p sigma-dockerd -p sigma-dock-mcp -p sigma-dock-cli
+      - name: Collect binaries
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p binaries
+          cp "target/$BUILD_TARGET/release/"{sigma-dock,sigma-dockerd,sigma-dock-mcp,sdk} binaries/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.arch }}
+          path: binaries/
+  package:
+    needs: build
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binaries-*
+          path: binaries
+      - name: Combine Apple Silicon and Intel slices
+        run: |
+          mkdir universal
+          for binary in sigma-dock sigma-dockerd sigma-dock-mcp sdk; do
+            lipo -create "binaries/binaries-arm64/$binary" "binaries/binaries-x86_64/$binary" -output "universal/$binary"
+            chmod +x "universal/$binary"
+          done
+      - name: Import optional Apple distribution credentials
+        env:
+          CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          NOTARY_KEY: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          python3 - <<'PY'
+          import base64, os, pathlib, secrets, subprocess
+          certificate = os.environ.get('CERTIFICATE')
+          key = os.environ.get('NOTARY_KEY')
+          if key and not certificate:
+              raise SystemExit('Notarization requires an Apple signing certificate')
+          if certificate:
+              temp = pathlib.Path(os.environ['RUNNER_TEMP'])
+              p12 = temp / 'sigmadock.p12'
+              p12.write_bytes(base64.b64decode(certificate, validate=True))
+              chain = temp / 'sigmadock.keychain-db'
+              password = secrets.token_urlsafe(32)
+              print(f'::add-mask::{password}', flush=True)
+              subprocess.run(['security', 'create-keychain', '-p', password, str(chain)], check=True)
+              subprocess.run(['security', 'set-keychain-settings', '-lut', '21600', str(chain)], check=True)
+              subprocess.run(['security', 'unlock-keychain', '-p', password, str(chain)], check=True)
+              subprocess.run(['security', 'import', str(p12), '-k', str(chain), '-P', os.environ['CERTIFICATE_PASSWORD'], '-T', '/usr/bin/codesign'], check=True)
+              subprocess.run(['security', 'set-key-partition-list', '-S', 'apple-tool:,apple:', '-s', '-k', password, str(chain)], check=True)
+              subprocess.run(['security', 'list-keychains', '-d', 'user', '-s', str(chain)], check=True)
+              p12.unlink()
+              if key:
+                  path = temp / 'AuthKey.p8'
+                  path.write_text(key)
+                  path.chmod(0o600)
+                  with open(os.environ['GITHUB_ENV'], 'a') as env:
+                      env.write(f'APPLE_NOTARY_KEY_PATH={path}\n')
+          PY
+      - name: Package, sign and optionally notarize
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          if [[ "$GITHUB_REF_TYPE" = tag && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo 'Version tag does not match the committed workspace version' >&2
+            exit 1
+          fi
+          python3 scripts/package_macos.py --bin-dir universal --version "$version" --build-id "${GITHUB_SHA:0:12}" --build-number "$GITHUB_RUN_NUMBER"
+      - name: Verify bundled binaries
+        run: |
+          plutil -lint dist/SigmaDock.app/Contents/Info.plist
+          dist/SigmaDock.app/Contents/MacOS/sigma-dock --help
+          dist/SigmaDock.app/Contents/MacOS/sdk --help
+          hdiutil verify dist/*.dmg
+          python3 scripts/macos_bundle_smoke.py dist/SigmaDock.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SigmaDock-macOS-installer
+          path: |
+            dist/*.dmg
+            dist/*.sha256
+      - name: Publish download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="macos-${GITHUB_SHA:0:12}"
+          if [[ "$GITHUB_REF_TYPE" = tag ]]; then tag="$GITHUB_REF_NAME"; fi
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --target "$GITHUB_SHA" --title "SigmaDock macOS build ${GITHUB_SHA:0:12}" --prerelease --notes-file packaging/macos/INSTALL.txt
+          fi
+          gh release upload "$tag" dist/*.dmg dist/*.sha256 --clobber
+      - name: Delete temporary Apple credentials
+        if: always()
+        run: |
+          if [[ -f "$RUNNER_TEMP/sigmadock.keychain-db" ]]; then security delete-keychain "$RUNNER_TEMP/sigmadock.keychain-db"; fi
+          rm -f "$RUNNER_TEMP/sigmadock.p12" "$RUNNER_TEMP/AuthKey.p8"

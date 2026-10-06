@@ -4,6 +4,10 @@ A native, local-first workspace for supervising parallel coding agents. Rust, GP
 
 **Status: early working prototype.** The daemon, CLI, native board and embedded terminal are implemented. Full agent TUI compatibility and distribution packaging are not yet release-qualified. See [the roadmap](docs/ROADMAP.md) for the remaining work.
 
+## macOS app download
+
+[macOS builds](docs/MACOS.md) provide a universal DMG: drag SigmaDock to Applications and open it. The app starts its bundled daemon; Rust is not required. Initial test downloads are not Apple-notarized. Git and agent CLIs remain external prerequisites.
+
 ## Run
 
 Requires macOS or Linux, Rust 1.88+ (newer dependencies may require newer stable Rust), Git, and your chosen agent CLI on `PATH`. Linux native builds also require GPUI's system dependencies; see [GPUI's Linux setup](https://github.com/zed-industries/zed/blob/main/docs/src/development/linux.md).
