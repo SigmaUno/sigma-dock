@@ -1,0 +1,16 @@
+[package]
+name = "sigma-dock-pty"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+include = ["src/**", "README.md", "LICENSE"]
+description = "Persistent local PTY sessions and replay for SigmaDock"
+
+[dependencies]
+anyhow.workspace = true
+portable-pty.workspace = true
+sigma-dock-core = { version = "0.1.0", path = "../sigma-dock-core" }

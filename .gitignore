@@ -1,0 +1,5 @@
+/target/
+/.local/
+*.sock
+*.sqlite*
+.DS_Store

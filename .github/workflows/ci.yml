@@ -1,0 +1,23 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: GPUI system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libvulkan-dev libssl-dev libfontconfig1-dev libfreetype6-dev clang cmake pkg-config
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+      - run: cargo build --locked
+      - run: python3 scripts/smoke.py
+      - run: python3 scripts/feedback_smoke.py
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

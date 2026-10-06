@@ -1,0 +1,17 @@
+[package]
+name = "sigma-dock-agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+include = ["src/**", "README.md", "LICENSE"]
+description = "CLI harness adapters and MCP configuration for SigmaDock"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+sigma-dock-core = { version = "0.1.0", path = "../sigma-dock-core" }
+serde_json.workspace = true

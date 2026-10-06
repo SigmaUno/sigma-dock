@@ -1,0 +1,32 @@
+name: Prepare crate update
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: New workspace version (for example 0.1.1)
+        required: true
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Update manifests and open release PR
+        env:
+          NEW_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/release.py bump "$NEW_VERSION"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -b "release/$NEW_VERSION"
+          git add Cargo.toml Cargo.lock crates/*/Cargo.toml
+          git commit -m "Prepare SigmaDock $NEW_VERSION"
+          git push origin "release/$NEW_VERSION"
+          cat > /tmp/release-body.md <<'EOF'
+          Updates every workspace package and internal dependency together. After merging and passing CI, run Release crates with this version. Published crate versions are immutable.
+          EOF
+          gh pr create --title "Prepare SigmaDock $NEW_VERSION" --body-file /tmp/release-body.md --base "$GITHUB_REF_NAME"
