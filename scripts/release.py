@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Keep workspace versions aligned and publish missing packages on retry."""
 import argparse
+from collections import deque
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import time
 import urllib.error
 import urllib.request
 
@@ -58,26 +62,46 @@ def main():
         return
     if not os.environ.get('CARGO_REGISTRY_TOKEN'):
         raise SystemExit('CARGO_REGISTRY_TOKEN is required for publishing')
-    command = ['cargo', 'publish', '--workspace', '--locked']
-    missing = []
-    for package in packages:
-        name = package['name']
-        url = f'https://crates.io/api/v1/crates/{name}/{args.version}'
-        request = urllib.request.Request(url, headers={'User-Agent': 'SigmaDock-release (github.com/SigmaUno/sigma-dock)'})
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                json.load(response)
-            print(f'Already published: {name} {args.version}', flush=True)
-            command.extend(['--exclude', name])
-        except urllib.error.HTTPError as error:
-            if error.code != 404:
-                raise
-            missing.append(name)
-    if missing:
+    for attempt in range(4):
+        command = ['cargo', 'publish', '--workspace', '--locked']
+        missing = []
+        for package in packages:
+            name = package['name']
+            url = f'https://crates.io/api/v1/crates/{name}/{args.version}'
+            request = urllib.request.Request(url, headers={'User-Agent': 'SigmaDock-release (github.com/SigmaUno/sigma-dock)'})
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    json.load(response)
+                print(f'Already published: {name} {args.version}', flush=True)
+                command.extend(['--exclude', name])
+            except urllib.error.HTTPError as error:
+                if error.code != 404:
+                    raise
+                missing.append(name)
+        if not missing:
+            print('All packages are published; no upload needed.')
+            return
         print('Publishing: ' + ', '.join(missing), flush=True)
-        subprocess.run(command, cwd=ROOT, check=True)
-    else:
-        print('All packages are already published; no upload needed.')
+        tail = deque(maxlen=100)
+        with subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True) as process:
+            for line in process.stdout:
+                print(line, end='', flush=True)
+                tail.append(line)
+            result = process.wait()
+        if result == 0:
+            return
+        output = ''.join(tail)
+        retry = re.search(r'Please try again after ([^\n]+? GMT)', output)
+        if '429 Too Many Requests' not in output or not retry or attempt == 3:
+            raise SystemExit(result)
+        deadline = parsedate_to_datetime(retry[1]).timestamp() + 5
+        while time.time() < deadline:
+            remaining = deadline - time.time()
+            print(f'Crates.io rate limit: retry in {remaining:.0f}s '
+                  f'(after {datetime.fromtimestamp(deadline, timezone.utc).isoformat()})', flush=True)
+            time.sleep(min(60, remaining))
+
 
 
 if __name__ == '__main__':

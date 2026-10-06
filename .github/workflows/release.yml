@@ -16,6 +16,7 @@ concurrency:
 jobs:
   publish:
     runs-on: macos-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -39,7 +40,9 @@ jobs:
       - run: cargo build --locked
       - run: python3 scripts/smoke.py
       - run: python3 scripts/feedback_smoke.py
-      - run: cargo install cargo-deny --locked
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
       - run: cargo deny check
       - run: cargo publish --workspace --dry-run --locked
       - name: Publish missing crate versions in dependency order
