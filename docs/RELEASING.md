@@ -7,10 +7,10 @@ The GitHub **Release crates** workflow runs validation and a full workspace publ
 For the initial release, run Release crates on `main` with version `0.1.0`. Subsequent releases:
 
 1. Run **Prepare crate update** with a new version, or run `python3 scripts/release.py bump 0.1.1` locally and commit the result.
-2. Merge the version update and wait for CI.
+2. Review and merge the generated release branch, then wait for CI.
 3. Run Release crates with the committed version, or push a `v0.1.1` tag at that commit.
 
-GitHub must permit Actions to create pull requests for the update workflow. Version inputs are passed through environment variables and validated before they enter branch names or Cargo commands. The release job serializes uploads, validates existing tags and creates a GitHub prerelease after publication. A failed publication may be retried: the helper skips package versions already present on crates.io and publishes the remaining packages. Skipped versions are immutable and cannot receive changed code; release a new version for changes.
+The update workflow pushes a release branch and provides a compare link. A maintainer opens/merges the change; this works with the organization policy that blocks Actions from creating pull requests. Version inputs are passed through environment variables and validated before they enter branch names or Cargo commands. The release job serializes uploads, validates existing tags and creates a GitHub prerelease after publication. A failed publication may be retried: the helper skips package versions already present on crates.io and publishes the remaining packages. Skipped versions are immutable and cannot receive changed code; release a new version for changes.
 
 Crates: `sigma-dock-core`, `sigma-dock-store`, `sigma-dock-pty`, `sigma-dock-git`, `sigma-dock-forge`, `sigma-dock-agents`, `sigma-dock-ports`, `sigma-dock-mcp`, `sigma-dockerd`, `sigma-dock-ui`, `sigma-dock-cli`.
 
