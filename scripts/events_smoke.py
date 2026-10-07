@@ -84,8 +84,7 @@ with tempfile.TemporaryDirectory(prefix='sigmadock-events-', dir='/tmp') as fold
             if event['type'] == 'output_available': output.add(event['worker_id'])
             elif event['type'] != 'heartbeat': changed = True
         return changed, output
-    try:
-        daemon = subprocess.Popen([str(BIN / 'sigmadockd'), '--state-dir', str(temp / 'state'), '--max-workers', '6', '--idle-seconds', '3600'], env=env, stdout=log, stderr=log)
+    def wait_ready():
         deadline = time.monotonic() + 10
         while True:
             assert daemon.poll() is None, (temp / 'daemon.log').read_text()
@@ -95,6 +94,9 @@ with tempfile.TemporaryDirectory(prefix='sigmadock-events-', dir='/tmp') as fold
                 pass
             assert time.monotonic() < deadline
             time.sleep(0.05)
+    try:
+        daemon = subprocess.Popen([str(BIN / 'sigmadockd'), '--state-dir', str(temp / 'state'), '--max-workers', '6', '--idle-seconds', '3600'], env=env, stdout=log, stderr=log)
+        wait_ready()
         subscription = subscribe()
         project = rpc('add_project', {'path': str(repo)})
         wait_event('projects_changed')
@@ -151,7 +153,23 @@ with tempfile.TemporaryDirectory(prefix='sigmadock-events-', dir='/tmp') as fold
         daemon.terminate(); daemon.wait(timeout=5)
         assert closed_readers[-1].wait(2), "event reader did not receive EOF on shutdown"
         close_subscription(subscription); subscription = None
-        print('PASS: event handshake, idle workload, project/capacity/worker changes, output, resize, EOF, session generations, reconnect and graceful shutdown')
+        # A new daemon process must resync persisted workers before replaying new sessions.
+        drain_events()
+        daemon = subprocess.Popen([str(BIN / 'sigmadockd'), '--state-dir', str(temp / 'state'), '--max-workers', '6', '--idle-seconds', '3600'], env=env, stdout=log, stderr=log)
+        wait_ready()
+        subscription = subscribe()
+        recovered = rpc('get_worker_status', {'worker_id': worker['id']})['worker']
+        assert recovered['project_id'] == project['id']
+        assert recovered['facts']['session'] == 'exited', recovered
+        assert rpc('capacity')['in_use'] == 0
+        rpc('resume_worker', {'worker_id': worker['id']})
+        restarted = wait_event('output_available', worker['id'], lambda event: not event['signal']['exited'])['signal']
+        assert (restarted['rows'], restarted['cols']) == (30, 120), restarted
+        cursor = restarted['cursor']
+        rpc('input', {'worker_id': worker['id'], 'bytes': list(b"printf 'RESTART_EVENT_OK\\n'\n")})
+        wait_event('output_available', worker['id'], lambda event: event['signal']['cursor'] > cursor)
+        assert b'RESTART_EVENT_OK' in bytes(rpc('output', {'worker_id': worker['id'], 'cursor': cursor})['bytes'])
+        print('PASS: event handshake, idle workload, project/capacity/worker changes, output, resize, EOF, session generations, reconnect, graceful shutdown and daemon restart resync')
     finally:
         if subscription is not None:
             close_subscription(subscription)

@@ -148,6 +148,7 @@ cargo test --workspace
 cargo deny check
 python3 scripts/smoke.py
 python3 scripts/feedback_smoke.py
+python3 scripts/events_smoke.py
 ```
 
 `cargo build` defaults to the headless binaries. `cargo build -p sigmadock-ui` builds the native UI. Both `.forgejo/workflows/ci.yml` and `.github/workflows/ci.yml` run the same checks. Mirror setup is an administrator operation and is not performed by the repository.

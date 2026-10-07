@@ -464,6 +464,60 @@ pub fn read_frame(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>> {
 mod tests {
     use super::*;
     #[test]
+    fn subscription_preserves_buffered_events_and_reports_eof() {
+        use std::{
+            os::unix::net::UnixListener,
+            thread,
+            time::{SystemTime, UNIX_EPOCH},
+        };
+        let socket = PathBuf::from("/tmp").join(format!(
+            "sigmadock-events-{}-{}.sock",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (finish, finished) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request: Value = serde_json::from_slice(
+                &read_frame(&mut BufReader::new(stream.try_clone().unwrap()))
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(request["method"], "subscribe");
+            // The reader may buffer notifications while consuming the acknowledgement.
+            let frames = format!(
+                "{}\n{}\n{}\n",
+                json!({"jsonrpc":"2.0","id":1,"result":{"version":API_VERSION}}),
+                json!({"jsonrpc":"2.0","method":"event","params":DaemonEvent::Resync}),
+                json!({"jsonrpc":"2.0","method":"event","params":DaemonEvent::CapacityChanged})
+            );
+            stream.write_all(frames.as_bytes()).unwrap();
+            finished.recv().unwrap();
+        });
+        let mut subscription = Client {
+            socket: socket.clone(),
+        }
+        .subscribe()
+        .unwrap();
+        assert!(matches!(
+            subscription.next_event().unwrap(),
+            DaemonEvent::Resync
+        ));
+        assert!(matches!(
+            subscription.next_event().unwrap(),
+            DaemonEvent::CapacityChanged
+        ));
+        finish.send(()).unwrap();
+        assert!(subscription.next_event().is_err());
+        server.join().unwrap();
+        std::fs::remove_file(socket).unwrap();
+    }
+    #[test]
     fn status_precedence() {
         let mut f = Facts::default();
         assert_eq!(status(&f), Status::Working);
