@@ -10,6 +10,8 @@ Project website: [sigmadock.dev](https://sigmadock.dev). See the [crate and exec
 
 [macOS builds](docs/MACOS.md) provide a universal DMG: drag SigmaDock to Applications and open it. The app starts its bundled daemon; Rust is not required. Initial test downloads are not Apple-notarized. Git and agent CLIs remain external prerequisites.
 
+For Homebrew previews: `brew tap SigmaUno/tap`, then `brew install --cask sigma-dock-preview`. The stable `sigma-dock` cask awaits Apple signing and notarization. See [macOS installation and upgrade details](docs/MACOS.md#homebrew).
+
 ## Run
 
 Requires macOS or Linux, Rust 1.88+ (newer dependencies may require newer stable Rust), Git, and your chosen agent CLI on `PATH`. Linux native builds also require GPUI's system dependencies; see [GPUI's Linux setup](https://github.com/zed-industries/zed/blob/main/docs/src/development/linux.md).

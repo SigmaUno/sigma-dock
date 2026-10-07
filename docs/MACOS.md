@@ -6,6 +6,22 @@ Opening the installed app starts the bundled daemon when no compatible daemon is
 
 Finder does not inherit terminal shell configuration. The bundled daemon receives the inherited PATH plus the app's helpers, `~/.local/bin`, `~/.cargo/bin`, `/opt/homebrew/bin` and `/usr/local/bin`. Custom shell setup and forge tokens are not loaded automatically; start the bundled daemon from a terminal with the intended environment if needed. Logs stay in the local state directory (`daemon.log`). Manual update checks and opt-in daily checks are available in Settings; see [the update design](UPDATES.md).
 
+## Homebrew
+
+The public tap is [SigmaUno/homebrew-tap](https://github.com/SigmaUno/homebrew-tap). A separate preview channel is available while production Apple signing and notarization remain pending:
+
+```sh
+brew tap SigmaUno/tap
+brew install --cask sigma-dock-preview
+sdk --help
+brew upgrade --cask sigma-dock-preview
+brew uninstall --cask sigma-dock-preview
+```
+
+Preview downloads are ad-hoc signed and Gatekeeper may block them; the tap does not disable Gatekeeper. The stable `brew install --cask sigma-dock` command becomes available after production qualification. Git and the selected agent CLI are separate prerequisites. The cask links the bundled `sdk`; resolve any existing executable with that name before installation. Finish workers before replacing or restarting the daemon during upgrades. Normal upgrade/uninstall preserves local settings, session history and worktrees; the tap has no destructive cleanup hook.
+
+Maintainers update a cask after upstream publication with the tap's `scripts/update_cask.py`. Stable promotion refuses prereleases and test assets, verifies the actual DMG checksum, signing, notarization and universal binaries, and requires a reviewed tap commit. Preview and stable casks conflict rather than overwrite one another silently. See the tap README for release and architecture qualification steps.
+
 ## Build and download
 
 Run **Build macOS installer** manually on the desired branch. It creates a GitHub prerelease named `macos-COMMIT` and uploads the DMG and SHA-256 checksum. These are source snapshots, separate from immutable published crate versions. Pushing a version tag requires production signing and notarization, builds a DMG, and attaches it to that version's release. Manual dispatch remains an explicitly labeled test-build path unless **production** is selected. Existing version tags must stay on the matching source commit.
