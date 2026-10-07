@@ -7,6 +7,7 @@ mod checks_ui;
 mod ci_ui;
 mod diff_ui;
 mod editor;
+mod ellipsis;
 mod events;
 mod icons;
 mod inbox_ui;
@@ -234,6 +235,8 @@ struct Workspace {
     ci_error: Option<String>,
     ci_expanded: Option<String>,
     recovery_open: bool,
+    /// The panel already opened itself for sessions in an unknown state.
+    recovery_prompted: bool,
     recovery_entries: Vec<serde_json::Value>,
     recovery_error: Option<String>,
     recovery_selected: Option<String>,
@@ -347,7 +350,8 @@ impl Workspace {
             ci_loading: false,
             ci_error: None,
             ci_expanded: None,
-            recovery_open: true,
+            recovery_open: false,
+            recovery_prompted: false,
             recovery_entries: Vec::new(),
             recovery_error: None,
             recovery_selected: None,
@@ -882,14 +886,12 @@ impl Workspace {
             .id("workspace-content")
             .overflow_y_scroll()
             .flex_1()
-            .min_w(px(0.))
-            .h_full()
+            .min_h(px(0.))
             .flex()
             .flex_col()
-            .gap_5()
-            .px_8()
-            .py_6()
-            .child(self.header(cx))
+            .gap_4()
+            .px_6()
+            .py_5()
             .children(self.error_banner())
             .when_some(self.task_notice.clone(), |content, notice| {
                 content.child(
@@ -911,9 +913,15 @@ impl Workspace {
         if self.checks.worker.is_some() {
             content = content.child(self.checks_panel(cx));
         }
-        content
-            .child(self.agent_list(cx))
-            .child(self.footer())
+        let content = content.child(self.agent_list(cx)).child(self.footer());
+        div()
+            .flex_1()
+            .min_w(px(0.))
+            .h_full()
+            .flex()
+            .flex_col()
+            .child(self.header(cx))
+            .child(content)
             .into_any_element()
     }
 }

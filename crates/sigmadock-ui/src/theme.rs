@@ -1,4 +1,4 @@
-//! Neutral light chrome with Catppuccin Latte terminal colors, and Catppuccin Mocha for dark.
+//! Catppuccin Latte for light chrome and terminal colors, and Catppuccin Mocha for dark.
 //! Catppuccin source and MIT license: packaging/licenses/Catppuccin.txt.
 use crate::preferences::Appearance;
 use gpui::WindowAppearance;
@@ -34,26 +34,28 @@ pub struct Theme {
 impl Theme {
     pub fn light() -> Self {
         Self {
-            base: 0xf6f7f9,
-            sidebar: 0xf1f2f5,
-            panel: 0xeceef2,
-            card: 0xe6e8ec,
-            button: 0xe6e8ec,
-            selection: 0xdfe8fb,
-            border: 0xdfe2e7,
-            text: 0x1f2329,
-            muted: 0x5c636e,
-            accent: 0x1a64d6,
-            success: 0x2b8a3e,
+            // Catppuccin Latte: base, mantle and crust for chrome, as in docs/mockups.
+            base: 0xeff1f5,
+            sidebar: 0xe6e9ef,
+            panel: 0xe6e9ef,
+            card: 0xdce0e8,
+            button: 0xdce0e8,
+            selection: 0xe3d5fb,
+            border: 0xccd0da,
+            text: 0x4c4f69,
+            // Latte subtext1; subtext0 is below 4.5:1 on mantle.
+            muted: 0x5c5f77,
+            accent: 0x8839ef,
+            success: 0x40a02b,
             warning: 0xb35c00,
-            error: 0xcf222e,
-            focus: 0x3b82f6,
-            link: 0x1a64d6,
-            surface: 0xffffff,
-            chip: 0xeceef1,
-            attention: 0xcf222e,
-            review: 0x7c5cd6,
-            empty: 0xc2c7cf,
+            error: 0xd20f39,
+            focus: 0x7287fd,
+            link: 0x1e66f5,
+            surface: 0xf8f9fb,
+            chip: 0xe6e9ef,
+            attention: 0xd20f39,
+            review: 0x1e66f5,
+            empty: 0xbcc0cc,
             ansi: [
                 0x5c5f77, 0xd20f39, 0x40a02b, 0xdf8e1d, 0x1e66f5, 0xea76cb, 0x179299, 0xacb0be,
                 0x6c6f85, 0xd20f39, 0x40a02b, 0xdf8e1d, 0x1e66f5, 0xea76cb, 0x179299, 0xbcc0cc,
@@ -111,7 +113,7 @@ mod tests {
     fn system_modes_choose_the_matching_palette() {
         assert_eq!(
             Theme::for_appearance(WindowAppearance::Light).base,
-            0xf6f7f9
+            0xeff1f5
         );
         assert_eq!(Theme::for_appearance(WindowAppearance::Dark).base, 0x1e1e2e);
         assert_eq!(

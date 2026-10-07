@@ -1,4 +1,5 @@
 //! Settings page: appearance, editor, forges and updates in one place.
+use crate::ellipsis::Ellipsis;
 use crate::{
     Workspace,
     icons::{Icon, icon},
@@ -530,7 +531,7 @@ impl Workspace {
                                         div()
                                             .text_xs()
                                             .text_color(rgb(theme.muted))
-                                            .truncate()
+                                            .ellipsis()
                                             .child(project.forge.as_ref().map_or_else(
                                                 || "Not connected".to_owned(),
                                                 describe,
@@ -720,7 +721,7 @@ impl Workspace {
                     .items_center()
                     .gap_3()
                     .text_sm()
-                    .child(div().w(px(160.)).truncate().child(project.name.clone()))
+                    .child(div().w(px(160.)).ellipsis().child(project.name.clone()))
                     .child(self.capacity_bar(&project.id).w(px(200.)))
                     .child(div().text_xs().text_color(rgb(theme.muted)).child(format!(
                         "{} of {limit} running",
