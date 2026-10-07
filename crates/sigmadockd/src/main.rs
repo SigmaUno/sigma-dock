@@ -72,6 +72,7 @@ struct Daemon {
     mcp_binary: PathBuf,
     socket: PathBuf,
     idle_seconds: u64,
+    shutting_down: bool,
 }
 impl Daemon {
     fn publish_events(&mut self) -> Result<()> {
@@ -155,7 +156,9 @@ impl Daemon {
         Ok(())
     }
     fn sync(&mut self) -> Result<()> {
-        self.scripts_sync()?;
+        if !self.shutting_down {
+            self.scripts_sync()?;
+        }
         for (id, session) in &self.sessions {
             if let Some(worker) = self.workers.get_mut(id) {
                 let key = session.checkpoint_key();
@@ -312,6 +315,21 @@ impl Daemon {
                 .join("sdk");
             sigmadock_agents::claude_usage_settings(&mut command, &sdk)?;
         }
+        if worker.agent == "claude" {
+            let sdk = std::env::current_exe()?
+                .parent()
+                .context("daemon path has no parent")?
+                .join("sdk");
+            if sdk.is_file() {
+                sigmadock_agents::claude_attention_settings(&mut command, &sdk)?;
+            } else {
+                eprintln!("Claude attention hooks unavailable: install sdk beside sigmadockd");
+            }
+            command.env.push((
+                "SIGMA_DOCK_SESSION_TOKEN".into(),
+                Uuid::new_v4().to_string(),
+            ));
+        }
         command.env.extend([
             ("PORT".into(), worker.port.to_string()),
             ("SIGMA_DOCK_WORKER_ID".into(), worker.id.clone()),
@@ -331,8 +349,26 @@ impl Daemon {
         ))
     }
     fn dispatch(&mut self, method: &str, params: Value) -> Result<Value> {
+        if self.shutting_down {
+            bail!("daemon is shutting down");
+        }
         self.sync()?;
         match method {
+            "session_attention" => {
+                self.session(&params)?.attention(
+                    string(&params, "token")?,
+                    string(&params, "key")?,
+                    params["tool"].as_str().context("tool must be a string")?,
+                    params["waiting"]
+                        .as_bool()
+                        .context("waiting must be boolean")?,
+                    params["clear_all"]
+                        .as_bool()
+                        .context("clear_all must be boolean")?,
+                )?;
+                self.sync()?;
+                Ok(json!(true))
+            }
             "ping" => {
                 Ok(json!({"version": API_VERSION, "name":"SigmaDock", "pid":std::process::id()}))
             }
@@ -1657,7 +1693,7 @@ fn main() -> Result<()> {
     fs::set_permissions(&db, fs::Permissions::from_mode(0o600))?;
     store.mark_disconnected()?;
     store.recover_queue()?;
-    let max_workers = args.max_workers.or(store.max_workers()?).unwrap_or(6);
+    let max_workers = args.max_workers.or(store.max_workers()?).unwrap_or(10);
     if !(1..=255).contains(&max_workers) {
         bail!("max-workers must be 1..255");
     }
@@ -1693,6 +1729,7 @@ fn main() -> Result<()> {
         ),
         socket: socket.clone(),
         idle_seconds: args.idle_seconds,
+        shutting_down: false,
     }));
     let listener = UnixListener::bind(&socket)?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
@@ -1842,7 +1879,11 @@ fn main() -> Result<()> {
             connections.fetch_sub(1, Ordering::SeqCst);
         });
     }
-    state.lock().unwrap().events.close();
+    {
+        let mut daemon = state.lock().unwrap();
+        daemon.shutting_down = true;
+        daemon.events.close();
+    }
     let sessions: Vec<_> = {
         let daemon = state.lock().unwrap();
         daemon
@@ -1855,7 +1896,7 @@ fn main() -> Result<()> {
     for session in &sessions {
         let _ = session.stop();
     }
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
     while sessions.iter().any(|s| !s.terminated()) && std::time::Instant::now() < deadline {
         thread::sleep(Duration::from_millis(20));
     }

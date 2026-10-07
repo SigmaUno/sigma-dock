@@ -152,7 +152,7 @@ impl Read for RemoteReader {
 }
 fn full_capacity_message(max_workers: usize) -> String {
     format!(
-        "All {max_workers} berths in this project are in use. Wait for one of its sessions to finish or stop a worker before creating this task. Automatic queuing is not available yet."
+        "This project is already running {max_workers} agents, its limit. Stop one, or raise the limit in Settings → Agents, before creating this task. Automatic queuing is not available yet."
     )
 }
 
@@ -200,6 +200,8 @@ struct Workspace {
     active_field: usize,
     agent: String,
     form_focus: gpui::FocusHandle,
+    /// The Inbox message box for the default agent.
+    composer_focus: gpui::FocusHandle,
     busy: bool,
     repo_picker_open: bool,
     details: String,
@@ -375,6 +377,7 @@ impl Workspace {
             active_field: 0,
             agent: "claude".into(),
             form_focus: cx.focus_handle(),
+            composer_focus: cx.focus_handle(),
             busy: false,
             repo_picker_open: false,
             details: String::new(),
@@ -831,15 +834,7 @@ impl Workspace {
             content = content.child(self.checks_panel(cx));
         }
         content
-            .child(self.needs_strip(cx))
-            .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .gap_6()
-                    .child(div().flex_1().min_w(px(0.)).child(self.grid(cx)))
-                    .child(self.side_panel(cx)),
-            )
+            .child(self.agent_list(cx))
             .child(self.footer())
             .into_any_element()
     }
@@ -894,6 +889,7 @@ fn main() -> Result<()> {
     };
     let app = Application::new().with_assets(icons::Assets);
     app.run(move |cx: &mut App| {
+        sigmadock_terminal::register_fonts(cx);
         let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
         cx.open_window(
             WindowOptions {

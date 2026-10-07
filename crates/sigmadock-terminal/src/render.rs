@@ -222,7 +222,7 @@ impl TerminalRenderer {
         let cell_height = font_size * 1.4; // Line height with some spacing
 
         Self {
-            font_family,
+            font_family: crate::fonts::family(&font_family).into(),
             font_size,
             cell_width,
             cell_height,

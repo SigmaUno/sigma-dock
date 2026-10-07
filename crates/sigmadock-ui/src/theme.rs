@@ -23,7 +23,7 @@ pub struct Theme {
     pub surface: u32,
     /// Agent badge background.
     pub chip: u32,
-    /// "Needs you: input" status; blockers use `error`.
+    /// User attention uses the same red as blockers.
     pub attention: u32,
     /// "In review" status.
     pub review: u32,
@@ -51,7 +51,7 @@ impl Theme {
             link: 0x1a64d6,
             surface: 0xffffff,
             chip: 0xeceef1,
-            attention: 0xc75f00,
+            attention: 0xcf222e,
             review: 0x7c5cd6,
             empty: 0xc2c7cf,
             ansi: [
@@ -79,7 +79,7 @@ impl Theme {
             link: 0x89b4fa,
             surface: 0x181825,
             chip: 0x313244,
-            attention: 0xfab387,
+            attention: 0xf38ba8,
             review: 0xcba6f7,
             empty: 0x585b70,
             ansi: [
@@ -168,6 +168,17 @@ mod tests {
             for status_color in [theme.link, theme.attention, theme.review, theme.success] {
                 assert!(contrast(status_color, theme.surface) >= 3.0);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod attention_tests {
+    use super::*;
+    #[test]
+    fn waiting_is_red_in_both_themes() {
+        for theme in [Theme::light(), Theme::mocha()] {
+            assert_eq!(theme.attention, theme.error);
         }
     }
 }

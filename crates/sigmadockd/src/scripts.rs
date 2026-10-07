@@ -227,6 +227,9 @@ impl Daemon {
         }
     }
     pub(crate) fn request_archive(&mut self, params: &Value) -> Result<Value> {
+        if self.shutting_down {
+            bail!("daemon is shutting down");
+        }
         let mut worker = self.worker(params)?.clone();
         if worker.archived {
             return Ok(json!(true));
@@ -328,7 +331,26 @@ impl Daemon {
         self.sessions.remove(&worker.id);
         // Retain bounded hook output until daemon restart so CLI/UI can inspect archive.
         self.forges.remove(&worker.id);
+        let id = worker.id.clone();
         self.save_scripts_worker(worker)?;
+        self.script_sessions
+            .retain(|(worker, name), _| worker != &id || name == "archive");
+        let mut archived: Vec<_> = self
+            .workers
+            .values()
+            .filter(|worker| worker.archived)
+            .collect();
+        archived.sort_by_key(|worker| {
+            std::cmp::Reverse((worker.archived_at, worker.created_at, &worker.id))
+        });
+        let retained: std::collections::HashSet<_> = archived
+            .into_iter()
+            .take(32)
+            .map(|worker| worker.id.clone())
+            .collect();
+        self.script_sessions.retain(|(id, _), _| {
+            self.workers.get(id).is_some_and(|worker| !worker.archived) || retained.contains(id)
+        });
         Ok(json!(true))
     }
     pub(crate) fn scripts_sync(&mut self) -> Result<()> {

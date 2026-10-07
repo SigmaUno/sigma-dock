@@ -36,7 +36,7 @@ cargo run -p sigmadock-ui
 
 Build/install binaries with `cargo install --path crates/sigmadock-cli`, `cargo install --path crates/sigmadockd`, and `cargo install --path crates/sigmadock-ui`. Binaries are `sdk`, `sigmadockd`, and `sigma-dock`. Start the daemon separately before the UI. Use `--agent shell` to test without an agent subscription. Adapters also exist for `codex`, `gemini`, `opencode`, and `aider`; their current flags must be tested against your installed versions.
 
-Each worker gets a unique `sigma/UUID` branch, a worktree outside the source checkout, a PTY, and `PORT` and `SIGMA_DOCK_WORKER_ID` environment variables. Each project has its own berths: at most six worker sessions per project run concurrently by default (`sigmadockd --max-workers N`, also accepted as `--berths-per-project`). Orchestrators have a separate allowance of one per project. `sdk capacity` shows global and project counts; `sdk max-workers N` changes and persists the per-project limit. Ports 4200–4999 are assigned uniquely among active workers and checked for availability; they are best-effort leases, not OS reservations.
+Each worker gets a unique `sigma/UUID` branch, a worktree outside the source checkout, a PTY, and `PORT` and `SIGMA_DOCK_WORKER_ID` environment variables. Each project has its own berths: at most ten worker sessions per project run concurrently by default (`sigmadockd --max-workers N`, also accepted as `--berths-per-project`). Orchestrators have a separate allowance of one per project. `sdk capacity` shows global and project counts; `sdk max-workers N` changes and persists the per-project limit. Ports 4200–4999 are assigned uniquely among active workers and checked for availability; they are best-effort leases, not OS reservations.
 
 `SIGMA_DOCK_STATE_DIR` overrides local state. Defaults: `~/Library/Application Support/SigmaDock` on macOS, `$XDG_STATE_HOME/sigma-dock` or `~/.local/state/sigma-dock` on Linux. `SIGMA_DOCK_SOCKET` overrides the socket for all binaries. Keep the daemon socket and database on a local filesystem. The state directory is mode 0700 and the socket and database are mode 0600.
 
@@ -116,26 +116,26 @@ GitHub feedback includes check output and annotations. Full GitHub job logs requ
 
 Automatic feedback is off by default and waits for an idle coding worker with failed CI. The daemon records an attempt before writing to the PTY to prevent duplicate delivery after partial writes or restarts; delivery errors remain visible in worker status. Idle is a heuristic. Forge content is untrusted task data and the harness retains its own permission controls. Conflict instructions do not run git or push changes automatically.
 
-The native window shows **berths**: each project has its own slots for live sessions, up to the daemon's `--max-workers` limit. A berth shows the task, harness, branch, port, a low-rate terminal preview and one contextual action (**Reply**, **Send CI to agent** or **Open PR**); click it for the full terminal. Selecting a project shows only its berths, with free slots to dock a task; **All berths** lists every live berth, labelled by project, without free slots. A needs-you strip lists blocked workers, and a side panel lists moored workers (session ended, not archived) and today's departures. Capacity is per project: a full project does not limit the others.
+The native window shows a list of **agents**, for all projects or the one selected in the sidebar, grouped into **Needs you**, **Running** and **Stopped**, with today's archived agents last. Each row shows the task, project, harness, branch, status, the latest line of terminal output, **Checks** and one contextual action (**Reply**, **Send CI** or **Open PR**); click a row to open the agent. Each project runs at most its agent limit at once (ten by default, set in **Settings → Agents** or with `sdk max-workers N`); a full project does not limit the others.
 
-The sidebar lists each project with its agents underneath, plus an **Inbox**. Opening an agent splits the window into the sidebar, the agent's terminal session and its **Changes**: the unified patch against the merge base of the worker’s recorded base ref and HEAD, with **Committed**, **Uncommitted** (index and working tree), and **Untracked** sections. The file list shows status and added/removed counts. **Viewed** checkboxes persist locally across restarts and reset when a file’s content or diff changes; use Space or Enter when focused. Binary files have a visible note. Patches are limited to 100 file entries, 64 KiB per file and 256 KiB overall, with visible truncation notices; incomplete patches cannot be marked viewed. `sdk diff WORKER_ID` prints the same sections; `--stat` prints their summaries. Changes, files and individual lines open in your own editor (Zed, Cursor, VS Code, Sublime Text, Xcode, the default app or a custom command, chosen in Settings); SigmaDock has no built-in editor. The Inbox pairs a chat with your default agent, the project orchestrator started with a briefing of the inbox, with the agents that need you and, for repositories with a configured forge token, open issues assigned to you and pull requests requesting your review.
+The sidebar lists each project with its agents underneath, plus an **Inbox**. Opening an agent splits the window into the sidebar, the agent's terminal session and its **Changes**: the unified patch against the merge base of the worker’s recorded base ref and HEAD, with **Committed**, **Uncommitted** (index and working tree), and **Untracked** sections. The file list shows status and added/removed counts. **Viewed** checkboxes persist locally across restarts and reset when a file’s content or diff changes; use Space or Enter when focused. Binary files have a visible note. Patches are limited to 100 file entries, 64 KiB per file and 256 KiB overall, with visible truncation notices; incomplete patches cannot be marked viewed. `sdk diff WORKER_ID` prints the same sections; `--stat` prints their summaries. Changes, files and individual lines open in your own editor (Zed, Cursor, VS Code, Sublime Text, Xcode, the default app or a custom command, chosen in Settings); SigmaDock has no built-in editor. The Inbox pairs a chat with your default agent with the agents that need you and, for repositories with a configured forge token, open issues assigned to you and pull requests requesting your review. Choose the default agent's harness (Claude Code or Codex) and project in **Settings → Default agent**. Its message box starts that project's orchestrator with a briefing of the inbox and your first message, resumes it if it has stopped, or messages it while it runs; the orchestrator holds no berth.
 
 Keyboard navigation on macOS:
 
 | Shortcut | Action |
 |---|---|
-| Tab / Shift+Tab | Move focus between projects, needs-you items, berths and their actions |
-| Arrow keys on a berth | Move through the three-slot grid, including empty slots |
-| Enter on a berth | Open its terminal; on a free empty berth, open the task form |
-| ⌘Enter on a berth | Run its contextual action (Reply, Send CI to agent, or Open PR) |
-| ⌘[ | Return from the full terminal to the previous berth |
+| Tab / Shift+Tab | Move focus between projects, agents and their actions |
+| ↑ / ↓ on an agent | Move through the agent list |
+| Enter on an agent | Open it |
+| ⌘Enter on an agent | Run its contextual action (Reply, Send CI, or Open PR) |
+| ⌘[ | Return from an open agent to the list |
 | ⌘I | Open the Inbox |
 | ⌘⇧O | Open the agent's worktree in your editor |
-| ⌘1 | Show All berths |
+| ⌘1 | Show all agents |
 | ⌘2–⌘9 | Select the first eight projects in sidebar order |
 | ⌘N / ⌘, | New task / Settings |
 
-Focused controls use the theme's focus ring. Tooltips include berth number, task title, status and shortcuts. In the full terminal, plain Escape, Tab, Enter and arrow keys continue to go to the agent. The task form and settings keep their own input handling.
+Focused controls use the theme's focus ring. Tooltips include the task title, status and shortcuts. In the full terminal, plain Escape, Tab, Enter and arrow keys continue to go to the agent. The task form and settings keep their own input handling.
 
 GPUI 0.2.2 does not expose accessibility labels for these custom controls. Tooltips and visible labels do not establish VoiceOver support; native screen-reader qualification remains pending.
 
@@ -213,7 +213,7 @@ command = "pnpm test --watch"
 
 Hooks execute through `/bin/sh -c` in the selected worker's worktree. Every script receives `SIGMA_DOCK_ROOT_PATH`, `SIGMA_DOCK_WORKTREE_PATH`, `SIGMA_DOCK_WORKER_ID`, `SIGMA_DOCK_BRANCH` and the worker's leased `PORT`. Ignore generated files (such as `.env` and dependency folders) in Git, or remove them in the archive hook before requesting cleanup.
 
-A new worker waits for approval of the exact file contents before executing any repository hook. Open its berth to review the complete config and approve it. Approval is stored per project in SQLite and invalidated when the content hash changes. Skipping setup starts the agent without approving or executing scripts. Setup runs before the agent; failure leaves the worker blocked with output and **Retry setup**, **Skip setup and start agent**, and **Archive** actions. Run/stop actions appear on the berth; each named run has a separate attachable terminal in the worker view.
+A new worker waits for approval of the exact file contents before executing any repository hook. Open its berth to review the complete config and approve it. Approval is stored per project in SQLite and invalidated when the content hash changes. Skipping setup starts the agent without approving or executing scripts. Setup runs before the agent; failure leaves the worker blocked with output and **Retry setup**, **Skip setup and start agent**, and **Archive** actions. Run/stop actions appear in the agent list; each named run has a separate attachable terminal in the worker view.
 
 ```sh
 sdk scripts WORKER_ID                       # review contents, commands, SHA-256 and approval
@@ -231,6 +231,6 @@ sdk archive WORKER_ID --cleanup             # stream archive output, then remove
 sdk archive WORKER_ID --cleanup --force     # continue after hook failure; approval still required
 ```
 
-Archive hooks run before any cleanup. A hook failure blocks archive; `--force` permits continuation after that hook's failure, but still refuses uncommitted files. After an interrupted daemon session, inspect surviving processes before using `--acknowledge-unknown` with `sdk setup`, `sdk resume`, or `sdk archive`. Hooks are never rerun automatically after a restart. Hook terminal output is retained in memory until daemon restart; agent recovery checkpoints remain persisted separately.
+Archive hooks run before any cleanup. A hook failure blocks archive; `--force` permits continuation after that hook's failure, but still refuses uncommitted files. After an interrupted daemon session, inspect surviving processes before using `--acknowledge-unknown` with `sdk setup`, `sdk resume`, or `sdk archive`. Hooks are never rerun automatically after a restart. Archive output for the 32 most recent archived workers is retained in memory until daemon restart; agent recovery checkpoints remain persisted separately.
 
 Stopping sends SIGTERM to the PTY process group, then SIGKILL after two seconds. Descendants still reachable in the process tree at stop time are also signalled, including children that created their own session; independently reparented processes that escaped before stop are outside this guarantee. Nonconcurrent runs wait for this cleanup before the next command starts. A config is limited to 64 KiB and 16 named runs; unknown fields, invalid modes, empty commands and multiple defaults produce errors. Per-user config overrides and port ranges are not supported.

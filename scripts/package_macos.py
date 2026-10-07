@@ -140,6 +140,7 @@ def main():
     shutil.copy2(ROOT / 'packaging/licenses/Lucide.txt', resources / 'Lucide-LICENSE.txt')
     for name in ('NOTICE', 'LICENSE-MIT', 'LICENSE-APACHE'):
         shutil.copy2(ROOT / 'crates/sigmadock-terminal' / name, resources / ('terminal-' + name))
+    shutil.copy2(ROOT / 'crates/sigmadock-terminal/assets/fonts/OFL.txt', resources / 'JetBrainsMono-OFL.txt')
     shutil.copy2(ROOT / 'packaging/macos/INSTALL.txt', resources / 'INSTALL.txt')
     # Sign nested helpers first. Signing the main executable inside an app
     # also discovers the enclosing bundle and requires its helpers to be signed.

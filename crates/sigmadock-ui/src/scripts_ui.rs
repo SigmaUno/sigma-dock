@@ -130,6 +130,8 @@ impl Workspace {
             return div().into_any_element();
         };
         let phase = worker.workspace_scripts.phase;
+        let cleanup = worker.workspace_scripts.cleanup;
+        let archive_requested = worker.workspace_scripts.archive_requested;
         if phase == Phase::Ready
             && worker.workspace_scripts.error.is_none()
             && self
@@ -214,7 +216,11 @@ impl Workspace {
                 self.header_button("scripts-force-archive")
                     .child("Archive despite hook failure")
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.run_action("archive_worker", json!({"worker_id":id,"force":true}), cx)
+                        this.run_action(
+                            "archive_worker",
+                            json!({"worker_id":id,"force":true,"cleanup":cleanup}),
+                            cx,
+                        )
                     })),
             );
         }
@@ -223,17 +229,18 @@ impl Workspace {
         }
         if worker.facts.session == sigmadock_core::SessionState::Lost && phase != Phase::Ready {
             let id = id.clone();
-            actions = actions.child(
-                self.header_button("setup-acknowledge")
-                    .child("I verified the old process stopped · retry")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.run_action(
-                            "setup_worker",
-                            json!({"worker_id":id,"acknowledge_unknown":true}),
+            actions =
+                actions.child(
+                    self.header_button("setup-acknowledge")
+                        .child("I verified the old process stopped · retry")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.run_action(
+                            if archive_requested { "archive_worker" } else { "setup_worker" },
+                            json!({"worker_id":id,"acknowledge_unknown":true,"cleanup":cleanup}),
                             cx,
                         )
-                    })),
-            );
+                        })),
+                );
         }
         if let Some(value) = &self.scripts.value {
             if value["approved"] == false {

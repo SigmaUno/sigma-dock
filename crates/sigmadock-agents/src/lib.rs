@@ -1,6 +1,6 @@
 //! Thin argument adapters. No shell interpolation and no permission bypass flags.
 pub mod usage;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 #[derive(Debug, Clone)]
 pub struct Command {
@@ -289,6 +289,85 @@ mod usage_launch_tests {
             .unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, b"usage-report");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// Install observation-only hooks in the command's session settings, never on disk globally.
+pub fn claude_attention_settings(command: &mut Command, sdk: &std::path::Path) -> Result<()> {
+    if !sdk.is_file() {
+        bail!("install sdk beside the daemon to enable Claude attention reporting");
+    }
+    let path = sdk
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("attention helper path must be UTF-8"))?;
+    let invocation = format!("'{}' attention-report", path.replace("'", "'\\''"));
+    let hook = serde_json::json!({"type":"command", "command":invocation, "timeout":2});
+    let hooks = serde_json::json!({
+        "PreToolUse":[{"matcher":"^(AskUserQuestion|ExitPlanMode)$", "hooks":[hook.clone()]}],
+        "PermissionRequest":[{"hooks":[hook.clone()]}],
+        "PostToolUse":[{"hooks":[hook.clone()]}],
+        "PostToolUseFailure":[{"hooks":[hook.clone()]}],
+        "UserPromptSubmit":[{"hooks":[hook]}]
+    });
+    // Usage reporting already supplied a statusLine: merge rather than pass a second --settings.
+    if let Some(at) = command.args.iter().position(|arg| arg == "--settings") {
+        let mut settings: serde_json::Value =
+            serde_json::from_str(command.args.get(at + 1).context("missing settings value")?)?;
+        settings
+            .as_object_mut()
+            .context("settings must be an object")?
+            .insert("hooks".into(), hooks);
+        command.args[at + 1] = serde_json::to_string(&settings)?;
+    } else {
+        let at = command
+            .args
+            .iter()
+            .position(|arg| arg == "--")
+            .unwrap_or(command.args.len());
+        command.args.splice(
+            at..at,
+            [
+                "--settings".into(),
+                serde_json::json!({"hooks":hooks}).to_string(),
+            ],
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod attention_tests {
+    use super::*;
+    #[test]
+    fn hooks_merge_with_usage_settings_and_never_change_permission_policy() {
+        let root = std::env::temp_dir().join(format!("sigmadock-hook-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let sdk = root.join("sdk ' $(touch nope)");
+        std::fs::write(&sdk, "fixture").unwrap();
+        let mut command = Harness("claude".into())
+            .command(Some("task"), true)
+            .unwrap();
+        claude_usage_settings(&mut command, &sdk).unwrap();
+        claude_attention_settings(&mut command, &sdk).unwrap();
+        assert_eq!(
+            command.args.iter().filter(|s| *s == "--settings").count(),
+            1
+        );
+        assert_eq!(&command.args[command.args.len() - 2..], &["--", "task"]);
+        assert!(command.args.contains(&"--continue".into()));
+        let at = command.args.iter().position(|s| s == "--settings").unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&command.args[at + 1]).unwrap();
+        assert!(settings.get("statusLine").is_some());
+        assert!(settings.get("permissions").is_none());
+        let hook = &settings["hooks"]["PermissionRequest"][0]["hooks"][0];
+        assert_eq!(hook["timeout"], 2);
+        assert!(hook["command"].as_str().unwrap().contains("'\\''"));
+        assert_eq!(
+            settings["hooks"]["PreToolUse"][0]["matcher"],
+            "^(AskUserQuestion|ExitPlanMode)$"
+        );
+        assert_eq!(settings["hooks"].as_object().unwrap().len(), 5);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

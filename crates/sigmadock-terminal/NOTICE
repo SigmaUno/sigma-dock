@@ -2,3 +2,8 @@ Derived from gpui-terminal 0.1.0 by Leonard Seibold
 https://github.com/zortax/gpui-terminal
 Licensed MIT OR Apache-2.0; original license texts are included.
 SigmaDock changes: configurable cursor rendering and blink lifecycle.
+
+Bundled terminal fonts: JetBrains Mono, JetBrains, SIL Open Font License 1.1.
+Source: https://github.com/JetBrains/JetBrainsMono
+Pinned source commit: 19371302b95d218af43299bce79ddbddd0bc364d
+Unmodified Regular, Bold, Italic and BoldItalic TTFs; license included at assets/fonts/OFL.txt.

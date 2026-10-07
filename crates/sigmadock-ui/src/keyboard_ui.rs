@@ -19,16 +19,11 @@ pub(crate) fn tooltip(text: String, cx: &mut gpui::App) -> gpui::AnyView {
     cx.new(|_| ShortcutTooltip(text)).into()
 }
 
-// Three visual slots per row. Horizontal movement never crosses a row boundary.
+/// Up and down move through the agent list without wrapping.
 fn adjacent(index: usize, count: usize, key: &str) -> Option<usize> {
-    if index >= count {
-        return None;
-    }
     match key {
-        "left" if !index.is_multiple_of(3) => Some(index - 1),
-        "right" if index % 3 != 2 && index + 1 < count => Some(index + 1),
-        "up" if index >= 3 => Some(index - 3),
-        "down" if index + 3 < count => Some(index + 3),
+        "up" if index > 0 && index < count => Some(index - 1),
+        "down" if index + 1 < count => Some(index + 1),
         _ => None,
     }
 }
@@ -94,16 +89,11 @@ fn workspace_shortcut(
 
 impl Workspace {
     pub(crate) fn prepare_berth_focus(&mut self, cx: &mut Context<Self>) {
-        // One handle per grid slot, keyed exactly as the grid renders it.
+        // One handle per agent row, keyed exactly as the list renders it.
         let keys: Vec<_> = self
-            .slots(self.selected_project.as_deref())
+            .listed()
             .into_iter()
-            .map(|(number, worker)| {
-                worker.map_or_else(
-                    || format!("empty-berth-{number}"),
-                    |worker| format!("berth-{}", worker.id),
-                )
-            })
+            .map(|(_, worker)| format!("berth-{}", worker.id))
             .collect();
         self.berth_focus.retain(|key, _| keys.contains(key));
         for key in keys {
@@ -115,17 +105,16 @@ impl Workspace {
 
     fn focus_slot(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let id = self
-            .slots(self.selected_project.as_deref())
+            .listed()
             .get(index)
-            .and_then(|(_, worker)| worker.map(|worker| worker.id.clone()));
-        let key = id.as_ref().map_or_else(
-            || format!("empty-berth-{}", index + 1),
-            |id| format!("berth-{id}"),
-        );
-        self.focused_berth = id;
-        if let Some(handle) = self.berth_focus.get(&key) {
+            .map(|(_, worker)| worker.id.clone());
+        if let Some(handle) = id
+            .as_ref()
+            .and_then(|id| self.berth_focus.get(&format!("berth-{id}")))
+        {
             handle.focus(window);
         }
+        self.focused_berth = id;
         cx.notify();
     }
 
@@ -170,9 +159,9 @@ impl Workspace {
         let key = &event.keystroke;
         if key.key == "enter" {
             let worker = self
-                .slots(self.selected_project.as_deref())
+                .listed()
                 .get(index)
-                .and_then(|(_, worker)| worker.cloned());
+                .map(|(_, worker)| (*worker).clone());
             if let Some(worker) = worker {
                 if key.modifiers.platform {
                     if let Some(action) = berths_ui::status(&worker).action {
@@ -181,21 +170,14 @@ impl Workspace {
                 } else {
                     self.open_worker(worker.id, window, cx);
                 }
-            } else if self
-                .selected_project
-                .as_deref()
-                .is_some_and(|id| !self.project_full(id))
-                && !self.form_open
-            {
-                self.open_new_task(window, cx);
             }
             cx.stop_propagation();
         } else if !key.modifiers.platform
             && !key.modifiers.control
             && !key.modifiers.alt
-            && matches!(key.key.as_str(), "left" | "right" | "up" | "down")
+            && matches!(key.key.as_str(), "up" | "down")
         {
-            let count = self.slots(self.selected_project.as_deref()).len();
+            let count = self.listed().len();
             if let Some(next) = adjacent(index, count, &key.key) {
                 self.focus_slot(next, window, cx);
             }
@@ -412,15 +394,12 @@ mod tests {
         assert_eq!(workspace_shortcut(&key, false, false, false, true), None);
     }
     #[test]
-    fn grid_navigation_respects_rows_and_partial_last_row() {
-        assert_eq!(adjacent(0, 5, "left"), None);
-        assert_eq!(adjacent(2, 5, "right"), None);
-        assert_eq!(adjacent(3, 5, "left"), None);
-        assert_eq!(adjacent(0, 5, "right"), Some(1));
-        assert_eq!(adjacent(1, 5, "down"), Some(4));
-        assert_eq!(adjacent(4, 5, "up"), Some(1));
-        assert_eq!(adjacent(2, 5, "down"), None);
-        assert_eq!(adjacent(4, 5, "right"), None);
+    fn list_navigation_moves_one_row_without_wrapping() {
+        assert_eq!(adjacent(0, 5, "up"), None);
+        assert_eq!(adjacent(0, 5, "down"), Some(1));
+        assert_eq!(adjacent(3, 5, "up"), Some(2));
+        assert_eq!(adjacent(4, 5, "down"), None);
+        assert_eq!(adjacent(1, 5, "left"), None);
         assert_eq!(adjacent(0, 0, "down"), None);
         assert_eq!(adjacent(5, 5, "up"), None);
     }

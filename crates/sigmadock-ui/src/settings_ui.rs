@@ -17,16 +17,27 @@ const FIELDS: [&str; 4] = ["API URL", "Owner", "Repository", "Token variable"];
 pub(crate) enum Section {
     #[default]
     Forges,
+    DefaultAgent,
+    Agents,
     Editor,
     Appearance,
     Updates,
 }
 
 impl Section {
-    const ALL: [Self; 4] = [Self::Forges, Self::Editor, Self::Appearance, Self::Updates];
+    const ALL: [Self; 6] = [
+        Self::Forges,
+        Self::DefaultAgent,
+        Self::Agents,
+        Self::Editor,
+        Self::Appearance,
+        Self::Updates,
+    ];
     fn label(self) -> &'static str {
         match self {
             Self::Forges => "Forges",
+            Self::DefaultAgent => "Default agent",
+            Self::Agents => "Agents",
             Self::Editor => "Editor",
             Self::Appearance => "Terminal appearance",
             Self::Updates => "Updates",
@@ -37,6 +48,14 @@ impl Section {
             Self::Forges => {
                 "Connect each project to GitHub or Forgejo for pull request status, CI, review \
                  feedback and the Inbox. Every agent in the project uses it, including new ones."
+            }
+            Self::DefaultAgent => {
+                "The Inbox talks to this agent. It runs as the chosen project's orchestrator, \
+                 reads your inbox and can start agents when you ask."
+            }
+            Self::Agents => {
+                "How many agents each project may run at once. Others wait in the queue; \
+                 running agents are never stopped when you lower it."
             }
             Self::Editor => "Open-in-editor actions use this. SigmaDock has no built-in editor.",
             Self::Appearance => "Changes apply live. Click a value; ⌘A replaces it.",
@@ -539,6 +558,192 @@ impl Workspace {
         list.into_any_element()
     }
 
+    /// Harness and project for the Inbox's default agent, saved with the preferences.
+    fn default_agent_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = self.theme;
+        let current = &self.preferences.default_agent;
+        let choice = |id: String, label: String, on: bool| {
+            div()
+                .id(SharedString::from(id))
+                .p_2()
+                .rounded_md()
+                .cursor_pointer()
+                .text_sm()
+                .bg(rgb(if on { theme.accent } else { theme.button }))
+                .when(on, |button| button.text_color(rgb(theme.base)))
+                .child(label)
+        };
+        let mut harnesses = div().flex().flex_wrap().gap_2();
+        for name in crate::preferences::DEFAULT_AGENTS {
+            harnesses = harnesses.child(
+                choice(
+                    format!("default-agent-{name}"),
+                    crate::berths_ui::agent_label(name).to_owned(),
+                    current.harness() == name,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.preferences.default_agent.agent = name.into();
+                    this.save_preferences(cx);
+                })),
+            );
+        }
+        let chosen = self.inbox_project().map(|project| project.id.clone());
+        let mut projects = div().flex().flex_wrap().gap_2();
+        for project in &self.projects {
+            let id = project.id.clone();
+            projects = projects.child(
+                choice(
+                    format!("default-agent-project-{id}"),
+                    project.name.clone(),
+                    chosen.as_ref() == Some(&project.id),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.preferences.default_agent.project = Some(id.clone());
+                    this.save_preferences(cx);
+                })),
+            );
+        }
+        if self.projects.is_empty() {
+            projects = projects.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(theme.muted))
+                    .child("Add a repository from the sidebar first."),
+            );
+        }
+        let label = |text: &'static str| {
+            div()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(theme.muted))
+                .child(text)
+        };
+        let mut section = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(label("Agent"))
+            .child(harnesses)
+            .child(div().h(px(8.)))
+            .child(label("Works in"))
+            .child(projects);
+        if let Some(agent) = self.default_agent()
+            && agent.agent != current.harness()
+        {
+            section = section.child(div().mt_2().text_xs().text_color(rgb(theme.warning)).child(
+                format!(
+                    "This project already has a {} orchestrator, and the Inbox keeps using it. \
+                         Archive it to start {} instead.",
+                    crate::berths_ui::agent_label(&agent.agent),
+                    crate::berths_ui::agent_label(current.harness()),
+                ),
+            ));
+        }
+        section.into_any_element()
+    }
+
+    pub(crate) fn save_preferences(&mut self, cx: &mut Context<Self>) {
+        self.settings_error = self
+            .preferences
+            .save(&self.preferences_path)
+            .err()
+            .map(|error| error.to_string());
+        cx.notify();
+    }
+
+    /// Persists a new per-project limit through the daemon (`set_max_workers`).
+    fn set_agent_limit(&mut self, limit: usize, cx: &mut Context<Self>) {
+        let limit = limit.clamp(1, 255);
+        let client = self.client.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { client.call("set_max_workers", json!({"max_workers": limit})) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(_) => {
+                        this.capacity.max_workers = limit;
+                        this.settings_error = None;
+                    }
+                    Err(error) => this.settings_error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn agents_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = self.theme;
+        let limit = self.capacity.max_workers;
+        let mut stepper = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(div().w(px(160.)).text_sm().child("Agents per project"));
+        let down = limit.saturating_sub(1).max(1);
+        stepper = stepper
+            .child(
+                self.button("agent-limit-down", "−", false)
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_agent_limit(down, cx))),
+            )
+            .child(
+                div()
+                    .w(px(48.))
+                    .text_center()
+                    .text_lg()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(limit.to_string()),
+            )
+            .child(
+                self.button("agent-limit-up", "+", false).on_click(
+                    cx.listener(move |this, _, _, cx| this.set_agent_limit(limit + 1, cx)),
+                ),
+            );
+        let mut presets = div().flex().gap_2().child(div().w(px(160.)));
+        for preset in [3, 6, 10, 15] {
+            presets = presets.child(
+                self.choice(
+                    SharedString::from(format!("agent-limit-{preset}")),
+                    &preset.to_string(),
+                    limit == preset,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.set_agent_limit(preset, cx))),
+            );
+        }
+        let mut usage = div().flex().flex_col().gap_1().pt_2();
+        for project in &self.projects {
+            usage = usage.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .text_sm()
+                    .child(div().w(px(160.)).truncate().child(project.name.clone()))
+                    .child(self.capacity_bar(&project.id).w(px(200.)))
+                    .child(div().text_xs().text_color(rgb(theme.muted)).child(format!(
+                        "{} of {limit} running",
+                        self.berths(Some(&project.id)).len()
+                    ))),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(stepper)
+            .child(presets)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme.muted))
+                    .child("Saved by the daemon. A daemon started with --max-workers uses that value until it restarts."),
+            )
+            .child(usage)
+            .into_any_element()
+    }
+
     pub(crate) fn settings_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.theme;
         let section = self.settings_section;
@@ -603,6 +808,8 @@ impl Workspace {
         );
         let body = match section {
             Section::Forges => self.forges_section(cx),
+            Section::DefaultAgent => self.default_agent_section(cx),
+            Section::Agents => self.agents_section(cx),
             Section::Editor => self.editor_settings(cx),
             Section::Appearance => self.appearance_section(cx),
             Section::Updates => self.update_controls(cx),

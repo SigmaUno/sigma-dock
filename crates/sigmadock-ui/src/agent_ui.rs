@@ -207,7 +207,7 @@ impl Workspace {
                     .cursor_pointer()
                     .hover(|style| style.bg(rgb(theme.panel)))
                     .child(icon(Icon::ArrowLeft, px(16.), rgb(theme.muted)))
-                    .tooltip(|_, cx| crate::keyboard_ui::tooltip("Back to berths".into(), cx))
+                    .tooltip(|_, cx| crate::keyboard_ui::tooltip("Back to agents · ⌘[".into(), cx))
                     .on_click(cx.listener(|this, _, window, cx| this.close_terminal(window, cx))),
             )
             .child(app_icon(px(22.)));

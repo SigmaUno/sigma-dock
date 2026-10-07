@@ -41,10 +41,10 @@ pub(crate) struct InboxState {
     /// Default agent session shown in the middle pane, by worker id.
     pub chat: Option<(String, Entity<TerminalView>)>,
     connection: Arc<AtomicBool>,
+    /// A message is being sent, which may first start or resume the agent.
     pub starting: bool,
-    /// Project and harness used when starting the default agent.
-    pub project: Option<String>,
-    pub agent: Option<&'static str>,
+    /// Unsent text in the message box.
+    pub draft: String,
 }
 
 impl InboxState {
@@ -64,16 +64,30 @@ impl InboxState {
 }
 
 impl Workspace {
-    /// The orchestrator acting as the default agent: a live one first, else the newest.
-    fn default_agent(&self) -> Option<&Worker> {
-        self.workers
+    /// The project the default agent works in: the configured one, else the first.
+    pub(crate) fn inbox_project(&self) -> Option<&sigmadock_core::Project> {
+        let configured = self.preferences.default_agent.project.as_deref();
+        self.projects
             .iter()
-            .filter(|worker| worker.role == WorkerRole::Orchestrator)
-            .max_by_key(|worker| (self.capacity.live.contains(&worker.id), worker.created_at))
+            .find(|project| Some(project.id.as_str()) == configured)
+            .or_else(|| self.projects.first())
     }
 
+    /// The configured project's orchestrator acting as the default agent: a live one
+    /// first, else the newest. A project has at most one unarchived orchestrator.
+    pub(crate) fn default_agent(&self) -> Option<&Worker> {
+        let project = self.inbox_project()?;
+        self.workers
+            .iter()
+            .filter(|worker| {
+                worker.role == WorkerRole::Orchestrator && worker.project_id == project.id
+            })
+            .max_by_key(|worker| (self.agent_running(worker), worker.created_at))
+    }
+
+    /// Orchestrators hold no berth, so `capacity.live` never lists them.
     fn agent_running(&self, worker: &Worker) -> bool {
-        self.capacity.live.contains(&worker.id)
+        !worker.archived
             && !matches!(
                 worker.facts.session,
                 SessionState::Exited | SessionState::Lost
@@ -110,8 +124,9 @@ impl Workspace {
 
     fn attach_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ensure_chat(cx);
-        if let Some((_, terminal)) = &self.inbox.chat {
-            terminal.read(cx).focus_handle().focus(window);
+        match &self.inbox.chat {
+            Some((_, terminal)) => terminal.read(cx).focus_handle().focus(window),
+            None => self.composer_focus.focus(window),
         }
     }
 
@@ -194,59 +209,81 @@ impl Workspace {
         text
     }
 
-    fn start_default_agent(&mut self, cx: &mut Context<Self>) {
-        let Some(project) = self
-            .inbox
-            .project
-            .clone()
-            .or_else(|| self.projects.first().map(|project| project.id.clone()))
-        else {
+    /// Sends the message box to the default agent, starting or resuming it first if needed.
+    fn send_to_agent(&mut self, cx: &mut Context<Self>) {
+        let message = self.inbox.draft.trim().to_owned();
+        if message.is_empty() || self.inbox.starting {
+            return;
+        }
+        let Some(project) = self.inbox_project().map(|project| project.id.clone()) else {
             self.inbox.error =
                 Some("Add a repository first; the default agent works inside one.".into());
             cx.notify();
             return;
         };
-        if self.inbox.starting {
-            return;
-        }
+        let existing = self.default_agent().map(|worker| {
+            (
+                worker.id.clone(),
+                worker.agent.clone(),
+                self.agent_running(worker),
+            )
+        });
+        let briefing = self.briefing();
+        let harness = self.preferences.default_agent.harness();
         self.inbox.starting = true;
+        self.inbox.error = None;
         let client = self.client.clone();
-        let agent = self.inbox.agent.unwrap_or("claude");
-        let resume = self.default_agent().map(|worker| worker.id.clone());
-        let params = match &resume {
-            Some(id) => json!({"worker_id": id, "continue": true, "acknowledge_unknown": true}),
-            None => json!({
-                "project_id": project,
-                "agent": agent,
-                "prompt": self.briefing(),
-                "allow_spawn": true,
-            }),
-        };
-        let method = if resume.is_some() {
-            "resume_worker"
-        } else {
-            "start_orchestrator"
-        };
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let value = client.call(method, params)?;
-                    let capacity = client.call("capacity", json!({}))?;
-                    Ok::<_, anyhow::Error>((
-                        serde_json::from_value::<Worker>(value)?,
-                        serde_json::from_value::<sigmadock_core::Capacity>(capacity)?,
-                    ))
+                    let worker = match existing {
+                        Some((id, _, true)) => {
+                            client.call(
+                                "message_worker",
+                                json!({"worker_id": id, "message": message}),
+                            )?;
+                            None
+                        }
+                        // Codex cannot continue with a prompt, so it gets the message after resuming.
+                        Some((id, agent, false)) => {
+                            let prompt = (agent == "claude").then_some(message.as_str());
+                            let value = client.call(
+                                "resume_worker",
+                                json!({"worker_id": id, "continue": true, "acknowledge_unknown": true, "prompt": prompt}),
+                            )?;
+                            if prompt.is_none() {
+                                client.call(
+                                    "message_worker",
+                                    json!({"worker_id": id, "message": message}),
+                                )?;
+                            }
+                            Some(value)
+                        }
+                        None => Some(client.call(
+                            "start_orchestrator",
+                            json!({
+                                "project_id": project,
+                                "agent": harness,
+                                "prompt": format!("{briefing}\nThe user asks:\n{message}"),
+                                "allow_spawn": true,
+                            }),
+                        )?),
+                    };
+                    worker
+                        .map(|value| Ok::<_, anyhow::Error>(serde_json::from_value::<Worker>(value)?))
+                        .transpose()
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.inbox.starting = false;
                 match result {
-                    Ok((worker, capacity)) => {
-                        this.workers.retain(|known| known.id != worker.id);
-                        this.workers.push(worker);
-                        this.capacity = capacity;
-                        this.inbox.error = None;
+                    Ok(worker) => {
+                        this.inbox.draft.clear();
+                        if let Some(worker) = worker {
+                            this.workers.retain(|known| known.id != worker.id);
+                            this.workers.push(worker);
+                        }
                         if this.view == View::Inbox {
                             this.ensure_chat(cx);
                         }
@@ -257,6 +294,39 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    fn composer_key(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        let key = &event.keystroke;
+        let modifiers = key.modifiers;
+        if key.key == "enter" && !modifiers.shift {
+            self.send_to_agent(cx);
+        } else if key.key == "enter" {
+            self.inbox.draft.push('\n');
+        } else if key.key == "backspace" {
+            self.inbox.draft.pop();
+        } else if key.key == "v" && (modifiers.platform || modifiers.control) {
+            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                self.inbox.draft.push_str(&text);
+            }
+        } else if let Some(text) = &key.key_char
+            && !modifiers.control
+            && !modifiers.platform
+        {
+            self.inbox.draft.push_str(text);
+        } else {
+            return;
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn open_agent_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_section = crate::settings_ui::Section::DefaultAgent;
+        if !self.settings_open {
+            self.toggle_settings(window, cx);
+        }
+        cx.notify();
     }
 
     fn chip(&self, id: SharedString, label: String, on: bool) -> gpui::Stateful<gpui::Div> {
@@ -286,6 +356,12 @@ impl Workspace {
     fn chat_pane(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.theme;
         let agent = self.default_agent();
+        let project = self.inbox_project();
+        // An existing orchestrator keeps its harness; otherwise the configured one starts.
+        let harness = agent.map_or_else(
+            || self.preferences.default_agent.harness().to_owned(),
+            |worker| worker.agent.clone(),
+        );
         let header = div()
             .h(px(56.))
             .flex_none()
@@ -310,144 +386,186 @@ impl Workspace {
                     .bg(rgb(theme.chip))
                     .text_xs()
                     .text_color(rgb(theme.muted))
-                    .child(match agent {
-                        Some(worker) => format!("Default agent · {}", agent_label(&worker.agent)),
-                        None => "No default agent yet".into(),
-                    }),
+                    .child(format!("Default agent · {}", agent_label(&harness))),
             );
-        let mut pane = div()
+        let pane = div()
             .flex_1()
             .min_w(px(0.))
             .h_full()
             .flex()
             .flex_col()
             .child(header);
-        if let Some((_, terminal)) = &self.inbox.chat {
-            return pane
-                .child(div().flex_1().min_h(px(200.)).p_2().child(terminal.clone()))
-                .into_any_element();
-        }
-        let resume = agent.is_some();
-        let mut setup = div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap_3()
-            .max_w(px(520.))
-            .child(app_icon(px(56.)))
-            .child(
-                div()
-                    .text_xl()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Ask your default agent"),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_center()
-                    .text_color(rgb(theme.muted))
-                    .child(
-                        "It reads your inbox and agents, so you can ask what needs doing today \
-                         and have it start agents for you. It runs as the project orchestrator \
-                         and holds one berth.",
-                    ),
-            );
-        if !resume {
-            let chosen = self
-                .inbox
-                .project
-                .clone()
-                .or_else(|| self.projects.first().map(|project| project.id.clone()));
-            let mut projects = div().flex().flex_wrap().justify_center().gap_2();
-            for project in &self.projects {
-                let id = project.id.clone();
-                projects = projects.child(
-                    self.chip(
-                        SharedString::from(format!("inbox-project-{id}")),
-                        project.name.clone(),
-                        chosen.as_ref() == Some(&project.id),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.inbox.project = Some(id.clone());
-                        cx.notify();
-                    })),
-                );
-            }
-            let mut agents = div().flex().gap_2();
-            for name in ["claude", "codex"] {
-                agents = agents.child(
-                    self.chip(
-                        SharedString::from(format!("inbox-agent-{name}")),
-                        agent_label(name).into(),
-                        self.inbox.agent.unwrap_or("claude") == name,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.inbox.agent = Some(name);
-                        cx.notify();
-                    })),
-                );
-            }
-            setup = setup
+        let body = match &self.inbox.chat {
+            Some((_, terminal)) => div()
+                .flex_1()
+                .min_h(px(200.))
+                .p_2()
+                .child(terminal.clone())
+                .into_any_element(),
+            None => div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .p_8()
                 .child(
                     div()
-                        .text_xs()
-                        .text_color(rgb(theme.muted))
-                        .child("Works in"),
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_3()
+                        .max_w(px(520.))
+                        .child(app_icon(px(56.)))
+                        .child(
+                            div()
+                                .text_xl()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(format!("Ask {}", agent_label(&harness))),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_center()
+                                .text_color(rgb(theme.muted))
+                                .child(
+                                    "It reads your inbox and agents, so you can ask what needs \
+                                     doing today and have it start agents for you. It runs as the \
+                                     project orchestrator, which does not count toward the agent limit.",
+                                ),
+                        ),
                 )
-                .child(projects)
-                .child(agents);
-        }
-        let full = self
-            .inbox
-            .project
-            .as_deref()
-            .or_else(|| self.projects.first().map(|project| project.id.as_str()))
-            .is_some_and(|id| self.project_full(id));
-        setup = setup.child(
-            div()
-                .id("start-default-agent")
-                .mt_2()
-                .px_4()
-                .py_2()
-                .rounded_md()
-                .bg(rgb(theme.accent))
-                .text_color(rgb(theme.surface))
-                .font_weight(FontWeight::MEDIUM)
-                .cursor_pointer()
-                .when(full || self.inbox.starting, |button| button.opacity(0.6))
-                .child(match (self.inbox.starting, resume) {
-                    (true, _) => "Starting…",
-                    (false, true) => "Resume default agent",
-                    (false, false) => "Start default agent",
-                })
-                .on_click(cx.listener(|this, _, _, cx| this.start_default_agent(cx))),
-        );
-        if full {
-            setup = setup.child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(theme.warning))
-                    .child("This project's berths are all in use; stop an agent to free one."),
+                .into_any_element(),
+        };
+        pane.child(body)
+            .child(self.composer(&harness, project, cx))
+            .into_any_element()
+    }
+
+    /// Message box for the default agent, as in the Inbox mockup.
+    fn composer(
+        &self,
+        harness: &str,
+        project: Option<&sigmadock_core::Project>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+        let ready = project.is_some() && !self.inbox.starting;
+        let mut suggestions = div().flex().flex_wrap().gap_2();
+        for (index, prompt) in [
+            "What's blocking me?",
+            "Summarise yesterday",
+            "Which PRs can I merge?",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            suggestions = suggestions.child(
+                self.chip(
+                    SharedString::from(format!("inbox-suggestion-{index}")),
+                    prompt.into(),
+                    false,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.inbox.draft = prompt.into();
+                    this.send_to_agent(cx);
+                })),
             );
         }
+        let draft = self.inbox.draft.clone();
+        let text = if draft.is_empty() {
+            div().text_color(rgb(theme.muted)).child(match project {
+                Some(_) => "Ask about your day, issues, or agents…",
+                None => "Add a repository first; the default agent works inside one.",
+            })
+        } else {
+            div().whitespace_normal().child(draft)
+        };
+        let target = format!(
+            "{} · default agent{}",
+            agent_label(harness),
+            project.map_or_else(String::new, |p| format!(" in {}", p.name)),
+        );
+        let mut column = div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .px_6()
+            .pb_4()
+            .pt_2()
+            .child(suggestions)
+            .child(
+                div()
+                    .id("inbox-composer")
+                    .track_focus(&self.composer_focus)
+                    .tab_index(0)
+                    .on_key_down(cx.listener(|this, event, _, cx| this.composer_key(event, cx)))
+                    .on_click(cx.listener(|this, _, window, _| this.composer_focus.focus(window)))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .focus(|style| style.border_color(rgb(theme.focus)))
+                    .bg(rgb(theme.surface))
+                    .cursor_text()
+                    .child(div().min_h(px(22.)).text_sm().child(text))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_xs()
+                            .text_color(rgb(theme.muted))
+                            .child(target)
+                            .child(
+                                div()
+                                    .id("inbox-agent-settings")
+                                    .cursor_pointer()
+                                    .text_color(rgb(theme.link))
+                                    .child("Change")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.open_agent_settings(window, cx);
+                                    })),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .id("inbox-send")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(theme.accent))
+                                    .text_color(rgb(theme.surface))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .when(!ready || self.inbox.draft.trim().is_empty(), |button| {
+                                        button.opacity(0.6)
+                                    })
+                                    .when(ready, |button| button.cursor_pointer())
+                                    .child(if self.inbox.starting {
+                                        "Sending…"
+                                    } else {
+                                        "Send"
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.send_to_agent(cx);
+                                    })),
+                            ),
+                    ),
+            );
         if let Some(error) = &self.inbox.error {
-            setup = setup.child(
+            column = column.child(
                 div()
                     .text_sm()
                     .text_color(rgb(theme.error))
                     .child(error.clone()),
             );
         }
-        pane = pane.child(
-            div()
-                .flex_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .p_8()
-                .child(setup),
-        );
-        pane.into_any_element()
+        column.into_any_element()
     }
 
     fn activity_row(
