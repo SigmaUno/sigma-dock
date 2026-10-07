@@ -25,3 +25,7 @@ Issue #17 adds stable worker berth slots, global/per-project capacity and a pers
 ## Unreleased: daemon event subscriptions
 
 Issue #19 adds an API-2 `subscribe` stream without removing polling RPCs. Native workspace refreshes and terminal output follow events, with bounded subscribers, reconnect/resync and polling fallback. Session generations prevent replay from mixing resumed sessions. The event regression and idle-workload measurement run in the existing tag-triggered CI and crate release workflows.
+
+## Unreleased: app and installer notarization
+
+Production macOS packaging notarizes and staples the app before building the DMG, then separately notarizes and staples the final image. Verification requires tickets on both the image and the app copied from it, exact Developer ID authority and hardened runtime. Separate Apple diagnostics are retained for each submission. Apple credentials and clean-Mac online/offline qualification remain required; see [the issue #7 procedure](MACOS.md#production-qualification-for-issue-7).
