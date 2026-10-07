@@ -142,6 +142,7 @@ pub(crate) fn status(worker: &Worker) -> Status {
 pub(crate) struct Preview {
     screen: TerminalState,
     cursor: u64,
+    generation: u64,
     geometry: (usize, usize),
     pub lines: Vec<String>,
 }
@@ -152,6 +153,7 @@ impl Preview {
         Self {
             screen: TerminalState::new(PREVIEW_COLS, PREVIEW_ROWS, GpuiEventProxy::new(events)),
             cursor: 0,
+            generation: 0,
             geometry: (PREVIEW_COLS, PREVIEW_ROWS),
             lines: Vec::new(),
         }
@@ -292,7 +294,18 @@ impl Workspace {
                     this.capacity
                         .live
                         .iter()
-                        .map(|id| (id.clone(), this.previews.get(id).map_or(0, |p| p.cursor)))
+                        .filter_map(|id| {
+                            let (connected, dirty, signal) = this.events.feed.preview_request(id);
+                            let preview = this.previews.get(id);
+                            if connected && !dirty && preview.is_some() {
+                                return None;
+                            }
+                            let generation = signal.map_or(0, |signal| signal.generation);
+                            let cursor = preview
+                                .filter(|preview| preview.generation == generation)
+                                .map_or(0, |preview| preview.cursor);
+                            Some((id.clone(), generation, cursor))
+                        })
                         .collect::<Vec<_>>()
                 }) else {
                     break;
@@ -301,13 +314,22 @@ impl Workspace {
                     continue;
                 }
                 let client = client.clone();
+                let Ok(feed) = this.update(cx, |this, _| this.events.feed.clone()) else {
+                    break;
+                };
                 let updates = cx
                     .background_executor()
                     .spawn(async move {
                         targets
                             .into_iter()
-                            .filter_map(|(id, cursor)| {
-                                fetch_output(&client, &id, cursor).ok().map(|out| (id, out))
+                            .filter_map(|(id, generation, cursor)| {
+                                match fetch_output(&client, &id, cursor) {
+                                    Ok(out) => Some((id, generation, out)),
+                                    Err(_) => {
+                                        feed.retry_output(id);
+                                        None
+                                    }
+                                }
                             })
                             .collect::<Vec<_>>()
                     })
@@ -315,11 +337,15 @@ impl Workspace {
                 if this
                     .update(cx, |this, cx| {
                         let mut changed = false;
-                        for (id, outputs) in updates {
+                        for (id, generation, outputs) in updates {
                             if !this.capacity.live.contains(&id) {
                                 continue;
                             }
                             let preview = this.previews.entry(id).or_insert_with(Preview::new);
+                            if preview.generation != generation {
+                                *preview = Preview::new();
+                                preview.generation = generation;
+                            }
                             for output in outputs {
                                 changed |= preview.feed(&output);
                             }

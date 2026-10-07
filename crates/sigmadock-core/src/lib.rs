@@ -242,6 +242,48 @@ pub struct QueuedTask {
     pub last_error: Option<String>,
     pub starting: bool,
 }
+/// Output availability metadata; no terminal bytes are sent over the event stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputSignal {
+    pub cursor: u64,
+    pub cols: u16,
+    pub rows: u16,
+    pub exited: bool,
+    pub generation: u64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DaemonEvent {
+    Resync,
+    WorkerChanged {
+        worker_id: String,
+    },
+    ProjectsChanged,
+    CapacityChanged,
+    QueueChanged,
+    OutputAvailable {
+        worker_id: String,
+        signal: OutputSignal,
+    },
+    Heartbeat,
+}
+/// A blocking, bounded-frame stream. A cloned shutdown handle can interrupt a reader.
+pub struct EventSubscription {
+    reader: BufReader<UnixStream>,
+}
+impl EventSubscription {
+    pub fn shutdown_handle(&self) -> Result<UnixStream> {
+        Ok(self.reader.get_ref().try_clone()?)
+    }
+    pub fn next_event(&mut self) -> Result<DaemonEvent> {
+        let frame = read_frame(&mut self.reader)?.context("event subscription closed")?;
+        let value: Value = serde_json::from_slice(&frame)?;
+        if value["jsonrpc"] != "2.0" || value["method"] != "event" {
+            bail!("invalid daemon event");
+        }
+        Ok(serde_json::from_value(value["params"].clone())?)
+    }
+}
 pub fn unix_time() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -342,6 +384,28 @@ impl Default for Client {
     }
 }
 impl Client {
+    pub fn subscribe(&self) -> Result<EventSubscription> {
+        let mut stream = UnixStream::connect(&self.socket)?;
+        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+        writeln!(
+            stream,
+            "{}",
+            json!({"jsonrpc":"2.0","id":1,"method":"subscribe","params":{}})
+        )?;
+        let mut reader = BufReader::new(stream);
+        let frame = read_frame(&mut reader)?.context("daemon closed subscription")?;
+        let reply: Value = serde_json::from_slice(&frame)?;
+        if reply["result"]["version"].as_u64() != Some(u64::from(API_VERSION)) {
+            bail!(
+                "event subscription failed: {}",
+                reply.get("error").unwrap_or(&reply)
+            );
+        }
+        // No read timeout: partial frames must not be discarded on timeout.
+        reader.get_ref().set_read_timeout(None)?;
+        Ok(EventSubscription { reader })
+    }
     pub fn check_version(&self) -> Result<()> {
         let reply = self.call("ping", json!({}))?;
         if reply["version"].as_u64() != Some(u64::from(API_VERSION)) {
