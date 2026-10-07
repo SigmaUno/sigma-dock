@@ -58,5 +58,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if ! gh release view "v$RELEASE_VERSION" >/dev/null 2>&1; then
-            gh release create "v$RELEASE_VERSION" --verify-tag --title "SigmaDock $RELEASE_VERSION" --prerelease --generate-notes
+            gh release create "v$RELEASE_VERSION" --verify-tag --title "SigmaDock $RELEASE_VERSION" --prerelease --generate-notes \
+              --notes "Project website: https://sigmadock.dev. Crate and executable migration: https://github.com/SigmaUno/sigma-dock/blob/v$RELEASE_VERSION/docs/MIGRATION.md"
           fi
