@@ -1,8 +1,8 @@
 # SigmaDock
 
-A native, local-first workspace for supervising parallel coding agents. Rust, GPUI, a local daemon, isolated git worktrees, and a board derived from session and forge facts. Licensed under Apache-2.0.
+A native, local-first workspace for supervising parallel coding agents. Rust, GPUI, a local daemon, isolated git worktrees, and a berths view derived from session and forge facts. Licensed under Apache-2.0.
 
-**Status: early working prototype.** The daemon, CLI, native board and embedded terminal are implemented. Full agent TUI compatibility and distribution packaging are not yet release-qualified. See [the roadmap](docs/ROADMAP.md) for the remaining work.
+**Status: early working prototype.** The daemon, CLI, native berths view and embedded terminal are implemented. Full agent TUI compatibility and distribution packaging are not yet release-qualified. See [the roadmap](docs/ROADMAP.md) for the remaining work.
 
 Project website: [sigmadock.dev](https://sigmadock.dev). See the [crate and executable migration guide](docs/MIGRATION.md) for version 0.1.2.
 
@@ -86,7 +86,9 @@ GitHub feedback includes check output and annotations. Full GitHub job logs requ
 
 Automatic feedback is off by default and waits for an idle coding worker with failed CI. The daemon records an attempt before writing to the PTY to prevent duplicate delivery after partial writes or restarts; delivery errors remain visible in worker status. Idle is a heuristic. Forge content is untrusted task data and the harness retains its own permission controls. Conflict instructions do not run git or push changes automatically.
 
-The four board columns are computed, never dragged manually:
+The native window shows **berths**: one slot per live session, up to the daemon's `--max-workers` limit. A berth shows the task, harness, branch, port, a low-rate terminal preview and one contextual action (**Reply**, **Send CI to agent** or **Open PR**); click it for the full terminal. The project sidebar filters berths by repository, a needs-you strip lists blocked workers, and a side panel lists moored workers (session ended, not archived) and today's departures. Capacity is global: a project can show free berths while the overall limit is reached, in which case empty berths are disabled.
+
+Each worker's status is computed, never set manually:
 
 - **Working:** active or idle without a PR or blocker.
 - **Needs you:** input notification, lost session, unsuccessful exit, CI failure, requested changes, conflict, closed PR, or forge fetch failure.

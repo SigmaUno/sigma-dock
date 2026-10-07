@@ -168,6 +168,7 @@ mod tests {
             role: Default::default(),
             feedback: Default::default(),
             orchestrator_spawn: false,
+            archived_at: None,
             usage_reporting: false,
         };
         store.save_worker(&worker).unwrap();

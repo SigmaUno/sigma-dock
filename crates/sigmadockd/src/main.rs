@@ -223,6 +223,7 @@ impl Daemon {
                 Ok(serde_json::to_value(project)?)
             }
             "list_projects" => Ok(serde_json::to_value(self.store.projects()?)?),
+            "capacity" => Ok(serde_json::to_value(self.capacity())?),
             "list_workers" => {
                 let mut workers: Vec<_> = self
                     .workers
@@ -371,6 +372,7 @@ impl Daemon {
                     usage_reporting: params["usage_reporting"] == true,
                     orchestrator_spawn: method == "start_orchestrator"
                         && params["allow_spawn"] == true,
+                    archived_at: None,
                 };
                 if let Err(error) = sigmadock_git::create(
                     &project.path,
@@ -484,6 +486,7 @@ impl Daemon {
                 self.checkpoints.remove(&worker.id);
                 self.usage.remove(&worker.id);
                 worker.archived = true;
+                worker.archived_at = Some(sigmadock_core::unix_time());
                 self.store.save_worker(&worker)?;
                 self.ports.release(worker.port);
                 self.sessions.remove(&worker.id);
@@ -549,6 +552,19 @@ impl Daemon {
                 Ok(json!(true))
             }
             _ => bail!("unknown method {method}"),
+        }
+    }
+    fn capacity(&self) -> sigmadock_core::Capacity {
+        let mut live: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.facts().0 != SessionState::Exited)
+            .filter_map(|(id, _)| self.workers.get(id))
+            .collect();
+        live.sort_by_key(|worker| worker.created_at);
+        sigmadock_core::Capacity {
+            max_workers: self.max_workers,
+            live: live.into_iter().map(|worker| worker.id.clone()).collect(),
         }
     }
     fn check_capacity(&self) -> Result<()> {
