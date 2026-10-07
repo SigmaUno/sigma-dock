@@ -1,4 +1,4 @@
-//! Native board and reconnectable terminal, backed by the daemon's PTYs.
+//! Native berths workspace and reconnectable terminal, backed by the daemon's PTYs.
 mod appearance_ui;
 mod berths_ui;
 mod bootstrap;

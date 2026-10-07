@@ -713,8 +713,8 @@ mod tests {
         assert_eq!(facts.pr, PullRequestState::Open);
         assert_eq!(facts.checks, Checks::Failed);
         assert_eq!(
-            sigmadock_core::column(&facts),
-            sigmadock_core::Column::NeedsYou
+            sigmadock_core::status(&facts),
+            sigmadock_core::Status::NeedsYou
         );
         assert_eq!(server.join().unwrap().len(), 4);
     }

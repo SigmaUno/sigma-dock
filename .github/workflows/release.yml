@@ -1,11 +1,5 @@
 name: Release crates
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: Workspace version to publish (must already be committed)
-        required: true
-        default: '0.1.2'
   push:
     tags: ['v*']
 permissions:
@@ -25,10 +19,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Resolve and validate release version
-        env:
-          REQUESTED_VERSION: ${{ inputs.version }}
         run: |
-          version="${REQUESTED_VERSION:-${GITHUB_REF_NAME#v}}"
+          version="${GITHUB_REF_NAME#v}"
           python3 scripts/release.py check "$version"
           echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
           if git rev-parse "refs/tags/v$version" >/dev/null 2>&1; then

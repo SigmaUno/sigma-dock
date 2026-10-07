@@ -34,7 +34,7 @@ This is an implementation roadmap, not a claim that every phase is complete.
 - [x] Signal-driven daemon shutdown stops sessions, reaps children and persists observed state.
 - [ ] Robust process-group cleanup for child tools that detach or ignore hangup.
 
-## Phase 3 — Board
+## Phase 3 — Berths and worker statuses
 
 - [x] Pure status derivation with blocker precedence tests.
 - [x] Berths view with project sidebar, needs-you strip, terminal previews and berth-to-terminal navigation.

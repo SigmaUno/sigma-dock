@@ -15,7 +15,7 @@ flowchart LR
 
 | Crate | Responsibility |
 |---|---|
-| `sigmadock-core` | Domain types, pure column derivation, bounded JSON-RPC client/framing |
+| `sigmadock-core` | Domain types, pure status derivation, bounded JSON-RPC client/framing |
 | `sigmadock-store` | SQLite schema version, project/worker persistence and recovery markers |
 | `sigmadock-pty` | PTY input, output replay, process status, resize and notification detection |
 | `sigmadock-git` | Worktree creation, safe removal, prune and diff summaries |

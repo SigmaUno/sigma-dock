@@ -80,8 +80,17 @@ with tempfile.TemporaryDirectory(prefix='sigma-smoke-', dir='/tmp') as temp:
         assert all(Path(w['worktree']).exists() for w in workers)
         rpc('spawn_worker', {'project_id': project['id'], 'title': 'overflow', 'agent': 'shell'}, error=True)
         w = workers[0]
-        initial_output = rpc('output', {'worker_id': w['id'], 'cursor': 0})
-        assert (initial_output['cols'], initial_output['rows']) == (120, 30)
+        # New status field and the one-release compatibility alias agree.
+        worker_status = rpc('get_worker_status', {'worker_id': w['id']})
+        assert worker_status['status'] == 'working', worker_status
+        assert worker_status['column'] == worker_status['status'], worker_status
+        request = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+                   'params': {'name': 'get_worker_status', 'arguments': {'worker_id': w['id']}}}
+        mcp = subprocess.run([str(BIN / 'sigmadock-mcp')], env=env,
+                             input=json.dumps(request)+'\n', capture_output=True, text=True, check=True)
+        mcp_status = json.loads(json.loads(mcp.stdout)['result']['content'][0]['text'])
+        assert mcp_status['status'] == 'working', mcp_status
+        assert mcp_status['column'] == mcp_status['status'], mcp_status
         rpc('resize', {'worker_id': w['id'], 'rows': 40, 'cols': 100})
         rpc('resize', {'worker_id': w['id'], 'rows': 0, 'cols': 100}, error=True)
         resized_output = rpc('output', {'worker_id': w['id'], 'cursor': 0})

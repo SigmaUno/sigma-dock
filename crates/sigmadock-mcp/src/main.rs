@@ -31,7 +31,7 @@ fn tools(allow_spawn: bool, scoped: bool) -> Value {
         ),
         tool(
             "get_worker_status",
-            "Read one worker's status",
+            "Read one worker's derived status (working, needs_you, in_review, ready_to_merge); column is a deprecated alias",
             worker.clone(),
             &["worker_id"],
         ),

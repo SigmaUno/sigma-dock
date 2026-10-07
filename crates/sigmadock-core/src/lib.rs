@@ -79,13 +79,13 @@ impl Default for Facts {
 }
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum Column {
+pub enum Status {
     Working,
     NeedsYou,
     InReview,
     ReadyToMerge,
 }
-impl Column {
+impl Status {
     pub const ALL: [Self; 4] = [
         Self::Working,
         Self::NeedsYou,
@@ -102,9 +102,9 @@ impl Column {
     }
 }
 /// Merged work stays visible; any blocker takes precedence over an approval.
-pub fn column(f: &Facts) -> Column {
+pub fn status(f: &Facts) -> Status {
     if f.pr == PullRequestState::Merged {
-        return Column::ReadyToMerge;
+        return Status::ReadyToMerge;
     }
     if matches!(f.session, SessionState::NeedsInput | SessionState::Lost)
         || f.exit_code.is_some_and(|code| code != 0)
@@ -114,19 +114,19 @@ pub fn column(f: &Facts) -> Column {
         || f.forge_error.is_some()
         || f.pr == PullRequestState::Closed
     {
-        return Column::NeedsYou;
+        return Status::NeedsYou;
     }
     if f.pr == PullRequestState::Open
         && f.review == Review::Approved
         && f.checks == Checks::Passed
         && f.mergeable == Some(true)
     {
-        return Column::ReadyToMerge;
+        return Status::ReadyToMerge;
     }
     if matches!(f.pr, PullRequestState::Open | PullRequestState::Draft) {
-        return Column::InReview;
+        return Status::InReview;
     }
-    Column::Working
+    Status::Working
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
@@ -361,23 +361,23 @@ pub fn read_frame(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>> {
 mod tests {
     use super::*;
     #[test]
-    fn board_precedence() {
+    fn status_precedence() {
         let mut f = Facts::default();
-        assert_eq!(column(&f), Column::Working);
+        assert_eq!(status(&f), Status::Working);
         f.session = SessionState::Idle;
-        assert_eq!(column(&f), Column::Working);
+        assert_eq!(status(&f), Status::Working);
         f.pr = PullRequestState::Draft;
-        assert_eq!(column(&f), Column::InReview);
+        assert_eq!(status(&f), Status::InReview);
         f.pr = PullRequestState::Open;
         f.review = Review::Approved;
         f.mergeable = Some(true);
-        assert_eq!(column(&f), Column::InReview);
+        assert_eq!(status(&f), Status::InReview);
         f.checks = Checks::Passed;
-        assert_eq!(column(&f), Column::ReadyToMerge);
+        assert_eq!(status(&f), Status::ReadyToMerge);
         f.checks = Checks::Failed;
-        assert_eq!(column(&f), Column::NeedsYou);
+        assert_eq!(status(&f), Status::NeedsYou);
         f.pr = PullRequestState::Merged;
-        assert_eq!(column(&f), Column::ReadyToMerge);
+        assert_eq!(status(&f), Status::ReadyToMerge);
     }
     #[test]
     fn each_blocker_wins() {
@@ -415,7 +415,7 @@ mod tests {
             },
         ];
         for f in variants {
-            assert_eq!(column(&f), Column::NeedsYou);
+            assert_eq!(status(&f), Status::NeedsYou);
         }
     }
     #[test]

@@ -7,8 +7,8 @@ use gpui::{
 };
 use serde_json::json;
 use sigmadock_core::{
-    Capacity, Checks, Client, Column, Output, Project, PullRequestState, Review, SessionState,
-    Worker, column, unix_time,
+    Capacity, Checks, Client, Output, Project, PullRequestState, Review, SessionState,
+    Status as DerivedStatus, Worker, status as derived_status, unix_time,
 };
 use sigmadock_terminal::{GpuiEventProxy, TerminalState};
 use std::time::Duration;
@@ -80,7 +80,7 @@ pub(crate) enum Action {
     OpenPr(String),
 }
 
-/// Presentation of the daemon-derived column; no new status rules live here.
+/// Presentation of the daemon-derived status; no new status rules live here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Status {
     pub pill: String,
@@ -90,8 +90,8 @@ pub(crate) struct Status {
 
 pub(crate) fn status(worker: &Worker) -> Status {
     let facts = &worker.facts;
-    let (pill, tone, action): (String, _, _) = match column(facts) {
-        Column::NeedsYou => match () {
+    let (pill, tone, action): (String, _, _) = match derived_status(facts) {
+        DerivedStatus::NeedsYou => match () {
             _ if facts.session == SessionState::NeedsInput => {
                 ("Needs input".into(), Tone::Input, Some(Action::Reply))
             }
@@ -115,16 +115,16 @@ pub(crate) fn status(worker: &Worker) -> Status {
                 None,
             ),
         },
-        Column::InReview => ("In review".into(), Tone::Review, None),
-        Column::ReadyToMerge if facts.pr == PullRequestState::Merged => {
+        DerivedStatus::InReview => ("In review".into(), Tone::Review, None),
+        DerivedStatus::ReadyToMerge if facts.pr == PullRequestState::Merged => {
             ("Merged".into(), Tone::Ready, None)
         }
-        Column::ReadyToMerge => (
+        DerivedStatus::ReadyToMerge => (
             "Ready to merge".into(),
             Tone::Ready,
             facts.pr_url.clone().map(Action::OpenPr),
         ),
-        Column::Working => (
+        DerivedStatus::Working => (
             match facts.session {
                 SessionState::Idle => "Idle",
                 SessionState::Exited => "Exited",
@@ -205,7 +205,7 @@ fn fetch_output(client: &Client, worker: &str, mut cursor: u64) -> Result<Vec<Ou
     Ok(outputs)
 }
 
-/// Refreshed together so one poll gives a consistent board.
+/// Refreshed together so one poll gives a consistent workspace.
 pub(crate) struct Snapshot {
     pub workers: Result<Vec<Worker>>,
     pub recovery: Result<serde_json::Value>,
@@ -474,7 +474,7 @@ impl Workspace {
             .workers
             .iter()
             .filter(|worker| project.as_ref().is_none_or(|id| &worker.project_id == id))
-            .filter(|worker| column(&worker.facts) == Column::NeedsYou)
+            .filter(|worker| derived_status(&worker.facts) == DerivedStatus::NeedsYou)
             .count();
         let mut dots = div().flex().items_center().gap_1();
         for worker in &berths {
@@ -719,7 +719,9 @@ impl Workspace {
         let needs: Vec<_> = self
             .workers
             .iter()
-            .filter(|worker| self.in_scope(worker) && column(&worker.facts) == Column::NeedsYou)
+            .filter(|worker| {
+                self.in_scope(worker) && derived_status(&worker.facts) == DerivedStatus::NeedsYou
+            })
             .collect();
         if needs.is_empty() {
             return div()
