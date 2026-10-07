@@ -15,3 +15,5 @@ The update workflow pushes a release branch and provides a compare link. A maint
 Crates: `sigma-dock-core`, `sigma-dock-store`, `sigma-dock-pty`, `sigma-dock-git`, `sigma-dock-forge`, `sigma-dock-agents`, `sigma-dock-ports`, `sigma-dock-mcp`, `sigma-dockerd`, `sigma-dock-ui`, `sigma-dock-cli`.
 
 No domain registration is required; the homepage is sigmauno.com. Linux packages, signed binaries and Homebrew distribution are separate future work.
+
+Both distribution workflows retain a lightweight `build-<commit>` tag before long checks. This keeps the tested commit referenced if `main` advances, avoiding GitHub's [workflow-scoped release restriction](https://github.blog/changelog/2023-11-02-github-actions-enforcing-workflow-scope-when-creating-a-release/) without a new publishing token. Build references are not releases, and an existing reference is never moved.

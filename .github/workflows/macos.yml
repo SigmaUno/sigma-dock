@@ -37,6 +37,11 @@ jobs:
               if not os.environ['APPLE_SIGNING_IDENTITY'].startswith('Developer ID Application:'):
                   raise SystemExit('Production requires a Developer ID Application identity')
           PY
+      - uses: actions/checkout@v4
+      - name: Preserve build commit before its branch advances
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ensure_build_ref.py
   build:
     needs: distribution-policy
     strategy:
