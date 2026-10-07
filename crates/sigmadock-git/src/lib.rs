@@ -141,12 +141,11 @@ pub fn remove(repo: &Path, path: &Path) -> Result<()> {
 pub fn prune(repo: &Path) -> Result<String> {
     git(repo, &["worktree", "prune", "--verbose"])
 }
-pub fn diff(path: &Path) -> Result<String> {
-    git(path, &["diff", "--stat", "HEAD"])
-}
+mod diff;
+pub use diff::{diff_report, recorded_base};
 /// Largest patch returned to clients, leaving room for JSON escaping in a 4 MiB frame.
 /// The rest is cut at a line boundary.
-pub const PATCH_LIMIT: usize = 1024 * 1024;
+pub const PATCH_LIMIT: usize = 256 * 1024;
 /// Commit the worktree branch started from, read from the branch's creation reflog entry.
 /// Falls back to `HEAD` when the reflog has expired, so only uncommitted work is shown.
 pub fn fork_point(path: &Path) -> String {
@@ -157,43 +156,16 @@ pub fn fork_point(path: &Path) -> String {
         .filter(|sha| !sha.is_empty())
         .unwrap_or_else(|| "HEAD".into())
 }
-/// Unified patch of everything the worker changed since it forked, including
-/// uncommitted and untracked files, without touching the index.
+/// Legacy callers can still load a patch, using origin's default branch when known.
 pub fn patch(path: &Path) -> Result<(String, bool)> {
-    let base = fork_point(path);
-    let mut text = git_raw(
-        path,
-        &[
-            "diff",
-            "--no-color",
-            "--no-ext-diff",
-            "--find-renames",
-            &base,
-        ],
-    )?;
-    let untracked = git(path, &["ls-files", "--others", "--exclude-standard", "-z"])?;
-    for file in untracked.split('\0').filter(|file| !file.is_empty()) {
-        if text.len() > PATCH_LIMIT {
-            break;
-        }
-        // `--no-index` exits 1 when files differ, which is the expected case here.
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(path)
-            .args(["diff", "--no-color", "--no-index", "--", "/dev/null", file])
-            .output()
-            .context("run git")?;
-        text.push_str(&String::from_utf8_lossy(&output.stdout));
+    let base = default_base(path)
+        .map(|branch| format!("refs/remotes/origin/{branch}"))
+        .unwrap_or_else(|_| fork_point(path));
+    if base == "HEAD" {
+        bail!("worker base is unknown; configure a project base branch");
     }
-    let truncated = text.len() > PATCH_LIMIT;
-    if truncated {
-        let cut = text.as_bytes()[..PATCH_LIMIT]
-            .iter()
-            .rposition(|&byte| byte == b'\n')
-            .map_or(0, |at| at + 1);
-        text.truncate(cut);
-    }
-    Ok((text, truncated))
+    let report = diff_report(path, &base)?;
+    Ok((report.text(false), report.truncated))
 }
 fn git_raw(repo: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
@@ -482,6 +454,116 @@ mod tests {
 
         let gone = changes(&repo, &worktree, "sigma/missing");
         assert!(gone.commits.is_empty() && gone.note.is_some());
+    }
+
+    #[test]
+    fn diff_uses_merge_base_and_separates_committed_local_and_untracked() {
+        use sigmadock_core::diff::DiffSectionKind;
+        let fixture = Fixture::new();
+        let repo = fixture.repo();
+        git(&repo, &["config", "user.email", "test@localhost"]).unwrap();
+        git(&repo, &["config", "user.name", "Test"]).unwrap();
+        git(&repo, &["config", "commit.gpgsign", "false"]).unwrap();
+        std::fs::write(repo.join("a.txt"), "base\n").unwrap();
+        git(&repo, &["add", "."]).unwrap();
+        git(&repo, &["commit", "-qm", "base"]).unwrap();
+        let base = git(&repo, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(recorded_base(&repo, "HEAD").unwrap(), base);
+        assert_eq!(recorded_base(&repo, "trunk").unwrap(), "refs/heads/trunk");
+        let worker = fixture.0.join("diff-worker");
+        create(&repo, &worker, "sigma/diff", "trunk").unwrap();
+        std::fs::write(worker.join("a.txt"), "base\ncommitted\n").unwrap();
+        git(&worker, &["commit", "-qam", "worker commit"]).unwrap();
+        // Advancing the base must not add unrelated base changes to the worker diff.
+        std::fs::write(repo.join("unrelated"), "base only\n").unwrap();
+        git(&repo, &["add", "."]).unwrap();
+        git(&repo, &["commit", "-qm", "base advanced"]).unwrap();
+        let clean_report = diff_report(&worker, "refs/heads/trunk").unwrap();
+        assert_eq!(clean_report.merge_base, base);
+        assert_eq!(clean_report.sections[0].files.len(), 1);
+        assert!(clean_report.text(false).contains("+committed"));
+        assert!(clean_report.sections[1].files.is_empty());
+        std::fs::write(worker.join("a.txt"), "base\ncommitted\nstaged\n").unwrap();
+        git(&worker, &["add", "a.txt"]).unwrap();
+        std::fs::write(worker.join("a.txt"), "base\ncommitted\nstaged\nunstaged\n").unwrap();
+        std::fs::write(worker.join("new name\t.txt"), "untracked\n").unwrap();
+        std::fs::write(worker.join("binary.dat"), [0, 1, 2, 0]).unwrap();
+        let report = diff_report(&worker, "refs/heads/trunk").unwrap();
+        assert_eq!(report.sections[1].kind, DiffSectionKind::Uncommitted);
+        assert!(report.sections[1].files[0].patch.contains("+staged"));
+        assert!(report.sections[1].files[0].patch.contains("+unstaged"));
+        let new = report.sections[2]
+            .files
+            .iter()
+            .find(|f| f.path == "new name\t.txt")
+            .unwrap();
+        assert_eq!(new.added, Some(1));
+        let previous = new.blob_id.clone();
+        assert!(
+            report.sections[2]
+                .files
+                .iter()
+                .find(|f| f.path == "binary.dat")
+                .unwrap()
+                .binary
+        );
+        std::fs::write(worker.join("new name\t.txt"), "changed\n").unwrap();
+        let changed = diff_report(&worker, "refs/heads/trunk").unwrap();
+        assert_ne!(
+            previous,
+            changed.sections[2]
+                .files
+                .iter()
+                .find(|f| f.path == "new name\t.txt")
+                .unwrap()
+                .blob_id
+        );
+        assert!(report.text(true).contains("M a.txt | +1 -0"));
+        assert!(!report.text(true).contains("@@"));
+        assert!(diff_report(&worker, "refs/heads/missing").is_err());
+        assert!(clean(&repo).unwrap());
+    }
+
+    #[test]
+    fn diff_bounds_patches_and_keeps_rename_and_delete_metadata() {
+        let fixture = Fixture::new();
+        let repo = fixture.repo();
+        git(&repo, &["config", "user.email", "test@localhost"]).unwrap();
+        git(&repo, &["config", "user.name", "Test"]).unwrap();
+        git(&repo, &["config", "commit.gpgsign", "false"]).unwrap();
+        std::fs::write(repo.join("old name.txt"), "rename me\n").unwrap();
+        std::fs::write(repo.join("delete.txt"), "delete me\n").unwrap();
+        git(&repo, &["add", "."]).unwrap();
+        git(&repo, &["commit", "-qm", "base"]).unwrap();
+        let base = recorded_base(&repo, "HEAD").unwrap();
+        git(&repo, &["mv", "old name.txt", "new name.txt"]).unwrap();
+        git(&repo, &["rm", "delete.txt"]).unwrap();
+        let report = diff_report(&repo, &base).unwrap();
+        assert!(
+            report.sections[1]
+                .files
+                .iter()
+                .any(|f| f.path == "new name.txt" && f.status == "R")
+        );
+        assert!(
+            report.sections[1]
+                .files
+                .iter()
+                .any(|f| f.path == "delete.txt" && f.status == "D")
+        );
+        for i in 0..6 {
+            std::fs::write(
+                repo.join(format!("huge{i}")),
+                "a long added line\n".repeat(10000),
+            )
+            .unwrap();
+        }
+        let report = diff_report(&repo, &base).unwrap();
+        assert!(report.truncated && !report.warnings.is_empty());
+        let files: Vec<_> = report.sections.iter().flat_map(|s| &s.files).collect();
+        assert!(files.iter().all(|f| f.patch.len() <= 64 * 1024));
+        assert!(files.iter().map(|f| f.patch.len()).sum::<usize>() <= PATCH_LIMIT);
+        assert!(files.iter().any(|f| f.truncated));
     }
 
     fn run(dir: &Path, args: &[&str]) {

@@ -11,6 +11,8 @@ use std::{
     time::Duration,
 };
 
+pub mod diff;
+
 pub const API_VERSION: u32 = 2;
 pub const MAX_FRAME: u64 = 4 * 1024 * 1024;
 
@@ -141,6 +143,9 @@ pub struct Project {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Worker {
+    /// Base ref recorded at launch, independent of the source checkout's HEAD.
+    #[serde(default)]
+    pub base_ref: Option<String>,
     /// Fetch failed and this worker started from a cached remote commit.
     #[serde(default)]
     pub base_warning: Option<String>,
