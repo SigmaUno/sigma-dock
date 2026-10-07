@@ -1,4 +1,5 @@
 //! Inbox: a chat with the default agent beside what waits on you across agents and forges.
+use crate::ellipsis::Ellipsis;
 use crate::{
     View, Workspace,
     berths_ui::{agent_label, relative_time, status},
@@ -627,7 +628,7 @@ impl Workspace {
                             .child(
                                 div()
                                     .min_w(px(0.))
-                                    .truncate()
+                                    .ellipsis()
                                     .font_family("Menlo")
                                     .child(meta),
                             )
