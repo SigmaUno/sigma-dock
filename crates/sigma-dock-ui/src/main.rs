@@ -2,6 +2,8 @@
 mod appearance_ui;
 mod bootstrap;
 mod preferences;
+mod update_ui;
+mod updates;
 
 use anyhow::Result;
 use clap::Parser;
@@ -115,6 +117,10 @@ struct Workspace {
     settings_focus: gpui::FocusHandle,
     settings_editor: Option<(usize, String)>,
     settings_error: Option<String>,
+    checker: Arc<std::sync::Mutex<updates::Checker>>,
+    checking_update: bool,
+    update_message: Option<String>,
+    available_update: Option<updates::Available>,
 }
 impl Workspace {
     fn new(client: Client, cx: &mut Context<Self>) -> Self {
@@ -143,6 +149,9 @@ impl Workspace {
                                 this.error = Some(error.to_string());
                             }
                         }
+                        if this.preferences.updates.due(updates::now()) {
+                            this.check_updates(false, cx);
+                        }
                         cx.notify();
                     })
                     .is_err()
@@ -159,6 +168,10 @@ impl Workspace {
             .err()
             .map(|error| format!("Preferences could not be loaded: {error}"));
         Self {
+            checker: Arc::new(std::sync::Mutex::new(updates::Checker::default())),
+            checking_update: false,
+            update_message: None,
+            available_update: None,
             preferences: loaded.unwrap_or_default(),
             preferences_path,
             settings_open: false,
@@ -451,6 +464,9 @@ impl Render for Workspace {
         );
         if let Some(error) = &self.error {
             content = content.child(div().p_3().bg(rgb(0x502634)).child(error.clone()));
+        }
+        if let Some(update) = &self.available_update {
+            content = content.child(self.update_notice(update, cx));
         }
         if self.form_open {
             let mut form = div()

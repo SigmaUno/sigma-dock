@@ -325,6 +325,7 @@ impl Workspace {
                         this.apply_appearance(cx);
                     })),
             )
+            .child(self.update_controls(cx))
             .into_any_element()
     }
 }

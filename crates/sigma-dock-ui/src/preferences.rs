@@ -123,6 +123,7 @@ impl Appearance {
 #[serde(default)]
 pub struct Preferences {
     pub appearance: Appearance,
+    pub updates: crate::updates::UpdatePreferences,
 }
 impl Preferences {
     pub fn load(path: &Path) -> Result<Self> {
@@ -204,6 +205,7 @@ mod tests {
             std::thread::current().id()
         ));
         let preferences = Preferences {
+            updates: Default::default(),
             appearance: Appearance {
                 cursor: Cursor::Beam,
                 ..Appearance::light()

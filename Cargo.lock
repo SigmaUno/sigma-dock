@@ -5486,6 +5486,8 @@ dependencies = [
  "clap",
  "gpui",
  "libc",
+ "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "sigma-dock-core",
