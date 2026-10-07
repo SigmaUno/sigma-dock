@@ -981,10 +981,27 @@ fn inbox(state: &Arc<Mutex<Daemon>>, refresh: bool) -> Result<Value> {
         configs
     };
     let mut inbox = sigmadock_core::Inbox::default();
+    // GitHub assignments are read account-wide once per API and token, so issues in
+    // repositories without a worker still appear; review requests stay per repository.
+    let mut accounts: Vec<(String, String)> = Vec::new();
     for config in configs {
         let repository = format!("{}/{}", config.owner, config.repo);
-        match RestForge::new(config).and_then(|forge| forge.inbox()) {
-            Ok(items) => inbox.items.extend(items),
+        let account = (config.api_url.clone(), config.token_env.clone());
+        let account_wide = config.kind == "github" && !accounts.contains(&account);
+        match RestForge::new(config).and_then(|forge| forge.inbox(account_wide)) {
+            Ok(items) => {
+                if account_wide {
+                    accounts.push(account);
+                }
+                for item in items {
+                    if !inbox.items.iter().any(|known| {
+                        (known.kind, &known.repo, known.number)
+                            == (item.kind, &item.repo, item.number)
+                    }) {
+                        inbox.items.push(item);
+                    }
+                }
+            }
             Err(error) => inbox.warnings.push(format!("{repository}: {error}")),
         }
     }

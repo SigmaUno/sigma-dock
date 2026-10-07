@@ -300,9 +300,14 @@ impl RestForge {
     pub fn repository(&self) -> String {
         format!("{}/{}", self.config.owner, self.config.repo)
     }
-    /// Open issues assigned to the token's user and open pull requests that request
-    /// their review, newest first. Reads one page of each, which bounds API use.
-    pub fn inbox(&self) -> Result<Vec<InboxItem>> {
+    /// Open issues assigned to the token's user and open pull requests in this repository
+    /// that request their review, newest first. Reads one page of each, which bounds API use.
+    ///
+    /// With `account_wide`, GitHub assignments come from every repository the token can
+    /// see (`GET /issues?filter=assigned`); without it GitHub assignments are skipped,
+    /// because another call for the same token already covers them. Forgejo has no
+    /// account-wide listing here, so it always reads this repository's assignments.
+    pub fn inbox(&self, account_wide: bool) -> Result<Vec<InboxItem>> {
         if self.token.is_none() {
             bail!("set {} to list assigned issues", self.config.token_env);
         }
@@ -317,22 +322,37 @@ impl RestForge {
         } else {
             ("limit", "50")
         };
-        let mut query = vec![("state", "open"), (page_key, page_size)];
-        query.push(if github {
-            ("assignee", login.as_str())
-        } else {
-            ("assigned_by", login.as_str())
-        });
-        if github {
-            query.extend([("sort", "updated"), ("direction", "desc")]);
-        }
-        let issues = self.get(&format!("{prefix}/issues"), &query)?;
-        let mut items: Vec<_> = issues
-            .as_array()
-            .context("invalid issue response")?
-            .iter()
-            .filter_map(|issue| self.inbox_item(InboxKind::Assigned, issue))
-            .collect();
+        let issues = match (github, account_wide) {
+            (true, true) => Some(self.get(
+                "issues",
+                &[
+                    ("filter", "assigned"),
+                    ("state", "open"),
+                    ("sort", "updated"),
+                    ("direction", "desc"),
+                    (page_key, page_size),
+                ],
+            )?),
+            (true, false) => None,
+            (false, _) => Some(self.get(
+                &format!("{prefix}/issues"),
+                &[
+                    ("state", "open"),
+                    ("type", "issues"),
+                    ("assigned_by", login.as_str()),
+                    (page_key, page_size),
+                ],
+            )?),
+        };
+        let mut items: Vec<_> = match &issues {
+            Some(issues) => issues
+                .as_array()
+                .context("invalid issue response")?
+                .iter()
+                .filter_map(|issue| self.inbox_item(InboxKind::Assigned, issue))
+                .collect(),
+            None => Vec::new(),
+        };
         let mut query = vec![("state", "open"), (page_key, page_size)];
         if github {
             query.extend([("sort", "updated"), ("direction", "desc")]);
@@ -358,7 +378,10 @@ impl RestForge {
     fn inbox_item(&self, kind: InboxKind, value: &Value) -> Option<InboxItem> {
         Some(InboxItem {
             kind,
-            repo: self.repository(),
+            // Account-wide results name their repository; per-repository ones do not.
+            repo: value["repository"]["full_name"]
+                .as_str()
+                .map_or_else(|| self.repository(), |name| task_text(name, 200)),
             number: value["number"].as_u64()?,
             title: task_text(value["title"].as_str()?, 300),
             url: value["html_url"].as_str()?.to_owned(),
@@ -756,7 +779,7 @@ mod tests {
         ]);
         let mut forge = local_forge(url);
         forge.token = Some("token".into());
-        let items = forge.inbox().unwrap();
+        let items = forge.inbox(true).unwrap();
         assert_eq!(items.len(), 2);
         assert_eq!(
             (items[0].kind, items[0].number),
@@ -770,8 +793,47 @@ mod tests {
         assert!(requests[1].contains("assigned_by=me"), "{}", requests[1]);
         assert!(
             local_forge("http://127.0.0.1:1/api".into())
-                .inbox()
+                .inbox(true)
                 .is_err()
+        );
+    }
+    #[test]
+    fn github_inbox_reads_assignments_account_wide_once_per_token() {
+        let github = |url: String| {
+            let mut forge = local_forge(url);
+            // The adapter only accepts api.github.com; tests reach a loopback mock instead.
+            forge.config.kind = "github".into();
+            forge.token = Some("token".into());
+            forge
+        };
+        let (url, server) = mock(vec![
+            ("200 OK", "", r#"{"login":"me"}"#),
+            (
+                "200 OK",
+                "",
+                r#"[{"number":3,"title":"Elsewhere","html_url":"https://github.invalid/x/y/issues/3","repository":{"full_name":"x/y"},"updated_at":"2026-10-07T10:00:00Z"}]"#,
+            ),
+            ("200 OK", "", "[]"),
+        ]);
+        let items = github(url).inbox(true).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!((items[0].repo.as_str(), items[0].number), ("x/y", 3));
+        let requests = server.join().unwrap();
+        assert!(
+            requests[1].starts_with("GET /api/v1/issues?filter=assigned"),
+            "{}",
+            requests[1]
+        );
+        let (url, server) = mock(vec![
+            ("200 OK", "", r#"{"login":"me"}"#),
+            ("200 OK", "", "[]"),
+        ]);
+        assert!(github(url).inbox(false).unwrap().is_empty());
+        let requests = server.join().unwrap();
+        assert!(
+            requests[1].contains("/repos/owner/repo/pulls"),
+            "{}",
+            requests[1]
         );
     }
     #[test]
