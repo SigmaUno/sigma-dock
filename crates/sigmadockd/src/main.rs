@@ -1,4 +1,5 @@
 mod events;
+mod fork;
 mod scripts;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -561,6 +562,7 @@ impl Daemon {
                     self.spawn("spawn_worker", &params, None, task.fetch_base)
                 }
             }
+            "fork_worker" => self.fork_worker(&params),
             "start_orchestrator" => self.spawn(method, &params, None, params["base"].is_null()),
             "list_queue" => {
                 let limit = params["limit"].as_u64().unwrap_or(100);
@@ -605,6 +607,11 @@ impl Daemon {
                 }
                 if method == "cancel_queued" {
                     self.store.cancel_queued(id)?;
+                    if task.fork_snapshot.is_some()
+                        && let Ok(project) = self.project(&task.project_id)
+                    {
+                        let _ = sigmadock_git::release_fork_snapshot(&project.path, id);
+                    }
                 } else {
                     if params["acknowledge_unknown"] != true {
                         bail!(
@@ -897,6 +904,7 @@ impl Daemon {
         };
         let port = self.ports.allocate()?;
         let mut worker = Worker {
+            forked_from: params["forked_from"].as_str().map(str::to_owned),
             workspace_scripts: Default::default(),
             base_ref: Some(base_ref),
             base_warning,
@@ -928,11 +936,43 @@ impl Daemon {
             self.ports.release(port);
             return Err(error);
         }
+        if let Some(snapshot) = params.get("fork_snapshot").filter(|value| !value.is_null()) {
+            let applied = (|| -> Result<()> {
+                let snapshot =
+                    serde_json::from_value::<sigmadock_core::ForkSnapshot>(snapshot.clone())?;
+                sigmadock_git::apply_fork_snapshot(&worker.worktree, &snapshot)
+            })();
+            if let Err(error) = applied {
+                let cleanup = sigmadock_git::rollback_unstarted_fork(
+                    &project.path,
+                    &worker.worktree,
+                    &worker.branch,
+                    &base,
+                );
+                self.ports.release(port);
+                if let Err(cleanup) = cleanup {
+                    bail!(
+                        "fork snapshot failed: {error}; inspect {}: {cleanup}",
+                        worker.worktree.display()
+                    );
+                }
+                return Err(error);
+            }
+        }
         // Validate the actual selected worktree config before publishing or executing it.
         let document = match sigmadock_core::workspace_scripts::Document::read(&worker.worktree) {
             Ok(document) => document,
             Err(error) => {
-                sigmadock_git::rollback(&project.path, &worker.worktree, &worker.branch);
+                if worker.forked_from.is_some() {
+                    let _ = sigmadock_git::rollback_unstarted_fork(
+                        &project.path,
+                        &worker.worktree,
+                        &worker.branch,
+                        &base,
+                    );
+                } else {
+                    sigmadock_git::rollback(&project.path, &worker.worktree, &worker.branch);
+                }
                 self.ports.release(port);
                 return Err(error);
             }
@@ -940,13 +980,22 @@ impl Daemon {
         worker.workspace_scripts.hash = document.as_ref().map(|doc| doc.hash.clone());
         worker.workspace_scripts.phase = sigmadock_core::workspace_scripts::Phase::AwaitingApproval;
         worker.facts.session = SessionState::NeedsInput;
-        let saved = if queued_id.is_some() {
+        let saved = if queued_id.is_some() && method != "fork_worker" {
             self.store.finish_queued(&worker)
         } else {
             self.store.save_worker(&worker)
         };
         if let Err(error) = saved {
-            sigmadock_git::rollback(&project.path, &worker.worktree, &worker.branch);
+            if worker.forked_from.is_some() {
+                let _ = sigmadock_git::rollback_unstarted_fork(
+                    &project.path,
+                    &worker.worktree,
+                    &worker.branch,
+                    &base,
+                );
+            } else {
+                sigmadock_git::rollback(&project.path, &worker.worktree, &worker.branch);
+            }
             self.ports.release(port);
             return Err(error);
         }
@@ -999,6 +1048,8 @@ impl Daemon {
             bail!("invalid base ref");
         }
         Ok(QueuedTask {
+            forked_from: None,
+            fork_snapshot: None,
             fetch_base,
             id: Uuid::new_v4().to_string(),
             project_id: project.id,
@@ -1033,13 +1084,17 @@ impl Daemon {
             }
             task.starting = true;
             self.store.save_queued(&task)?;
-            let params = json!({"project_id": task.project_id, "title": task.title, "agent": task.agent, "prompt": task.prompt, "base": task.base, "forge": task.forge, "usage_reporting": task.usage_reporting});
+            let params = json!({"project_id": task.project_id, "title": task.title, "agent": task.agent, "prompt": task.prompt, "base": task.base, "forge": task.forge, "usage_reporting": task.usage_reporting,"forked_from":task.forked_from,"fork_snapshot":task.fork_snapshot});
             if let Err(error) = self.spawn("spawn_worker", &params, Some(&task.id), task.fetch_base)
             {
                 task.starting = false;
                 task.last_error = Some(task_text(&error.to_string(), 4096));
                 self.store.save_queued(&task)?;
                 blocked.insert(task.project_id);
+            } else if task.fork_snapshot.is_some()
+                && let Ok(project) = self.project(&task.project_id)
+            {
+                let _ = sigmadock_git::release_fork_snapshot(&project.path, &task.id);
             }
         }
         Ok(())

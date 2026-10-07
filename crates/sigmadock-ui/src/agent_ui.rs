@@ -140,7 +140,14 @@ impl Workspace {
     }
 
     fn more_menu(&self, worker: &Worker, cx: &mut Context<Self>) -> AnyElement {
-        let mut items = Vec::new();
+        let id = worker.id.clone();
+        let mut items = vec![
+            self.menu_item("more-fork".into(), "Fork…".into(), false)
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.open_fork(id.clone(), window, cx)),
+                )
+                .into_any_element(),
+        ];
         for (label, method) in [
             ("Checks", "worker_checks"),
             ("Usage", "agent_usage"),
@@ -229,6 +236,14 @@ impl Workspace {
             SessionState::Exited | SessionState::Lost
         );
         header = header
+            .when_some(worker.forked_from.as_deref(), |header, source| {
+                header.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(theme.muted))
+                        .child(self.fork_lineage(source)),
+                )
+            })
             .child(
                 div()
                     .min_w(px(0.))

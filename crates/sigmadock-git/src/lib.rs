@@ -142,7 +142,11 @@ pub fn prune(repo: &Path) -> Result<String> {
     git(repo, &["worktree", "prune", "--verbose"])
 }
 mod diff;
+mod fork;
 pub use diff::{diff_report, recorded_base};
+pub use fork::{
+    apply_fork_snapshot, fork_snapshot, release_fork_snapshot, rollback_unstarted_fork,
+};
 /// Inspect local refs and files only; the checks pane never fetches implicitly.
 pub fn readiness(
     path: &Path,
@@ -421,6 +425,117 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn fork_snapshot_preserves_source_and_index_layers() {
+        let fixture = Fixture::new();
+        let repo = fixture.repo();
+        git(&repo, &["config", "user.email", "test@localhost"]).unwrap();
+        git(&repo, &["config", "user.name", "Test"]).unwrap();
+        std::fs::write(repo.join("tracked"), "base\n").unwrap();
+        std::fs::write(repo.join("deleted"), "delete me\n").unwrap();
+        std::fs::write(repo.join(".gitignore"), "ignored\n").unwrap();
+        git(&repo, &["add", "."]).unwrap();
+        git(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "base"],
+        )
+        .unwrap();
+        std::fs::write(repo.join("tracked"), "staged\n").unwrap();
+        std::fs::write(repo.join("ignored"), "explicitly staged\n").unwrap();
+        git(&repo, &["add", "tracked"]).unwrap();
+        git(&repo, &["add", "-f", "ignored"]).unwrap();
+        std::fs::write(repo.join("tracked"), "working\n").unwrap();
+        std::fs::remove_file(repo.join("deleted")).unwrap();
+        std::fs::write(repo.join("new file"), [0, 255, 1, 0]).unwrap();
+        std::os::unix::fs::symlink("tracked", repo.join("link")).unwrap();
+        let head = git(&repo, &["rev-parse", "HEAD"]).unwrap();
+        let status = git(&repo, &["status", "--porcelain"]).unwrap();
+        let index_path = repo.join(git(&repo, &["rev-parse", "--git-path", "index"]).unwrap());
+        let before = std::fs::read(index_path.clone()).unwrap();
+        let staged = git(&repo, &["diff", "--cached", "--binary"]).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let snapshot = fork_snapshot(&repo, "trunk", true, &id).unwrap();
+        let dest = fixture.0.join("fork");
+        create(&repo, &dest, "fork", &snapshot.head).unwrap();
+        apply_fork_snapshot(&dest, &snapshot).unwrap();
+        assert_eq!(git(&dest, &["rev-parse", "HEAD"]).unwrap(), head);
+        assert_eq!(git(&dest, &["status", "--porcelain"]).unwrap(), status);
+        assert_eq!(
+            git(&dest, &["diff", "--cached", "--binary"]).unwrap(),
+            staged
+        );
+        assert_eq!(std::fs::read(dest.join("tracked")).unwrap(), b"working\n");
+        assert_eq!(
+            std::fs::read(dest.join("new file")).unwrap(),
+            [0, 255, 1, 0]
+        );
+        assert_eq!(
+            std::fs::read_link(dest.join("link")).unwrap(),
+            PathBuf::from("tracked")
+        );
+        assert_eq!(std::fs::read(index_path).unwrap(), before);
+        assert_eq!(git(&repo, &["status", "--porcelain"]).unwrap(), status);
+        assert_eq!(git(&repo, &["rev-parse", "HEAD"]).unwrap(), head);
+        release_fork_snapshot(&repo, &id).unwrap();
+        assert!(
+            git(
+                &repo,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    &format!("refs/sigmadock/forks/{id}")
+                ]
+            )
+            .is_err()
+        );
+        rollback_unstarted_fork(&repo, &dest, "fork", &snapshot.head).unwrap();
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn head_only_fork_ignores_dirty_files_and_snapshot_survives_source_advance() {
+        let fixture = Fixture::new();
+        let repo = fixture.repo();
+        let id = uuid::Uuid::new_v4().to_string();
+        std::fs::write(repo.join("local"), "request-time").unwrap();
+        let clean = fork_snapshot(&repo, "trunk", false, &id).unwrap();
+        let dirty = fork_snapshot(&repo, "trunk", true, &id).unwrap();
+        std::fs::write(repo.join("local"), "later").unwrap();
+        git(&repo, &["config", "user.email", "test@localhost"]).unwrap();
+        git(&repo, &["config", "user.name", "Test"]).unwrap();
+        git(&repo, &["add", "."]).unwrap();
+        git(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "later"],
+        )
+        .unwrap();
+        let dest = fixture.0.join("fork");
+        create(&repo, &dest, "fork", &clean.head).unwrap();
+        apply_fork_snapshot(&dest, &clean).unwrap();
+        assert!(!dest.join("local").exists());
+        apply_fork_snapshot(&dest, &dirty).unwrap();
+        assert_eq!(std::fs::read(dest.join("local")).unwrap(), b"request-time");
+        git(
+            &dest,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@localhost",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "advanced",
+            ],
+        )
+        .unwrap();
+        assert!(rollback_unstarted_fork(&repo, &dest, "fork", &clean.head).is_err());
+        assert!(dest.exists());
+        release_fork_snapshot(&repo, &id).unwrap();
     }
 
     #[test]

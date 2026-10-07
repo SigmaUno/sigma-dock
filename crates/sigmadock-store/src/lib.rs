@@ -290,6 +290,7 @@ mod tests {
         };
         store.save_project(&project).unwrap();
         let worker = Worker {
+            forked_from: None,
             workspace_scripts: Default::default(),
             base_ref: None,
             base_warning: None,
@@ -517,6 +518,8 @@ mod queue_tests {
     use super::*;
     fn task(id: &str, project_id: &str) -> QueuedTask {
         QueuedTask {
+            forked_from: None,
+            fork_snapshot: None,
             fetch_base: false,
             id: id.into(),
             project_id: project_id.into(),
