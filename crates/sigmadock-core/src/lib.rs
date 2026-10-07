@@ -11,6 +11,9 @@ use std::{
     time::Duration,
 };
 
+mod readiness;
+pub use readiness::{GitReadiness, Readiness, ReadinessReport, ReviewComment, ReviewPreview};
+
 pub const API_VERSION: u32 = 2;
 pub const MAX_FRAME: u64 = 4 * 1024 * 1024;
 
@@ -53,6 +56,9 @@ pub enum Review {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Facts {
+    /// Observed PR target branch; absent in older facts.
+    #[serde(default)]
+    pub base_branch: Option<String>,
     pub session: SessionState,
     pub pr: PullRequestState,
     pub checks: Checks,
@@ -67,6 +73,7 @@ pub struct Facts {
 impl Default for Facts {
     fn default() -> Self {
         Self {
+            base_branch: None,
             session: SessionState::Running,
             pr: Default::default(),
             checks: Default::default(),
@@ -795,6 +802,9 @@ pub struct CiEntry {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CiPreview {
+    /// False when a provider endpoint or pagination is incomplete.
+    #[serde(default)]
+    pub complete: bool,
     pub head_sha: String,
     pub current_head: String,
     pub refreshed_at: u64,

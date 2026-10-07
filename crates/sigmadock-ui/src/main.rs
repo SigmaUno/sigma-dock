@@ -3,6 +3,7 @@ mod agent_ui;
 mod appearance_ui;
 mod berths_ui;
 mod bootstrap;
+mod checks_ui;
 mod ci_ui;
 mod diff_ui;
 mod editor;
@@ -198,6 +199,8 @@ struct Workspace {
     usage_report: Option<sigmadock_core::AgentUsage>,
     usage_loading: bool,
     usage_error: Option<String>,
+    checks: checks_ui::ChecksPane,
+    checks_focus: gpui::FocusHandle,
     ci_open: bool,
     ci_report: Option<sigmadock_core::CiPreview>,
     ci_loading: bool,
@@ -305,6 +308,8 @@ impl Workspace {
             usage_report: None,
             usage_loading: false,
             usage_error: None,
+            checks: Default::default(),
+            checks_focus: cx.focus_handle(),
             ci_open: false,
             ci_report: None,
             ci_loading: false,
@@ -752,6 +757,9 @@ impl Workspace {
         }
         if self.form_open {
             content = content.child(self.new_task_form(cx));
+        }
+        if self.checks.worker.is_some() {
+            content = content.child(self.checks_panel(cx));
         }
         content
             .child(self.needs_strip(cx))

@@ -142,6 +142,7 @@ impl Workspace {
     fn more_menu(&self, worker: &Worker, cx: &mut Context<Self>) -> AnyElement {
         let mut items = Vec::new();
         for (label, method) in [
+            ("Checks", "worker_checks"),
             ("Usage", "agent_usage"),
             ("CI preview", "ci_feedback"),
             ("Send CI to agent", "send_ci_feedback"),
@@ -157,9 +158,10 @@ impl Workspace {
                     label.into(),
                     false,
                 )
-                .on_click(cx.listener(move |this, _, _, cx| {
+                .on_click(cx.listener(move |this, _, window, cx| {
                     this.menu = None;
                     match method {
+                        "worker_checks" => this.open_checks(id.clone(), window, cx),
                         "agent_usage" => this.load_usage(cx),
                         "ci_feedback" => this.load_ci(cx),
                         _ => this.run_action(method, json!({"worker_id": id}), cx),
@@ -393,6 +395,10 @@ impl Workspace {
         let mut any_notice = false;
         if let Some(error) = self.error_banner() {
             notices = notices.child(error);
+            any_notice = true;
+        }
+        if self.checks.worker.is_some() {
+            notices = notices.child(self.checks_panel(cx));
             any_notice = true;
         }
         if self.usage_open {
