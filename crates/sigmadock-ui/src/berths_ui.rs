@@ -142,6 +142,7 @@ pub(crate) fn status(worker: &Worker) -> Status {
 pub(crate) struct Preview {
     screen: TerminalState,
     cursor: u64,
+    geometry: (usize, usize),
     pub lines: Vec<String>,
 }
 
@@ -151,15 +152,29 @@ impl Preview {
         Self {
             screen: TerminalState::new(PREVIEW_COLS, PREVIEW_ROWS, GpuiEventProxy::new(events)),
             cursor: 0,
+            geometry: (PREVIEW_COLS, PREVIEW_ROWS),
             lines: Vec::new(),
         }
     }
-    fn feed(&mut self, cursor: u64, bytes: &[u8]) {
-        self.cursor = cursor;
-        if bytes.is_empty() {
-            return;
+    fn feed(&mut self, output: &Output) -> bool {
+        self.cursor = output.cursor;
+        // Keep the last known geometry when talking to an older daemon.
+        let geometry = match (output.cols, output.rows) {
+            (Some(cols @ 1..=1000), Some(rows @ 1..=1000)) => (cols as usize, rows as usize),
+            _ => self.geometry,
+        };
+        let resized = geometry != self.geometry;
+        if resized {
+            self.screen.resize(geometry.0, geometry.1);
+            self.geometry = geometry;
         }
-        self.screen.process_bytes(bytes);
+        if output.bytes.is_empty() && !resized && !output.truncated {
+            return false;
+        }
+        if output.truncated {
+            self.screen.process_bytes(b"\x1bc");
+        }
+        self.screen.process_bytes(&output.bytes);
         let mut lines: Vec<_> = self
             .screen
             .screen_text()
@@ -168,27 +183,26 @@ impl Preview {
             .collect();
         let skip = lines.len().saturating_sub(PREVIEW_LINES);
         self.lines = lines.split_off(skip);
+        true
     }
 }
 
-fn fetch_output(client: &Client, worker: &str, mut cursor: u64) -> Result<(u64, Vec<u8>)> {
-    let mut bytes = Vec::new();
-    // Catch up on a fresh preview without stalling a tick on a full 1 MiB replay.
+fn fetch_output(client: &Client, worker: &str, mut cursor: u64) -> Result<Vec<Output>> {
+    let mut outputs = Vec::new();
+    // Preserve each response's geometry instead of combining differently sized chunks.
+    // Catch up without stalling a tick on a full 1 MiB replay.
     for _ in 0..24 {
         let output: Output = serde_json::from_value(
             client.call("output", json!({"worker_id": worker, "cursor": cursor}))?,
         )?;
-        if output.truncated {
-            bytes.extend_from_slice(b"\x1bc");
-        }
         let read = output.bytes.len();
-        bytes.extend(output.bytes);
         cursor = output.cursor;
+        outputs.push(output);
         if read < OUTPUT_CHUNK {
             break;
         }
     }
-    Ok((cursor, bytes))
+    Ok(outputs)
 }
 
 /// Refreshed together so one poll gives a consistent workspace.
@@ -291,15 +305,14 @@ impl Workspace {
                 if this
                     .update(cx, |this, cx| {
                         let mut changed = false;
-                        for (id, (cursor, bytes)) in updates {
+                        for (id, outputs) in updates {
                             if !this.capacity.live.contains(&id) {
                                 continue;
                             }
-                            changed |= !bytes.is_empty();
-                            this.previews
-                                .entry(id)
-                                .or_insert_with(Preview::new)
-                                .feed(cursor, &bytes);
+                            let preview = this.previews.entry(id).or_insert_with(Preview::new);
+                            for output in outputs {
+                                changed |= preview.feed(&output);
+                            }
                         }
                         // Skip repaint while the full terminal covers the grid.
                         if changed && this.terminal.is_none() {
@@ -1220,12 +1233,53 @@ mod tests {
     }
 
     #[test]
+    fn preview_follows_resize_before_tui_redraw_and_without_new_bytes() {
+        let mut preview = Preview::new();
+        let mut output = Output {
+            cursor: 0,
+            bytes: b"\x1b[2J\x1b[30;120HX".to_vec(),
+            rows: Some(30),
+            cols: Some(120),
+            truncated: false,
+            exited: false,
+        };
+        assert!(preview.feed(&output));
+        assert!(preview.screen.screen_text()[29].ends_with('X'));
+        output.rows = Some(24);
+        output.cols = Some(80);
+        output.bytes = b"\x1b[2J\x1b[24;80HY".to_vec();
+        assert!(preview.feed(&output));
+        let screen = preview.screen.screen_text();
+        assert_eq!(screen.len(), 24);
+        assert_eq!(screen[23].chars().count(), 80);
+        assert!(screen[23].ends_with('Y'));
+        output.bytes.clear();
+        output.cols = Some(100);
+        assert!(preview.feed(&output));
+        assert_eq!(preview.geometry, (100, 24));
+        assert!(!preview.feed(&output));
+        let legacy: Output = serde_json::from_value(json!({
+            "cursor": 0, "bytes": [], "truncated": false, "exited": false
+        }))
+        .unwrap();
+        assert!(!preview.feed(&legacy));
+        assert_eq!(preview.geometry, (100, 24));
+    }
+
+    #[test]
     fn preview_keeps_the_last_non_blank_rows() {
         let mut preview = Preview::new();
         let bytes: Vec<u8> = (1..=10)
             .flat_map(|n| format!("line {n}\r\n").into_bytes())
             .collect();
-        preview.feed(bytes.len() as u64, &bytes);
+        preview.feed(&Output {
+            cursor: bytes.len() as u64,
+            bytes: bytes.clone(),
+            rows: Some(30),
+            cols: Some(120),
+            truncated: false,
+            exited: false,
+        });
         assert_eq!(preview.lines.len(), PREVIEW_LINES);
         assert_eq!(preview.lines.last().map(String::as_str), Some("line 10"));
         assert_eq!(preview.cursor, bytes.len() as u64);

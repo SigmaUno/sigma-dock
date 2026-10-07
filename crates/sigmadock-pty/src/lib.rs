@@ -13,6 +13,8 @@ use std::{
 const CAPACITY: usize = 1024 * 1024;
 const CHUNK: usize = 64 * 1024;
 struct State {
+    rows: u16,
+    cols: u16,
     output: VecDeque<u8>,
     cursor: u64,
     last_activity: Instant,
@@ -57,6 +59,8 @@ impl Session {
         let child = Arc::new(Mutex::new(child));
         drop(pair.slave);
         let state = Arc::new(Mutex::new(State {
+            rows: 30,
+            cols: 120,
             output: VecDeque::new(),
             cursor: 0,
             last_activity: Instant::now(),
@@ -136,12 +140,15 @@ impl Session {
         if rows == 0 || cols == 0 || rows > 1000 || cols > 1000 {
             bail!("terminal dimensions must be 1..1000");
         }
+        let mut state = self.state.lock().unwrap();
         self.master.lock().unwrap().resize(PtySize {
             rows,
             cols,
             pixel_width: 0,
             pixel_height: 0,
         })?;
+        state.rows = rows;
+        state.cols = cols;
         Ok(())
     }
     pub fn stop(&self) -> Result<()> {
@@ -226,6 +233,8 @@ impl Session {
             .copied()
             .collect();
         Output {
+            rows: Some(state.rows),
+            cols: Some(state.cols),
             cursor: offset + bytes.len() as u64,
             exited: state.exited && state.eof && offset + bytes.len() as u64 == state.cursor,
             bytes,
@@ -292,7 +301,20 @@ mod tests {
             Path::new("/tmp"),
         )
         .unwrap();
+        assert_eq!(
+            (session.output(0).cols, session.output(0).rows),
+            (Some(120), Some(30))
+        );
         session.resize(24, 80).unwrap();
+        assert_eq!(
+            (session.output(0).cols, session.output(0).rows),
+            (Some(80), Some(24))
+        );
+        assert!(session.resize(0, 80).is_err());
+        assert_eq!(
+            (session.output(0).cols, session.output(0).rows),
+            (Some(80), Some(24))
+        );
         session.write(b"hello\n").unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while !session.output(0).exited && Instant::now() < deadline {

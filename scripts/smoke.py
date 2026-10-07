@@ -93,6 +93,8 @@ with tempfile.TemporaryDirectory(prefix='sigma-smoke-', dir='/tmp') as temp:
         assert mcp_status['column'] == mcp_status['status'], mcp_status
         rpc('resize', {'worker_id': w['id'], 'rows': 40, 'cols': 100})
         rpc('resize', {'worker_id': w['id'], 'rows': 0, 'cols': 100}, error=True)
+        resized_output = rpc('output', {'worker_id': w['id'], 'cursor': 0})
+        assert (resized_output['cols'], resized_output['rows']) == (100, 40)
         rpc('input', {'worker_id': w['id'], 'bytes': list(b"printf 'SIGMA_PTY_OK\\n'\n")})
         wait_for(lambda: b'SIGMA_PTY_OK' in bytes(rpc('output', {'worker_id': w['id'], 'cursor': 0})['bytes']))
         assert 'one' in run(str(BIN / 'sdk'), '--socket', sock, 'ls')
