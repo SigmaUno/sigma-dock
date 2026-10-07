@@ -13,6 +13,7 @@ mod inbox_ui;
 mod keyboard_ui;
 mod preferences;
 mod recovery_ui;
+mod scripts_ui;
 mod settings_ui;
 mod summary_ui;
 mod theme;
@@ -48,13 +49,17 @@ struct Args {
     no_daemon: bool,
 }
 struct RemoteWriter {
+    script: Option<String>,
     client: Client,
     worker: String,
 }
 impl Write for RemoteWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         self.client
-            .call("input", json!({"worker_id":self.worker,"bytes":bytes}))
+            .call(
+                "input",
+                json!({"worker_id":self.worker,"script":self.script,"bytes":bytes}),
+            )
             .map_err(io::Error::other)?;
         Ok(bytes.len())
     }
@@ -63,6 +68,7 @@ impl Write for RemoteWriter {
     }
 }
 struct RemoteReader {
+    script: Option<String>,
     client: Client,
     worker: String,
     cursor: u64,
@@ -73,6 +79,14 @@ struct RemoteReader {
     events: events::EventFeed,
     observed: Option<events::WakeStamp>,
     more: bool,
+}
+impl RemoteReader {
+    fn event_key(&self) -> String {
+        self.script.as_ref().map_or_else(
+            || self.worker.clone(),
+            |script| format!("{}/{script}", self.worker),
+        )
+    }
 }
 impl Read for RemoteReader {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
@@ -93,11 +107,11 @@ impl Read for RemoteReader {
                 return Ok(0);
             }
             let stamp = if self.more {
-                self.events.stamp(&self.worker)
+                self.events.stamp(&self.event_key())
             } else {
                 let Some(stamp) =
                     self.events
-                        .wait_for_output(&self.worker, self.observed, &self.connected)
+                        .wait_for_output(&self.event_key(), self.observed, &self.connected)
                 else {
                     return Ok(0);
                 };
@@ -120,7 +134,7 @@ impl Read for RemoteReader {
                 self.client
                     .call(
                         "output",
-                        json!({"worker_id":self.worker,"cursor":self.cursor}),
+                        json!({"worker_id":self.worker,"script":self.script,"cursor":self.cursor}),
                     )
                     .map_err(io::Error::other)?,
             )
@@ -158,6 +172,8 @@ struct Workspace {
     /// Projects whose agents are hidden in the sidebar tree.
     collapsed: std::collections::HashSet<String>,
     diff: diff_ui::DiffState,
+    scripts: scripts_ui::ScriptsPane,
+    terminal_script: Option<String>,
     inbox: inbox_ui::InboxState,
     menu: Option<Menu>,
     events: events::EventMonitor,
@@ -256,6 +272,7 @@ impl Workspace {
                 if this
                     .update(cx, |this, cx| {
                         this.apply_snapshot(snapshot);
+                        this.refresh_scripts_phase(cx);
                         if this.preferences.updates.due(updates::now()) {
                             this.check_updates(false, cx);
                         }
@@ -287,6 +304,7 @@ impl Workspace {
                     .update(cx, |this, cx| {
                         if this.terminal.is_some() {
                             this.load_changes(cx);
+                            this.load_scripts(cx);
                         } else if this.view == View::Inbox {
                             this.load_inbox(false, cx);
                             this.ensure_chat(cx);
@@ -303,6 +321,8 @@ impl Workspace {
             view: View::Berths,
             collapsed: Default::default(),
             diff: Default::default(),
+            scripts: Default::default(),
+            terminal_script: None,
             inbox: Default::default(),
             menu: None,
             events: event_monitor,
@@ -376,6 +396,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Entity<TerminalView> {
         let reader = RemoteReader {
+            script: self.terminal_script.clone(),
             client: self.client.clone(),
             worker: id.to_owned(),
             cursor: 0,
@@ -388,10 +409,12 @@ impl Workspace {
             more: false,
         };
         let writer = RemoteWriter {
+            script: self.terminal_script.clone(),
             client: self.client.clone(),
             worker: id.to_owned(),
         };
         let resize_client = self.client.clone();
+        let resize_script = self.terminal_script.clone();
         let resize_worker = id.to_owned();
         let config = self
             .theme
@@ -401,7 +424,7 @@ impl Workspace {
             TerminalView::new(writer, reader, config, cx).with_resize_callback(move |cols, rows| {
                 let _ = resize_client.call(
                     "resize",
-                    json!({"worker_id":resize_worker,"cols":cols,"rows":rows}),
+                    json!({"worker_id":resize_worker,"script":resize_script,"cols":cols,"rows":rows}),
                 );
             })
         })
@@ -418,6 +441,22 @@ impl Workspace {
         self.ci_error = None;
         self.ci_expanded = None;
         self.menu = None;
+        self.terminal_script = match self
+            .workers
+            .iter()
+            .find(|worker| worker.id == id)
+            .map(|worker| worker.workspace_scripts.phase)
+        {
+            Some(
+                sigmadock_core::workspace_scripts::Phase::SettingUp
+                | sigmadock_core::workspace_scripts::Phase::SetupFailed,
+            ) => Some("setup".into()),
+            Some(
+                sigmadock_core::workspace_scripts::Phase::Archiving
+                | sigmadock_core::workspace_scripts::Phase::ArchiveFailed,
+            ) => Some("archive".into()),
+            _ => None,
+        };
         self.connection.store(false, Ordering::Relaxed);
         self.connection = Arc::new(AtomicBool::new(true));
         let terminal = self.connect_terminal(&id, self.connection.clone(), cx);
@@ -429,6 +468,15 @@ impl Workspace {
             self.diff.request = request;
         }
         self.selected = Some(id);
+        self.scripts.request += 1;
+        self.scripts.loading = false;
+        self.scripts.value = None;
+        self.scripts.phase = self
+            .workers
+            .iter()
+            .find(|worker| Some(&worker.id) == self.selected.as_ref())
+            .map(|worker| worker.workspace_scripts.phase);
+        self.load_scripts(cx);
         self.load_changes(cx);
         cx.notify();
     }
@@ -462,6 +510,7 @@ impl Workspace {
                             cx.notify();
                             return;
                         }
+                        this.load_scripts(cx);
                         if let Some(text) = value
                             .as_str()
                             .or_else(|| value.get("text").and_then(serde_json::Value::as_str))
@@ -469,7 +518,15 @@ impl Workspace {
                             this.details = text.into();
                         }
                     }
-                    Err(error) => this.error = Some(error.to_string()),
+                    Err(error) => {
+                        this.error = Some(error.to_string());
+                        if matches!(
+                            method,
+                            "run_script" | "approve_scripts" | "setup_worker" | "archive_worker"
+                        ) {
+                            this.load_scripts(cx);
+                        }
+                    }
                 }
                 cx.notify();
             });
@@ -899,6 +956,7 @@ mod reader_tests {
             signal,
         });
         let mut reader = RemoteReader {
+            script: None,
             client: Client {
                 socket: path.clone(),
             },

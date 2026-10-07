@@ -128,6 +128,21 @@ pub(crate) struct Status {
 }
 
 pub(crate) fn status(worker: &Worker) -> Status {
+    if worker.workspace_scripts.phase != sigmadock_core::workspace_scripts::Phase::Ready {
+        return Status {
+            pill: worker.workspace_scripts.phase.label().into(),
+            tone: if matches!(
+                worker.workspace_scripts.phase,
+                sigmadock_core::workspace_scripts::Phase::SettingUp
+                    | sigmadock_core::workspace_scripts::Phase::Archiving
+            ) {
+                Tone::Working
+            } else {
+                Tone::Blocked
+            },
+            action: None,
+        };
+    }
     let facts = &worker.facts;
     let (pill, tone, action): (String, _, _) = match derived_status(facts) {
         DerivedStatus::NeedsYou => match () {
@@ -1236,6 +1251,7 @@ impl Workspace {
                     .text_color(rgb(theme.muted))
                     .child(role.to_owned()),
             )
+            .child(self.berth_script_actions(worker, cx))
             .child(
                 div()
                     .flex()

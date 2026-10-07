@@ -1,4 +1,5 @@
 mod events;
+mod scripts;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use fs2::FileExt;
@@ -58,6 +59,7 @@ struct Daemon {
     store: Store,
     workers: HashMap<String, Worker>,
     sessions: HashMap<String, Arc<Session>>,
+    script_sessions: HashMap<(String, String), Arc<Session>>,
     usage: HashMap<String, sigmadock_core::AgentUsage>,
     context_floor: HashMap<String, u64>,
     checkpoints: HashMap<String, (std::time::Instant, (u64, u64, SessionState))>,
@@ -70,6 +72,7 @@ struct Daemon {
     mcp_binary: PathBuf,
     socket: PathBuf,
     idle_seconds: u64,
+    shutting_down: bool,
 }
 impl Daemon {
     fn publish_events(&mut self) -> Result<()> {
@@ -113,6 +116,27 @@ impl Daemon {
             .sessions
             .iter()
             .map(|(id, session)| (id.clone(), session.output_signal()))
+            .chain(
+                self.script_sessions
+                    .iter()
+                    .flat_map(|((id, name), session)| {
+                        let mut signals = vec![(format!("{id}/{name}"), session.output_signal())];
+                        if self.workers.get(id).is_some_and(|worker| {
+                            use sigmadock_core::workspace_scripts::Phase;
+                            matches!(
+                                worker.workspace_scripts.phase,
+                                Phase::SettingUp | Phase::SetupFailed
+                            ) && name == "setup"
+                                || matches!(
+                                    worker.workspace_scripts.phase,
+                                    Phase::Archiving | Phase::ArchiveFailed
+                                ) && name == "archive"
+                        }) {
+                            signals.push((id.clone(), session.output_signal()));
+                        }
+                        signals
+                    }),
+            )
             .collect();
         for (id, signal) in &outputs {
             if self.event_stamp.outputs.get(id) != Some(signal) {
@@ -132,6 +156,9 @@ impl Daemon {
         Ok(())
     }
     fn sync(&mut self) -> Result<()> {
+        if !self.shutting_down {
+            self.scripts_sync()?;
+        }
         for (id, session) in &self.sessions {
             if let Some(worker) = self.workers.get_mut(id) {
                 let key = session.checkpoint_key();
@@ -156,6 +183,13 @@ impl Daemon {
                         .insert(id.clone(), (std::time::Instant::now(), key));
                 }
                 let (state, code) = session.facts();
+                if state == SessionState::Exited {
+                    session.stop()?;
+                }
+                if worker.workspace_scripts.phase != sigmadock_core::workspace_scripts::Phase::Ready
+                {
+                    continue;
+                }
                 if worker.facts.session != state || worker.facts.exit_code != code {
                     if state == SessionState::Exited && worker.facts.session != SessionState::Exited
                     {
@@ -176,13 +210,28 @@ impl Daemon {
     }
     fn session(&self, params: &Value) -> Result<Arc<Session>> {
         let worker = self.worker(params)?;
+        let script = params["script"].as_str().map(str::to_owned).or_else(|| {
+            use sigmadock_core::workspace_scripts::Phase;
+            match worker.workspace_scripts.phase {
+                Phase::SettingUp | Phase::SetupFailed => Some("setup".into()),
+                Phase::Archiving | Phase::ArchiveFailed => Some("archive".into()),
+                _ => None,
+            }
+        });
+        if let Some(script) = script {
+            return self
+                .script_sessions
+                .get(&(worker.id.clone(), script))
+                .cloned()
+                .context("script has no session yet");
+        }
         if worker.archived {
             bail!("worker is archived");
         }
         self.sessions
             .get(&worker.id)
             .cloned()
-            .context("no live session; resume the worker")
+            .context("no live session; finish setup or resume the worker")
     }
     fn project(&self, id: &str) -> Result<Project> {
         let mut project = self
@@ -300,6 +349,9 @@ impl Daemon {
         ))
     }
     fn dispatch(&mut self, method: &str, params: Value) -> Result<Value> {
+        if self.shutting_down {
+            bail!("daemon is shutting down");
+        }
         self.sync()?;
         match method {
             "session_attention" => {
@@ -597,6 +649,10 @@ impl Daemon {
             }
             "resume_worker" => {
                 let mut worker = self.worker(&params)?.clone();
+                if worker.workspace_scripts.phase != sigmadock_core::workspace_scripts::Phase::Ready
+                {
+                    bail!("finish or skip setup, or resolve the archive hook, before resuming");
+                }
                 if worker.archived {
                     bail!("worker is archived");
                 }
@@ -673,42 +729,48 @@ impl Daemon {
                 self.session(&params)?.resize(rows, cols)?;
                 Ok(json!(true))
             }
-            "output" => Ok(serde_json::to_value(
-                self.session(&params)?
-                    .output(params["cursor"].as_u64().unwrap_or(0)),
-            )?),
+            "output" => match self.session(&params) {
+                Ok(session) => {
+                    let mut value = serde_json::to_value(
+                        session.output(params["cursor"].as_u64().unwrap_or(0)),
+                    )?;
+                    value["generation"] = json!(session.output_signal().generation);
+                    Ok(value)
+                }
+                Err(_) => {
+                    let worker = self.worker(&params)?;
+                    let placeholder = b"No terminal output yet. Review scripts or start the selected session.\r\n";
+                    let cursor = params["cursor"].as_u64().unwrap_or(0);
+                    Ok(
+                        json!({"bytes":if cursor == 0 { placeholder.to_vec() } else { Vec::new() },"cursor":placeholder.len(),"exited":worker.archived,"truncated":false,"rows":30,"cols":120,"generation":0}),
+                    )
+                }
+            },
             "stop_worker" => {
-                self.session(&params)?.stop()?;
-                Ok(json!(true))
-            }
-            "archive_worker" => {
                 let mut worker = self.worker(&params)?.clone();
-                if self
-                    .sessions
-                    .get(&worker.id)
-                    .is_some_and(|s| s.facts().0 != SessionState::Exited)
-                {
-                    bail!("stop the worker before archiving");
+                if let Some(session) = self.sessions.get(&worker.id) {
+                    session.stop()?;
                 }
-                if params["cleanup"] == true && worker.worktree.exists() {
-                    let project = self.project(&worker.project_id)?;
-                    if !sigmadock_git::clean(&worker.worktree)? {
-                        bail!("worktree has uncommitted files; cleanup refused");
+                for ((id, _), session) in &self.script_sessions {
+                    if id == &worker.id {
+                        session.stop()?;
                     }
-                    sigmadock_git::remove(&project.path, &worker.worktree)?;
                 }
-                self.store.clear_context(&worker.id)?;
-                self.context_floor.remove(&worker.id);
-                self.checkpoints.remove(&worker.id);
-                self.usage.remove(&worker.id);
-                worker.archived = true;
-                worker.archived_at = Some(sigmadock_core::unix_time());
-                self.store.save_worker(&worker)?;
-                self.ports.release(worker.port);
-                self.sessions.remove(&worker.id);
-                self.forges.remove(&worker.id);
-                self.workers.insert(worker.id.clone(), worker);
-                Ok(json!(true))
+                if worker.workspace_scripts.phase
+                    == sigmadock_core::workspace_scripts::Phase::SettingUp
+                {
+                    worker.workspace_scripts.phase =
+                        sigmadock_core::workspace_scripts::Phase::SetupFailed;
+                    worker.workspace_scripts.error =
+                        Some("Setup stopped; retry, skip, or archive.".into());
+                    worker.facts.session = SessionState::NeedsInput;
+                }
+                worker.workspace_scripts.pending_run = None;
+                self.save_scripts_worker(worker)
+            }
+            "archive_worker" => self.request_archive(&params),
+            "workspace_scripts" | "approve_scripts" | "setup_worker" | "run_script" => {
+                self.scripts_call(method, &params)
             }
             "prune" => Ok(json!(sigmadock_git::prune(
                 &self.project(string(&params, "project_id")?)?.path
@@ -834,7 +896,8 @@ impl Daemon {
             (base.to_owned(), None, reference)
         };
         let port = self.ports.allocate()?;
-        let worker = Worker {
+        let mut worker = Worker {
+            workspace_scripts: Default::default(),
             base_ref: Some(base_ref),
             base_warning,
             berth,
@@ -865,21 +928,24 @@ impl Daemon {
             self.ports.release(port);
             return Err(error);
         }
-        let session = match self.start_session(&worker, prompt, false) {
-            Ok(session) => session,
+        // Validate the actual selected worktree config before publishing or executing it.
+        let document = match sigmadock_core::workspace_scripts::Document::read(&worker.worktree) {
+            Ok(document) => document,
             Err(error) => {
                 sigmadock_git::rollback(&project.path, &worker.worktree, &worker.branch);
                 self.ports.release(port);
                 return Err(error);
             }
         };
+        worker.workspace_scripts.hash = document.as_ref().map(|doc| doc.hash.clone());
+        worker.workspace_scripts.phase = sigmadock_core::workspace_scripts::Phase::AwaitingApproval;
+        worker.facts.session = SessionState::NeedsInput;
         let saved = if queued_id.is_some() {
             self.store.finish_queued(&worker)
         } else {
             self.store.save_worker(&worker)
         };
         if let Err(error) = saved {
-            let _ = session.stop();
             sigmadock_git::rollback(&project.path, &worker.worktree, &worker.branch);
             self.ports.release(port);
             return Err(error);
@@ -887,9 +953,17 @@ impl Daemon {
         if let Some(forge) = forge {
             self.forges.insert(id.clone(), forge);
         }
-        self.sessions.insert(id.clone(), session);
         self.workers.insert(id, worker.clone());
-        Ok(serde_json::to_value(worker)?)
+        match self.begin_setup(worker.clone()) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                worker.workspace_scripts.phase =
+                    sigmadock_core::workspace_scripts::Phase::SetupFailed;
+                worker.workspace_scripts.error = Some(error.to_string());
+                worker.facts.session = SessionState::NeedsInput;
+                self.save_scripts_worker(worker)
+            }
+        }
     }
     fn task(&self, params: &Value) -> Result<QueuedTask> {
         let project = self.project(string(params, "project_id")?)?;
@@ -972,10 +1046,9 @@ impl Daemon {
     }
     fn capacity(&self) -> Result<sigmadock_core::Capacity> {
         let mut live: Vec<_> = self
-            .sessions
-            .iter()
-            .filter(|(_, session)| session.facts().0 != SessionState::Exited)
-            .filter_map(|(id, _)| self.workers.get(id))
+            .workers
+            .values()
+            .filter(|worker| self.worker_occupies_berth(worker))
             .filter(|worker| worker.role == WorkerRole::Worker)
             .collect();
         live.sort_by_key(|worker| (worker.berth, worker.created_at, &worker.id));
@@ -1009,10 +1082,9 @@ impl Daemon {
     /// A free slot among the project's own berths; `max_workers` is a per-project limit.
     fn free_berth(&self, project_id: &str, previous: Option<u8>) -> Result<u8> {
         let occupied: Vec<_> = self
-            .sessions
-            .iter()
-            .filter(|(_, session)| session.facts().0 != SessionState::Exited)
-            .filter_map(|(id, _)| self.workers.get(id))
+            .workers
+            .values()
+            .filter(|worker| self.worker_occupies_berth(worker))
             .filter(|worker| worker.role == WorkerRole::Worker && worker.project_id == project_id)
             .filter_map(|worker| worker.berth)
             .collect();
@@ -1148,6 +1220,70 @@ fn configure_project_forge(state: &Arc<Mutex<Daemon>>, params: &Value) -> Result
     Ok(json!({"project": project, "workers": ids.len()}))
 }
 fn external_call(state: &Arc<Mutex<Daemon>>, method: &str, params: &Value) -> Result<Value> {
+    if method == "resume_worker" {
+        let deadline = std::time::Instant::now() + Duration::from_secs(4);
+        loop {
+            let wait = {
+                let daemon = state.lock().unwrap();
+                let worker = daemon.worker(params)?;
+                daemon
+                    .sessions
+                    .get(&worker.id)
+                    .is_some_and(|session| session.is_stopping() && !session.terminated())
+            };
+            if !wait {
+                return state.lock().unwrap().dispatch(method, params.clone());
+            }
+            if std::time::Instant::now() >= deadline {
+                bail!("previous session is still stopping; retry after cleanup");
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+    if method == "archive_worker" {
+        let (result, wait_without_config) = {
+            let mut daemon = state.lock().unwrap();
+            daemon.sync()?;
+            let result = daemon.request_archive(params)?;
+            let worker = daemon.worker(params)?;
+            (
+                result,
+                !worker.archived && worker.workspace_scripts.hash.is_none(),
+            )
+        };
+        if !wait_without_config {
+            return Ok(result);
+        }
+        // Preserve the synchronous archive contract for repositories without hooks,
+        // while allowing the supervisor to drain process groups outside this lock.
+        let deadline = std::time::Instant::now() + Duration::from_secs(4);
+        loop {
+            {
+                let mut daemon = state.lock().unwrap();
+                daemon.sync()?;
+                let worker = daemon.worker(params)?;
+                if worker.archived {
+                    return Ok(json!(true));
+                }
+                if worker.workspace_scripts.phase
+                    == sigmadock_core::workspace_scripts::Phase::ArchiveFailed
+                {
+                    bail!(
+                        "{}",
+                        worker
+                            .workspace_scripts
+                            .error
+                            .as_deref()
+                            .unwrap_or("archive failed")
+                    );
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                bail!("archive still stopping child processes; inspect worker status");
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
     if method == "worker_checks" {
         let (worker, project, forge) = {
             let mut daemon = state.lock().unwrap();
@@ -1482,6 +1618,8 @@ fn serve(mut stream: UnixStream, state: Arc<Mutex<Daemon>>) -> Result<()> {
                 | "diff"
                 | "inbox"
                 | "configure_project_forge"
+                | "archive_worker"
+                | "resume_worker"
                 | "check_forge"
         )
     ) {
@@ -1574,6 +1712,7 @@ fn main() -> Result<()> {
         store,
         workers,
         sessions: HashMap::new(),
+        script_sessions: HashMap::new(),
         usage: HashMap::new(),
         checkpoints: HashMap::new(),
         context_floor: HashMap::new(),
@@ -1590,6 +1729,7 @@ fn main() -> Result<()> {
         ),
         socket: socket.clone(),
         idle_seconds: args.idle_seconds,
+        shutting_down: false,
     }));
     let listener = UnixListener::bind(&socket)?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
@@ -1739,17 +1879,25 @@ fn main() -> Result<()> {
             connections.fetch_sub(1, Ordering::SeqCst);
         });
     }
-    state.lock().unwrap().events.close();
-    let sessions: Vec<_> = state.lock().unwrap().sessions.values().cloned().collect();
-    for session in &sessions {
-        if session.facts().0 != SessionState::Exited {
-            let _ = session.stop();
-        }
-    }
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while sessions.iter().any(|s| s.facts().0 != SessionState::Exited)
-        && std::time::Instant::now() < deadline
     {
+        let mut daemon = state.lock().unwrap();
+        daemon.shutting_down = true;
+        daemon.events.close();
+    }
+    let sessions: Vec<_> = {
+        let daemon = state.lock().unwrap();
+        daemon
+            .sessions
+            .values()
+            .chain(daemon.script_sessions.values())
+            .cloned()
+            .collect()
+    };
+    for session in &sessions {
+        let _ = session.stop();
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    while sessions.iter().any(|s| !s.terminated()) && std::time::Instant::now() < deadline {
         thread::sleep(Duration::from_millis(20));
     }
     state.lock().unwrap().sync()?;

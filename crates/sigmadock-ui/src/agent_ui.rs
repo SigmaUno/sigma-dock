@@ -15,7 +15,7 @@ use sigmadock_core::{SessionState, Worker};
 const MONO: &str = "Menlo";
 
 impl Workspace {
-    fn header_button(&self, id: &'static str) -> Stateful<Div> {
+    pub(crate) fn header_button(&self, id: impl Into<gpui::ElementId>) -> Stateful<Div> {
         let theme = self.theme;
         div()
             .id(id)
@@ -392,7 +392,8 @@ impl Workspace {
             .flex_col()
             .child(self.agent_header(worker.as_ref(), cx));
         let mut notices = div().flex().flex_col().gap_2().px_4().pt_2();
-        let mut any_notice = false;
+        let mut any_notice = true;
+        notices = notices.child(self.scripts_panel(cx));
         if let Some(error) = self.error_banner() {
             notices = notices.child(error);
             any_notice = true;

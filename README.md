@@ -189,3 +189,48 @@ Update checks compare tagged semantic versions and require a compatible macOS in
 The interface follows system appearance using Catppuccin Latte (light) and Mocha (dark), including live system-mode changes. New terminal preferences also follow the system palette. **Terminal colors: custom** and edited colors preserve your choices independently; existing preference files retain their saved colors. Catppuccin and Lucide icon attribution is included in app and crate packages.
 
 **CI preview** opens a native results pane for the selected worker, with checks/statuses/workflows/jobs, commit and refresh time, expandable details, copy buttons and source links. Refresh is independent of the terminal. Changed-head results are marked stale. GitHub shows API check output, annotations and job steps without following log-download redirects; Forgejo Actions remain opt-in and show bounded failed-job log excerpts where supported. `sdk ci-preview WORKER_ID` returns the same structured report; `sdk ci WORKER_ID` remains feedback preview.
+
+### Repository workspace scripts
+
+Check in `.sigmadock.toml` at your repository root to prepare every worker consistently:
+
+```toml
+[scripts]
+setup = """
+pnpm install
+cp "$SIGMA_DOCK_ROOT_PATH/.env" .env
+"""
+archive = "./script/sigmadock-archive.sh"
+run_mode = "concurrent" # nonconcurrent stops the other runs in this worker first
+
+[scripts.run.web]
+command = "pnpm dev --port $PORT"
+default = true
+
+[scripts.run.test-watch]
+command = "pnpm test --watch"
+```
+
+Hooks execute through `/bin/sh -c` in the selected worker's worktree. Every script receives `SIGMA_DOCK_ROOT_PATH`, `SIGMA_DOCK_WORKTREE_PATH`, `SIGMA_DOCK_WORKER_ID`, `SIGMA_DOCK_BRANCH` and the worker's leased `PORT`. Ignore generated files (such as `.env` and dependency folders) in Git, or remove them in the archive hook before requesting cleanup.
+
+A new worker waits for approval of the exact file contents before executing any repository hook. Open its berth to review the complete config and approve it. Approval is stored per project in SQLite and invalidated when the content hash changes. Skipping setup starts the agent without approving or executing scripts. Setup runs before the agent; failure leaves the worker blocked with output and **Retry setup**, **Skip setup and start agent**, and **Archive** actions. Run/stop actions appear in the agent list; each named run has a separate attachable terminal in the worker view.
+
+```sh
+sdk scripts WORKER_ID                       # review contents, commands, SHA-256 and approval
+sdk scripts WORKER_ID --approve HASH        # approve exactly the reviewed contents
+sdk setup WORKER_ID                         # retry a failed setup
+sdk setup WORKER_ID --skip                  # start the agent without running setup
+sdk run WORKER_ID                           # start the default run
+sdk run WORKER_ID test-watch
+sdk attach WORKER_ID --script run:test-watch # Ctrl-] detaches without stopping the run
+sdk run WORKER_ID --stop                    # stop this worker's run scripts
+sdk run WORKER_ID test-watch --stop
+sdk attach WORKER_ID --script setup
+sdk stop WORKER_ID                          # stop the agent and its script sessions
+sdk archive WORKER_ID --cleanup             # stream archive output, then remove a clean worktree
+sdk archive WORKER_ID --cleanup --force     # continue after hook failure; approval still required
+```
+
+Archive hooks run before any cleanup. A hook failure blocks archive; `--force` permits continuation after that hook's failure, but still refuses uncommitted files. After an interrupted daemon session, inspect surviving processes before using `--acknowledge-unknown` with `sdk setup`, `sdk resume`, or `sdk archive`. Hooks are never rerun automatically after a restart. Archive output for the 32 most recent archived workers is retained in memory until daemon restart; agent recovery checkpoints remain persisted separately.
+
+Stopping sends SIGTERM to the PTY process group, then SIGKILL after two seconds. Descendants still reachable in the process tree at stop time are also signalled, including children that created their own session; independently reparented processes that escaped before stop are outside this guarantee. Nonconcurrent runs wait for this cleanup before the next command starts. A config is limited to 64 KiB and 16 named runs; unknown fields, invalid modes, empty commands and multiple defaults produce errors. Per-user config overrides and port ranges are not supported.
