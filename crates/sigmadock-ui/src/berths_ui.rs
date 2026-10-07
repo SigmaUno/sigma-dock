@@ -1,5 +1,6 @@
 //! Berths: one fixed slot per live session, a project sidebar and a needs-you strip.
 use crate::Workspace;
+use crate::icons::{Icon, icon};
 use anyhow::Result;
 use gpui::{
     BoxShadow, Context, FontWeight, SharedString, Window, div, point, prelude::*, px, rgb, rgba,
@@ -508,11 +509,21 @@ impl Workspace {
             )
             .child(
                 div()
-                    .truncate()
-                    .text_xs()
-                    .font_family(MONO)
-                    .text_color(rgb(theme.muted))
-                    .child(subtitle),
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .when(project.is_some(), |row| {
+                        row.child(icon(Icon::Folder, px(12.), rgb(theme.muted)))
+                    })
+                    .child(
+                        div()
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_xs()
+                            .font_family(MONO)
+                            .text_color(rgb(theme.muted))
+                            .child(subtitle),
+                    ),
             )
             .child(dots)
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -551,7 +562,7 @@ impl Workspace {
                 cx,
             ));
         }
-        let link = |id: &'static str, glyph: &'static str, label: String| {
+        let link = |id: &'static str, glyph: Icon, label: String| {
             div()
                 .id(id)
                 .flex()
@@ -563,7 +574,7 @@ impl Workspace {
                 .cursor_pointer()
                 .text_color(rgb(theme.muted))
                 .hover(|style| style.bg(rgb(theme.panel)))
-                .child(div().font_family(MONO).text_sm().child(glyph))
+                .child(icon(glyph, px(16.), rgb(theme.muted)))
                 .child(div().flex_1().child(label))
         };
         div()
@@ -593,14 +604,14 @@ impl Workspace {
                     .child(projects),
             )
             .child(
-                link("add-repository", "+", "Add repository…".into())
+                link("add-repository", Icon::Plus, "Add repository…".into())
                     .on_click(cx.listener(|this, _, _, cx| this.add_repository(cx))),
             )
             .child(div().h(px(1.)).bg(rgb(theme.border)))
             .child(
                 link(
                     "show-unfinished",
-                    ">_",
+                    Icon::Terminal,
                     format!("Unfinished sessions  {}", self.recovery_entries.len()),
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -609,7 +620,7 @@ impl Workspace {
                 })),
             )
             .child(
-                link("terminal-settings", "⚙", "Settings".into())
+                link("terminal-settings", Icon::Settings, "Settings".into())
                     .tab_index(0)
                     .border_1()
                     .border_color(gpui::transparent_black())
@@ -704,7 +715,7 @@ impl Workspace {
                 .gap_2()
                 .text_sm()
                 .text_color(rgb(theme.muted))
-                .child(div().text_color(rgb(theme.success)).child("✓"))
+                .child(icon(Icon::Check, px(16.), rgb(theme.success)))
                 .child("Nothing needs you")
                 .into_any_element();
         }
@@ -787,9 +798,13 @@ impl Workspace {
                 Action::SendCi => "Send CI to agent",
                 Action::OpenPr(_) => "Open PR",
             };
+            let pr = matches!(action, Action::OpenPr(_));
             let id = id.clone();
             div()
                 .id(SharedString::from(format!("berth-action-{id}")))
+                .flex()
+                .items_center()
+                .gap_1p5()
                 .px_3()
                 .py_1()
                 .rounded_md()
@@ -798,6 +813,9 @@ impl Workspace {
                 .text_color(rgb(theme.surface))
                 .text_sm()
                 .font_weight(FontWeight::MEDIUM)
+                .when(pr, |button| {
+                    button.child(icon(Icon::GitPullRequest, px(14.), rgb(theme.surface)))
+                })
                 .child(label)
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
@@ -881,13 +899,14 @@ impl Workspace {
                             .text_color(rgb(theme.muted))
                             .child(agent_label(&worker.agent).to_owned()),
                     )
+                    .child(icon(Icon::GitBranch, px(14.), rgb(theme.muted)))
                     .child(
                         div()
                             .min_w(px(0.))
                             .truncate()
                             .font_family(MONO)
                             .text_color(rgb(theme.muted))
-                            .child(format!("⑂ {}", worker.branch)),
+                            .child(worker.branch.clone()),
                     ),
             )
             .child(preview)

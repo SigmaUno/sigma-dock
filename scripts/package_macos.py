@@ -126,6 +126,7 @@ def main():
     shutil.copy2(ROOT / 'assets/icon/AppIcon.icns', resources / 'AppIcon.icns')
     shutil.copy2(ROOT / 'LICENSE', resources / 'LICENSE')
     shutil.copy2(ROOT / 'packaging/licenses/Catppuccin.txt', resources / 'Catppuccin-LICENSE.txt')
+    shutil.copy2(ROOT / 'packaging/licenses/Lucide.txt', resources / 'Lucide-LICENSE.txt')
     for name in ('NOTICE', 'LICENSE-MIT', 'LICENSE-APACHE'):
         shutil.copy2(ROOT / 'crates/sigmadock-terminal' / name, resources / ('terminal-' + name))
     shutil.copy2(ROOT / 'packaging/macos/INSTALL.txt', resources / 'INSTALL.txt')

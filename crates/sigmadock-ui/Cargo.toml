@@ -7,7 +7,7 @@ rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
-include = ["build.rs", "src/**", "README.md", "LICENSE", "Catppuccin-LICENSE.txt"]
+include = ["build.rs", "src/**", "README.md", "LICENSE", "Catppuccin-LICENSE.txt", "Lucide-LICENSE.txt", "assets/**"]
 description = "Native GPUI workspace for supervising local coding agents"
 
 [[bin]]

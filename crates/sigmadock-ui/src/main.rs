@@ -3,6 +3,7 @@ mod appearance_ui;
 mod berths_ui;
 mod bootstrap;
 mod ci_ui;
+mod icons;
 mod preferences;
 mod recovery_ui;
 mod theme;
@@ -16,6 +17,7 @@ use gpui::{
     App, Application, Bounds, Context, Entity, SharedString, Window, WindowBounds, WindowOptions,
     div, prelude::*, px, rgb, size,
 };
+use icons::{Icon, icon};
 use serde_json::json;
 use sigmadock_core::{Capacity, Client, Output, Project, Worker, socket_path};
 use sigmadock_terminal::{TerminalConfig, TerminalView};
@@ -507,9 +509,13 @@ impl Render for Workspace {
                             .px_3()
                             .py_1()
                             .rounded_md()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
                             .bg(rgb(self.theme.button))
                             .hover(|style| style.bg(rgb(self.theme.selection)))
-                            .child("← Berths")
+                            .child(icon(Icon::ArrowLeft, px(14.), rgb(self.theme.text)))
+                            .child("Berths")
                             .on_click(cx.listener(|this, _, _, cx| this.close_terminal(cx))),
                     )
                     .child(
@@ -744,7 +750,8 @@ fn main() -> Result<()> {
             .err()
             .map(|error| error.to_string())
     };
-    Application::new().run(move |cx: &mut App| {
+    let app = Application::new().with_assets(icons::Assets);
+    app.run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
         cx.open_window(
             WindowOptions {
