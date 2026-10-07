@@ -8,6 +8,7 @@ mod icons;
 mod keyboard_ui;
 mod preferences;
 mod recovery_ui;
+mod summary_ui;
 mod theme;
 mod update_ui;
 mod updates;
@@ -189,6 +190,10 @@ struct Workspace {
     checking_update: bool,
     update_message: Option<String>,
     available_update: Option<updates::Available>,
+    /// Worker whose session summary is being built.
+    summary_loading: Option<String>,
+    /// Worker whose summary was just copied, for a brief confirmation.
+    summary_copied: Option<String>,
 }
 impl Workspace {
     fn new(client: Client, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -266,6 +271,8 @@ impl Workspace {
             checker: Arc::new(std::sync::Mutex::new(updates::Checker::default())),
             checking_update: false,
             update_message: None,
+            summary_loading: None,
+            summary_copied: None,
             available_update: None,
             preferences: loaded.unwrap_or_default(),
             preferences_path,
@@ -787,6 +794,20 @@ impl Render for Workspace {
                             })),
                     );
                 }
+                let summary_id = id.clone();
+                actions = actions.child(
+                    div()
+                        .id("action-session_summary")
+                        .cursor_pointer()
+                        .p_2()
+                        .rounded_md()
+                        .bg(rgb(self.theme.button))
+                        .hover(|style| style.bg(rgb(self.theme.selection)))
+                        .child(self.summary_label(&id, "Summary"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.copy_summary(summary_id.clone(), cx)
+                        })),
+                );
                 if let Some(url) = worker.facts.pr_url {
                     actions = actions.child(
                         div()

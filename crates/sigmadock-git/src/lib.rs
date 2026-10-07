@@ -1,5 +1,6 @@
 //! Worktree operations deliberately refuse to discard dirty files.
 use anyhow::{Context, Result, bail};
+use sigmadock_core::summary::{Changes, FileChange, MAX_COMMITS};
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -155,6 +156,126 @@ pub fn diff(path: &Path) -> Result<String> {
 pub fn clean(path: &Path) -> Result<bool> {
     Ok(git(path, &["status", "--porcelain"])?.is_empty())
 }
+/// Most changed paths read for a summary; untracked files are counted individually.
+const SUMMARY_FILES: usize = 500;
+/// Commit subjects and diff stats for a worker branch since it forked. Reads the live
+/// worktree when it exists, so uncommitted edits count, and the branch otherwise.
+pub fn changes(repo: &Path, worktree: &Path, branch: &str) -> Changes {
+    let reference = format!("refs/heads/{branch}");
+    if git(repo, &["rev-parse", "--verify", "-q", &reference]).is_err() {
+        return Changes {
+            note: Some(format!(
+                "Branch {branch} no longer exists; git history is unavailable."
+            )),
+            ..Default::default()
+        };
+    }
+    // The branch's creation reflog entry is its fork point; the merge base is a fallback
+    // once the reflog has expired.
+    let base = git(repo, &["reflog", "show", "--format=%H", &reference, "--"])
+        .ok()
+        .and_then(|log| log.lines().last().map(str::to_owned))
+        .filter(|sha| !sha.is_empty())
+        .or_else(|| git(repo, &["merge-base", "HEAD", &reference]).ok());
+    let Some(base) = base else {
+        return Changes {
+            note: Some(
+                "Could not find where the branch started; git history is unavailable.".into(),
+            ),
+            ..Default::default()
+        };
+    };
+    let mut changes = Changes::default();
+    if let Ok(log) = git(
+        repo,
+        &[
+            "log",
+            "--reverse",
+            "--format=%s",
+            &format!("{base}..{reference}"),
+        ],
+    ) {
+        let subjects: Vec<String> = log.lines().map(str::to_owned).collect();
+        changes.more_commits = subjects.len().saturating_sub(MAX_COMMITS);
+        changes.commits = subjects.into_iter().skip(changes.more_commits).collect();
+    }
+    let live = worktree.exists();
+    let numstat = if live {
+        git(
+            worktree,
+            &["diff", "--numstat", "-z", "--find-renames", &base],
+        )
+    } else {
+        git(
+            repo,
+            &[
+                "diff",
+                "--numstat",
+                "-z",
+                "--find-renames",
+                &base,
+                &reference,
+            ],
+        )
+    };
+    match numstat {
+        Ok(text) => changes.files = parse_numstat(&text),
+        Err(error) => changes.note = Some(format!("Diff stats unavailable: {error}")),
+    }
+    if live {
+        changes.uncommitted = !clean(worktree).unwrap_or(true);
+        let untracked = git(
+            worktree,
+            &["ls-files", "--others", "--exclude-standard", "-z"],
+        )
+        .unwrap_or_default();
+        for file in untracked.split('\0').filter(|file| !file.is_empty()) {
+            if changes.files.len() >= SUMMARY_FILES {
+                break;
+            }
+            // `--no-index` exits 1 when files differ, which is the expected case here.
+            let stat = Command::new("git")
+                .arg("-C")
+                .arg(worktree)
+                .args(["diff", "--numstat", "--no-index", "--", "/dev/null", file])
+                .output()
+                .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+                .unwrap_or_default();
+            let mut fields = stat.split('\t');
+            changes.files.push(FileChange {
+                path: file.to_owned(),
+                added: fields.next().and_then(|n| n.parse().ok()),
+                removed: fields.next().and_then(|n| n.parse().ok()),
+            });
+        }
+    }
+    changes.files.truncate(SUMMARY_FILES);
+    changes
+}
+/// Parse `git diff --numstat -z`, where a rename has an empty path followed by old and new.
+fn parse_numstat(text: &str) -> Vec<FileChange> {
+    let mut files = Vec::new();
+    let mut fields = text.split('\0');
+    while let Some(record) = fields.next() {
+        let mut parts = record.splitn(3, '\t');
+        let (Some(added), Some(removed), Some(path)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let path = if path.is_empty() {
+            let _old = fields.next();
+            fields.next().unwrap_or_default()
+        } else {
+            path
+        };
+        files.push(FileChange {
+            path: path.to_owned(),
+            added: added.parse().ok(),
+            removed: removed.parse().ok(),
+        });
+    }
+    files
+}
 pub fn rollback(repo: &Path, path: &Path, branch: &str) {
     if remove(repo, path).is_ok() {
         let _ = git(repo, &["branch", "-d", branch]);
@@ -172,9 +293,12 @@ mod tests {
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
+            // Parallel tests can read the same clock value; the counter keeps paths unique.
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let path = std::env::temp_dir().join(format!(
-                "sigmadock-base-{}-{}",
+                "sigmadock-base-{}-{}-{}",
                 std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
@@ -254,5 +378,55 @@ mod tests {
             "trunk",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn changes_list_commits_and_stats_live_and_after_cleanup() {
+        let fixture = Fixture::new();
+        let repo = fixture.repo();
+        git(&repo, &["config", "user.email", "test@localhost"]).unwrap();
+        git(&repo, &["config", "user.name", "Test"]).unwrap();
+        let commit = |dir: &Path, message: &str| {
+            git(dir, &["add", "-A"]).unwrap();
+            git(
+                dir,
+                &["-c", "commit.gpgsign=false", "commit", "-qm", message],
+            )
+            .unwrap();
+        };
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        commit(&repo, "base");
+        let worktree = fixture.0.join("wt");
+        create(&repo, &worktree, "sigma/test", "HEAD").unwrap();
+        std::fs::write(worktree.join("a.txt"), "one\ntwo\n").unwrap();
+        commit(&worktree, "Add two");
+        git(&worktree, &["mv", "a.txt", "b.txt"]).unwrap();
+        commit(&worktree, "Rename a to b");
+        std::fs::write(worktree.join("new.txt"), "x\ny\n").unwrap();
+        // Later work on the main checkout is not part of the worker's session.
+        std::fs::write(repo.join("main.txt"), "main\n").unwrap();
+        commit(&repo, "main work");
+
+        let live = changes(&repo, &worktree, "sigma/test");
+        assert_eq!(live.commits, ["Add two", "Rename a to b"]);
+        assert!(live.uncommitted && live.note.is_none());
+        let mut paths: Vec<_> = live
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.added))
+            .collect();
+        paths.sort();
+        assert_eq!(paths, [("b.txt", Some(1)), ("new.txt", Some(2))]);
+
+        std::fs::remove_file(worktree.join("new.txt")).unwrap();
+        remove(&repo, &worktree).unwrap();
+        let archived = changes(&repo, &worktree, "sigma/test");
+        assert_eq!(archived.commits, live.commits);
+        assert!(!archived.uncommitted);
+        assert_eq!(archived.files.len(), 1);
+        assert_eq!(archived.files[0].path, "b.txt");
+
+        let gone = changes(&repo, &worktree, "sigma/missing");
+        assert!(gone.commits.is_empty() && gone.note.is_some());
     }
 }

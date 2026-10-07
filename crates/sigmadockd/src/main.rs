@@ -154,6 +154,10 @@ impl Daemon {
                 }
                 let (state, code) = session.facts();
                 if worker.facts.session != state || worker.facts.exit_code != code {
+                    if state == SessionState::Exited && worker.facts.session != SessionState::Exited
+                    {
+                        worker.finished_at = Some(sigmadock_core::unix_time());
+                    }
                     worker.facts.session = state;
                     worker.facts.exit_code = code;
                     self.store.save_worker(worker)?;
@@ -558,6 +562,7 @@ impl Daemon {
                 )?;
                 worker.facts.session = SessionState::Running;
                 worker.facts.exit_code = None;
+                worker.finished_at = None;
                 if let Err(error) = self.store.save_worker(&worker) {
                     let _ = session.stop();
                     return Err(error);
@@ -764,6 +769,10 @@ impl Daemon {
             usage_reporting: params["usage_reporting"] == true,
             orchestrator_spawn: method == "start_orchestrator" && params["allow_spawn"] == true,
             archived_at: None,
+            prompt: prompt
+                .map(|text| task_text(text, 32000))
+                .filter(|text| !text.trim().is_empty()),
+            finished_at: None,
         };
         if let Err(error) =
             sigmadock_git::create(&project.path, &worker.worktree, &worker.branch, &base)
@@ -944,6 +953,23 @@ fn dimension(params: &Value, key: &str) -> Result<u16> {
     )?)
 }
 fn external_call(state: &Arc<Mutex<Daemon>>, method: &str, params: &Value) -> Result<Value> {
+    if method == "session_summary" {
+        // Diff stats over untracked files can be slow; run git outside the state lock.
+        let (worker, project) = {
+            let daemon = state.lock().unwrap();
+            let worker = daemon.worker(params)?.clone();
+            let project = daemon.project(&worker.project_id)?;
+            (worker, project)
+        };
+        let changes = sigmadock_git::changes(&project.path, &worker.worktree, &worker.branch);
+        let text = sigmadock_core::summary::markdown(
+            &worker,
+            &project.name,
+            &changes,
+            sigmadock_core::unix_time(),
+        );
+        return Ok(json!(text));
+    }
     if method == "agent_usage" {
         let (worker, cwd, cached) = {
             let daemon = state.lock().unwrap();
@@ -1133,6 +1159,7 @@ fn serve(mut stream: UnixStream, state: Arc<Mutex<Daemon>>) -> Result<()> {
                 | "send_ci_feedback"
                 | "ci_preview"
                 | "agent_usage"
+                | "session_summary"
         )
     ) {
         external_call(

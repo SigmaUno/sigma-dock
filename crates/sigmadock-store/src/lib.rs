@@ -273,6 +273,8 @@ mod tests {
             feedback: Default::default(),
             orchestrator_spawn: false,
             archived_at: None,
+            prompt: None,
+            finished_at: None,
             usage_reporting: false,
         };
         store.save_worker(&worker).unwrap();
