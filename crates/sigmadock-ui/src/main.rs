@@ -373,10 +373,16 @@ impl Workspace {
         let title = self.fields[1].clone();
         let prompt = self.fields[2].clone();
         let agent = self.agent.clone();
+        let last_capacity = self.capacity.clone();
         cx.spawn(async move |this, cx| {
             let result = cx.background_executor().spawn(async move {
                 // Recheck global capacity: the form snapshot may be up to two seconds old.
-                let capacity: Capacity = serde_json::from_value(client.call("capacity", json!({}))?)?;
+                let capacity: Capacity = match client.call("capacity", json!({})) {
+                    Ok(value) => serde_json::from_value(value)?,
+                    // Preserve the snapshot's fallback for older API-v1 daemons.
+                    Err(error) if error.to_string() == "unknown method capacity" => last_capacity,
+                    Err(error) => return Err(error),
+                };
                 if capacity.live.len() >= capacity.max_workers {
                     anyhow::bail!("{}", full_capacity_message(capacity.max_workers));
                 }
