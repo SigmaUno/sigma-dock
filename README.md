@@ -46,6 +46,7 @@ Each worker gets a unique `sigma/UUID` branch, a worktree outside the source che
 sdk message WORKER_ID "Run tests and fix the failures"
 sdk status WORKER_ID
 sdk diff WORKER_ID
+sdk summary WORKER_ID > note.md  # Markdown session summary for Obsidian and similar notes
 sdk stop WORKER_ID
 sdk resume WORKER_ID --continue
 sdk archive WORKER_ID             # preserves files and branch
@@ -57,6 +58,8 @@ sdk queue cancel TASK_ID
 sdk queue retry TASK_ID --acknowledge-unknown  # after inspecting an interrupted/failed start
 sdk remove-project PROJECT_ID     # requires no unarchived workers or waiting tasks
 ```
+
+`sdk summary` and the **Summary** button (or **Copy summary** on a departed worker) build a Markdown note without any model: YAML frontmatter, the recorded outcome (status, PR, checks, review, session exit), the original instruction, commit subjects since the worker forked, and per-folder diff stats. It reads the live worktree when present, so uncommitted edits count, and the branch after `--cleanup`. Times are UTC. Workers created before this version have no recorded instruction or finish time.
 
 The native UI includes a task-creation form, harness picker, worker controls, a diff summary, and PR links. When all berths are occupied, the form explains the global capacity limit and disables creation until a session ends. It keeps your task details; the native waiting-list flow remains pending. The CLI and opt-in MCP spawning support persistent queuing with `--queue` / `queue: true`. Click **Choose repository…** in the task form to open the native folder picker. Form input currently supports typing at the end, backspace, tab and clipboard paste; full text editing and IME support are pending.
 
@@ -84,9 +87,12 @@ Each launch fetches only that branch with an eight-second timeout. A failed fetc
 
 ## Forge facts and feedback
 
-Export a forge token into the daemon's environment before starting it. Configuration stores **the environment variable name**, never the token. For example:
+Connect a project in **Settings → Forges** (⌘,). SigmaDock fills in the forge, owner and repository from the `origin` remote, **Test connection** confirms the token, and **Save** applies the forge to the project's current agents and every new one. The token comes from your GitHub CLI login (`gh auth token`; run `gh auth login` once) or from an environment variable of the daemon. Apps opened from Finder have no shell environment, so the GitHub CLI is the simplest choice there. SigmaDock stores where to read the token, never the token itself.
+
+Single workers can still be configured from the CLI:
 
 ```sh
+sdk forge WORKER_ID --owner my-org --repo my-repo --github-cli
 sdk forge WORKER_ID --owner my-org --repo my-repo
 sdk forge WORKER_ID --kind forgejo --api-url https://forge.example/api/v1 --owner my-org --repo my-repo --token-env FORGEJO_TOKEN
 sdk refresh WORKER_ID
@@ -111,6 +117,8 @@ Automatic feedback is off by default and waits for an idle coding worker with fa
 
 The native window shows **berths**: one slot per live session, up to the daemon's `--max-workers` limit. A berth shows the task, harness, branch, port, a low-rate terminal preview and one contextual action (**Reply**, **Send CI to agent** or **Open PR**); click it for the full terminal. The project sidebar filters berths by repository, a needs-you strip lists blocked workers, and a side panel lists moored workers (session ended, not archived) and today's departures. Capacity is global: a project can show free berths while the overall limit is reached, in which case empty berths are disabled.
 
+The sidebar lists each project with its agents underneath, plus an **Inbox**. Opening an agent splits the window into the sidebar, the agent's terminal session and its **Changes**: the patch since the worker started, including uncommitted and new files. Changes, files and individual lines open in your own editor (Zed, Cursor, VS Code, Sublime Text, Xcode, the default app or a custom command, chosen in Settings); SigmaDock has no built-in editor. The Inbox pairs a chat with your default agent, the project orchestrator started with a briefing of the inbox, with the agents that need you and, for repositories with a configured forge token, open issues assigned to you and pull requests requesting your review.
+
 Keyboard navigation on macOS:
 
 | Shortcut | Action |
@@ -120,6 +128,8 @@ Keyboard navigation on macOS:
 | Enter on a berth | Open its terminal; on a free empty berth, open the task form |
 | ⌘Enter on a berth | Run its contextual action (Reply, Send CI to agent, or Open PR) |
 | ⌘[ | Return from the full terminal to the previous berth |
+| ⌘I | Open the Inbox |
+| ⌘⇧O | Open the agent's worktree in your editor |
 | ⌘1 | Show All berths |
 | ⌘2–⌘9 | Select the first eight projects in sidebar order |
 | ⌘N / ⌘, | New task / Settings |

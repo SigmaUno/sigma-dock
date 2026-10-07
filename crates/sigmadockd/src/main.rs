@@ -62,6 +62,8 @@ struct Daemon {
     checkpoints: HashMap<String, (std::time::Instant, (u64, u64, SessionState))>,
     ports: PortPool,
     forges: HashMap<String, Arc<RestForge>>,
+    /// Last inbox read, reused for `INBOX_TTL` to bound forge API use.
+    inbox: Option<(std::time::Instant, sigmadock_core::Inbox)>,
     state_dir: PathBuf,
     max_workers: usize,
     mcp_binary: PathBuf,
@@ -154,6 +156,10 @@ impl Daemon {
                 }
                 let (state, code) = session.facts();
                 if worker.facts.session != state || worker.facts.exit_code != code {
+                    if state == SessionState::Exited && worker.facts.session != SessionState::Exited
+                    {
+                        worker.finished_at = Some(sigmadock_core::unix_time());
+                    }
                     worker.facts.session = state;
                     worker.facts.exit_code = code;
                     self.store.save_worker(worker)?;
@@ -293,6 +299,7 @@ impl Daemon {
                     return Ok(serde_json::to_value(project)?);
                 }
                 let project = Project {
+                    forge: None,
                     base_branch: sigmadock_git::default_base(&path).ok(),
                     id: Uuid::new_v4().to_string(),
                     name: path
@@ -314,6 +321,35 @@ impl Daemon {
                 Ok(serde_json::to_value(project)?)
             }
             "list_projects" => Ok(serde_json::to_value(self.store.projects()?)?),
+            "detect_forge" => {
+                let project = self.project(string(&params, "project_id")?)?;
+                let url = sigmadock_git::remote_url(&project.path)?;
+                let (host, owner, repo) = sigmadock_core::parse_remote(&url)
+                    .with_context(|| format!("origin {url} is not a recognised forge URL"))?;
+                let github = host == "github.com";
+                Ok(serde_json::to_value(ForgeConfig {
+                    kind: if github { "github" } else { "forgejo" }.into(),
+                    api_url: if github {
+                        "https://api.github.com".into()
+                    } else {
+                        format!("https://{host}/api/v1")
+                    },
+                    owner,
+                    repo,
+                    token_env: if github {
+                        "GITHUB_TOKEN"
+                    } else {
+                        "FORGEJO_TOKEN"
+                    }
+                    .into(),
+                    actions: false,
+                    token: if github {
+                        sigmadock_core::TokenSource::GithubCli
+                    } else {
+                        sigmadock_core::TokenSource::Env
+                    },
+                })?)
+            }
             "capacity" => Ok(serde_json::to_value(self.capacity()?)?),
             "list_workers" => {
                 let mut workers: Vec<_> = self
@@ -558,6 +594,7 @@ impl Daemon {
                 )?;
                 worker.facts.session = SessionState::Running;
                 worker.facts.exit_code = None;
+                worker.finished_at = None;
                 if let Err(error) = self.store.save_worker(&worker) {
                     let _ = session.stop();
                     return Err(error);
@@ -739,7 +776,8 @@ impl Daemon {
             .get("forge")
             .filter(|value| !value.is_null())
             .map(|value| serde_json::from_value(value.clone()))
-            .transpose()?;
+            .transpose()?
+            .or_else(|| project.forge.clone());
         let forge = forge_config
             .clone()
             .map(RestForge::new)
@@ -776,6 +814,10 @@ impl Daemon {
             usage_reporting: params["usage_reporting"] == true,
             orchestrator_spawn: method == "start_orchestrator" && params["allow_spawn"] == true,
             archived_at: None,
+            prompt: prompt
+                .map(|text| task_text(text, 32000))
+                .filter(|text| !text.trim().is_empty()),
+            finished_at: None,
         };
         if let Err(error) =
             sigmadock_git::create(&project.path, &worker.worktree, &worker.branch, &base)
@@ -955,6 +997,101 @@ fn dimension(params: &Value, key: &str) -> Result<u16> {
         params[key].as_u64().context("invalid dimension")?,
     )?)
 }
+const INBOX_TTL: Duration = Duration::from_secs(60);
+/// Assigned issues and requested reviews across every distinct configured forge repository.
+fn inbox(state: &Arc<Mutex<Daemon>>, refresh: bool) -> Result<Value> {
+    let configs = {
+        let daemon = state.lock().unwrap();
+        if !refresh
+            && let Some((at, inbox)) = &daemon.inbox
+            && at.elapsed() < INBOX_TTL
+        {
+            return Ok(serde_json::to_value(inbox)?);
+        }
+        let mut configs: Vec<ForgeConfig> = Vec::new();
+        let projects = daemon.store.projects()?;
+        for config in projects
+            .iter()
+            .filter_map(|project| project.forge.clone())
+            .chain(
+                daemon
+                    .workers
+                    .values()
+                    .filter_map(|worker| worker.forge.clone()),
+            )
+        {
+            if !configs.iter().any(|known| {
+                (&known.kind, &known.api_url, &known.owner, &known.repo)
+                    == (&config.kind, &config.api_url, &config.owner, &config.repo)
+            }) {
+                configs.push(config);
+            }
+        }
+        configs
+    };
+    let mut inbox = sigmadock_core::Inbox::default();
+    // GitHub assignments are read account-wide once per API and token, so issues in
+    // repositories without a worker still appear; review requests stay per repository.
+    let mut accounts: Vec<(String, String)> = Vec::new();
+    for config in configs {
+        let repository = format!("{}/{}", config.owner, config.repo);
+        let account = (config.api_url.clone(), config.token_env.clone());
+        let account_wide = config.kind == "github" && !accounts.contains(&account);
+        match RestForge::new(config).and_then(|forge| forge.inbox(account_wide)) {
+            Ok(items) => {
+                if account_wide {
+                    accounts.push(account);
+                }
+                for item in items {
+                    if !inbox.items.iter().any(|known| {
+                        (known.kind, &known.repo, known.number)
+                            == (item.kind, &item.repo, item.number)
+                    }) {
+                        inbox.items.push(item);
+                    }
+                }
+            }
+            Err(error) => inbox.warnings.push(format!("{repository}: {error}")),
+        }
+    }
+    inbox
+        .items
+        .sort_by_key(|item| std::cmp::Reverse(item.updated_at));
+    state.lock().unwrap().inbox = Some((std::time::Instant::now(), inbox.clone()));
+    Ok(serde_json::to_value(inbox)?)
+}
+/// Sets or clears a project's forge and applies it to the project's current workers.
+/// Building the client may run `gh`, so it happens before taking the state lock.
+fn configure_project_forge(state: &Arc<Mutex<Daemon>>, params: &Value) -> Result<Value> {
+    let forge: Option<ForgeConfig> = match params.get("forge") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(serde_json::from_value(value.clone())?),
+    };
+    let client = forge.clone().map(RestForge::new).transpose()?.map(Arc::new);
+    let mut daemon = state.lock().unwrap();
+    let mut project = daemon.project(string(params, "project_id")?)?;
+    project.forge = forge.clone();
+    daemon.store.save_project(&project)?;
+    let ids: Vec<String> = daemon
+        .workers
+        .values()
+        .filter(|worker| worker.project_id == project.id && !worker.archived)
+        .map(|worker| worker.id.clone())
+        .collect();
+    for id in &ids {
+        let mut worker = daemon.workers[id].clone();
+        worker.forge = forge.clone();
+        worker.facts.forge_error = None;
+        daemon.store.save_worker(&worker)?;
+        match &client {
+            Some(client) => daemon.forges.insert(id.clone(), client.clone()),
+            None => daemon.forges.remove(id),
+        };
+        daemon.workers.insert(id.clone(), worker);
+    }
+    daemon.inbox = None;
+    Ok(json!({"project": project, "workers": ids.len()}))
+}
 fn external_call(state: &Arc<Mutex<Daemon>>, method: &str, params: &Value) -> Result<Value> {
     if method == "worker_checks" {
         let (worker, project, forge) = {
@@ -1032,6 +1169,39 @@ fn external_call(state: &Arc<Mutex<Daemon>>, method: &str, params: &Value) -> Re
         return Ok(serde_json::to_value(report)?);
     }
 
+    if method == "configure_project_forge" {
+        return configure_project_forge(state, params);
+    }
+    if method == "check_forge" {
+        let config: ForgeConfig = serde_json::from_value(params["forge"].clone())?;
+        return Ok(json!({"login": RestForge::new(config)?.login()?}));
+    }
+    if method == "session_summary" {
+        // Diff stats over untracked files can be slow; run git outside the state lock.
+        let (worker, project) = {
+            let daemon = state.lock().unwrap();
+            let worker = daemon.worker(params)?.clone();
+            let project = daemon.project(&worker.project_id)?;
+            (worker, project)
+        };
+        let changes = sigmadock_git::changes(&project.path, &worker.worktree, &worker.branch);
+        let text = sigmadock_core::summary::markdown(
+            &worker,
+            &project.name,
+            &changes,
+            sigmadock_core::unix_time(),
+        );
+        return Ok(json!(text));
+    }
+    if method == "inbox" {
+        return inbox(state, params["refresh"] == true);
+    }
+    if method == "diff_patch" {
+        // Untracked files make this slow on large worktrees; run git outside the state lock.
+        let worktree = state.lock().unwrap().worker(params)?.worktree.clone();
+        let (text, truncated) = sigmadock_git::patch(&worktree)?;
+        return Ok(json!({"text": text, "truncated": truncated}));
+    }
     if method == "agent_usage" {
         let (worker, cwd, cached) = {
             let daemon = state.lock().unwrap();
@@ -1227,6 +1397,11 @@ fn serve(mut stream: UnixStream, state: Arc<Mutex<Daemon>>) -> Result<()> {
                 | "ci_preview"
                 | "agent_usage"
                 | "worker_checks"
+                | "session_summary"
+                | "diff_patch"
+                | "inbox"
+                | "configure_project_forge"
+                | "check_forge"
         )
     ) {
         external_call(
@@ -1323,6 +1498,7 @@ fn main() -> Result<()> {
         context_floor: HashMap::new(),
         ports,
         forges: HashMap::new(),
+        inbox: None,
         state_dir: args.state_dir,
         max_workers,
         mcp_binary: args.mcp_binary.unwrap_or(

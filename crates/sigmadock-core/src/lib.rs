@@ -2,6 +2,8 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+pub mod summary;
+
 use std::{
     io::{BufRead, BufReader, Read, Write},
     os::unix::net::UnixStream,
@@ -143,6 +145,9 @@ pub struct Project {
     pub id: String,
     pub path: PathBuf,
     pub name: String,
+    /// Forge every worker of this project uses; new workers inherit it.
+    #[serde(default)]
+    pub forge: Option<ForgeConfig>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Worker {
@@ -174,6 +179,12 @@ pub struct Worker {
     /// Unix seconds when the worker was archived; absent for workers archived before 0.1.3.
     #[serde(default)]
     pub archived_at: Option<u64>,
+    /// Initial instruction, bounded like other task data; absent before 0.1.3.
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// Unix seconds when the latest session exited; cleared on resume.
+    #[serde(default)]
+    pub finished_at: Option<u64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ForgeConfig {
@@ -184,6 +195,54 @@ pub struct ForgeConfig {
     pub token_env: String,
     #[serde(default)]
     pub actions: bool,
+    /// Where the daemon reads the API token; `token_env` applies to `Env` only.
+    #[serde(default)]
+    pub token: TokenSource,
+}
+/// Apps opened from Finder get no shell environment, so a GitHub CLI login is the
+/// practical token source there; environment variables suit daemons started from a shell.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenSource {
+    #[default]
+    Env,
+    /// `gh auth token` for the API's host.
+    GithubCli,
+}
+/// `(host, owner, repo)` of a git remote URL such as `git@github.com:o/r.git`,
+/// `https://github.com/o/r` or `ssh://git@host:2222/o/r.git`.
+pub fn parse_remote(url: &str) -> Option<(String, String, String)> {
+    let url = url.trim();
+    let rest = if let Some((scheme, rest)) = url.split_once("://") {
+        if !["https", "http", "ssh", "git"].contains(&scheme) {
+            return None;
+        }
+        rest.to_owned()
+    } else {
+        // scp-like syntax: [user@]host:owner/repo
+        let (host, path) = url.split_once(':')?;
+        format!("{host}/{path}")
+    };
+    let (authority, path) = rest.split_once('/')?;
+    let host = authority
+        .rsplit('@')
+        .next()?
+        .split(':')
+        .next()?
+        .to_ascii_lowercase();
+    let mut parts = path
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .rsplitn(2, '/');
+    let repo = parts.next()?.to_owned();
+    let owner = parts.next()?.rsplit('/').next()?.to_owned();
+    let valid = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    };
+    (!host.is_empty() && valid(&owner) && valid(&repo)).then_some((host, owner, repo))
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -221,6 +280,74 @@ pub struct SessionContext {
     pub pid: Option<u32>,
     pub text: String,
     pub truncated: bool,
+}
+/// Why a forge issue or pull request is in the inbox.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InboxKind {
+    Assigned,
+    ReviewRequested,
+}
+/// One forge issue or pull request that waits on the token's user.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InboxItem {
+    pub kind: InboxKind,
+    /// `owner/repo`.
+    pub repo: String,
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub pull_request: bool,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    /// Unix seconds; 0 when the forge did not report a parseable time.
+    pub updated_at: u64,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Inbox {
+    /// Newest first, one entry per issue or pull request and kind.
+    pub items: Vec<InboxItem>,
+    /// Repositories that could not be read, with the reason.
+    pub warnings: Vec<String>,
+}
+/// Seconds since the Unix epoch for an RFC 3339 timestamp such as
+/// `2026-10-07T14:56:27Z`; `None` when it does not parse.
+pub fn parse_rfc3339(text: &str) -> Option<u64> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 20 || bytes[4] != b'-' || bytes[10] != b'T' {
+        return None;
+    }
+    let number = |range: std::ops::Range<usize>| -> Option<i64> { text.get(range)?.parse().ok() };
+    let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
+    let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
+    let mut rest = &text[19..];
+    if let Some(fraction) = rest.strip_prefix('.') {
+        rest = fraction.trim_start_matches(|c: char| c.is_ascii_digit());
+    }
+    let offset = match rest {
+        "Z" | "z" => 0,
+        _ if rest.len() == 6 && (rest.starts_with('+') || rest.starts_with('-')) => {
+            let minutes = rest[1..3].parse::<i64>().ok()? * 60 + rest[4..6].parse::<i64>().ok()?;
+            if rest.starts_with('-') {
+                -minutes
+            } else {
+                minutes
+            }
+        }
+        _ => return None,
+    };
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 {
+        return None;
+    }
+    // Days from civil date (Howard Hinnant's algorithm).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let seconds = days * 86_400 + hour * 3600 + minute * 60 + second - offset * 60;
+    u64::try_from(seconds).ok()
 }
 /// Global berth usage: the same live-session count `check_capacity` enforces.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -480,6 +607,32 @@ pub fn read_frame(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>> {
 mod tests {
     use super::*;
     #[test]
+    fn git_remotes_parse_to_host_owner_and_repo() {
+        let parsed = |url| parse_remote(url).map(|(h, o, r)| format!("{h} {o} {r}"));
+        assert_eq!(
+            parsed("git@github.com:SigmaUno/sigma-dock.git").as_deref(),
+            Some("github.com SigmaUno sigma-dock")
+        );
+        assert_eq!(
+            parsed("https://github.com/SigmaUno/sigma-dock").as_deref(),
+            Some("github.com SigmaUno sigma-dock")
+        );
+        assert_eq!(
+            parsed("ssh://git@code.example:2222/team/app.git/").as_deref(),
+            Some("code.example team app")
+        );
+        assert_eq!(
+            parsed("https://user@git.example/group/sub/app.git").as_deref(),
+            Some("git.example sub app")
+        );
+        assert_eq!(parsed("/local/path/repo"), None);
+        assert_eq!(parsed("file:///tmp/o/r"), None);
+        let config: ForgeConfig = serde_json::from_value(json!({
+            "kind": "github", "api_url": "https://api.github.com", "owner": "o", "repo": "r", "token_env": "T"
+        })).unwrap();
+        assert_eq!(config.token, TokenSource::Env);
+    }
+    #[test]
     fn subscription_preserves_buffered_events_and_reports_eof() {
         use std::{
             os::unix::net::UnixListener,
@@ -532,6 +685,16 @@ mod tests {
         assert!(subscription.next_event().is_err());
         server.join().unwrap();
         std::fs::remove_file(socket).unwrap();
+    }
+    #[test]
+    fn rfc3339_timestamps_convert_to_unix_seconds() {
+        assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_rfc3339("2026-10-07T14:56:27Z"), Some(1_791_384_987));
+        assert_eq!(
+            parse_rfc3339("2026-10-07T16:56:27.123+02:00"),
+            Some(1_791_384_987)
+        );
+        assert_eq!(parse_rfc3339("yesterday"), None);
     }
     #[test]
     fn status_precedence() {

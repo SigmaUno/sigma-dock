@@ -146,6 +146,10 @@ enum Commands {
     Diff {
         worker_id: String,
     },
+    /// Print a Markdown session summary from recorded facts and git history.
+    Summary {
+        worker_id: String,
+    },
     Prune {
         project_id: String,
     },
@@ -161,6 +165,9 @@ enum Commands {
         repo: String,
         #[arg(long, default_value = "GITHUB_TOKEN")]
         token_env: String,
+        /// Read the token from `gh auth token` instead of `--token-env` (GitHub only).
+        #[arg(long)]
+        github_cli: bool,
         #[arg(long)]
         actions: bool,
     },
@@ -370,6 +377,7 @@ fn main() -> Result<()> {
             json!({"worker_id":worker_id,"cleanup":cleanup}),
         ),
         Commands::Diff { worker_id } => ("diff", json!({"worker_id":worker_id})),
+        Commands::Summary { worker_id } => ("session_summary", json!({"worker_id":worker_id})),
         Commands::Prune { project_id } => ("prune", json!({"project_id":project_id})),
         Commands::Forge {
             worker_id,
@@ -378,10 +386,11 @@ fn main() -> Result<()> {
             owner,
             repo,
             token_env,
+            github_cli,
             actions,
         } => (
             "configure_forge",
-            json!({"worker_id":worker_id,"forge":{"kind":kind,"api_url":api_url,"owner":owner,"repo":repo,"token_env":token_env,"actions":actions}}),
+            json!({"worker_id":worker_id,"forge":{"kind":kind,"api_url":api_url,"owner":owner,"repo":repo,"token_env":token_env,"actions":actions,"token":if github_cli { "github_cli" } else { "env" }}}),
         ),
         Commands::Refresh { worker_id } => ("refresh_facts", json!({"worker_id":worker_id})),
         Commands::Review { worker_id, send } => {

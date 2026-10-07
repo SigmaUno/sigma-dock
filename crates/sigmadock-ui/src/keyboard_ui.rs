@@ -39,6 +39,8 @@ enum Shortcut {
     Settings,
     NewTask,
     Berths,
+    Inbox,
+    OpenEditor,
     Project(usize),
     Next,
     Previous,
@@ -66,6 +68,12 @@ fn workspace_shortcut(
     if key.key == "[" && key.modifiers.platform && terminal {
         return Some(Shortcut::Berths);
     }
+    if key.key == "o" && key.modifiers.platform && key.modifiers.shift && terminal {
+        return Some(Shortcut::OpenEditor);
+    }
+    if key.key == "i" && key.modifiers.platform && !key.modifiers.shift {
+        return Some(Shortcut::Inbox);
+    }
     if key.modifiers.platform && key.key.len() == 1 && ("1"..="9").contains(&key.key.as_str()) {
         return Some(Shortcut::Project(key.key.parse::<usize>().unwrap() - 1));
     }
@@ -86,16 +94,14 @@ fn workspace_shortcut(
 
 impl Workspace {
     pub(crate) fn prepare_berth_focus(&mut self, cx: &mut Context<Self>) {
-        let ids: Vec<_> = self
-            .berths(self.selected_project.as_deref())
-            .iter()
-            .map(|w| w.id.clone())
-            .collect();
-        let keys: Vec<_> = (0..self.capacity.max_workers.max(ids.len()))
-            .map(|i| {
-                ids.get(i).map_or_else(
-                    || format!("empty-berth-{}", i + 1),
-                    |id| format!("berth-{id}"),
+        // One handle per grid slot, keyed exactly as the grid renders it.
+        let keys: Vec<_> = self
+            .slots(self.selected_project.as_deref())
+            .into_iter()
+            .map(|(number, worker)| {
+                worker.map_or_else(
+                    || format!("empty-berth-{number}"),
+                    |worker| format!("berth-{}", worker.id),
                 )
             })
             .collect();
@@ -109,9 +115,9 @@ impl Workspace {
 
     fn focus_slot(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let id = self
-            .berths(self.selected_project.as_deref())
+            .slots(self.selected_project.as_deref())
             .get(index)
-            .map(|w| w.id.clone());
+            .and_then(|(_, worker)| worker.map(|worker| worker.id.clone()));
         let key = id.as_ref().map_or_else(
             || format!("empty-berth-{}", index + 1),
             |id| format!("berth-{id}"),
@@ -142,6 +148,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.settings_open = false;
         if self.terminal.is_some() {
             self.close_terminal(window, cx);
         }
@@ -163,9 +170,9 @@ impl Workspace {
         let key = &event.keystroke;
         if key.key == "enter" {
             let worker = self
-                .berths(self.selected_project.as_deref())
+                .slots(self.selected_project.as_deref())
                 .get(index)
-                .map(|w| (*w).clone());
+                .and_then(|(_, worker)| worker.cloned());
             if let Some(worker) = worker {
                 if key.modifiers.platform {
                     if let Some(action) = berths_ui::status(&worker).action {
@@ -183,7 +190,8 @@ impl Workspace {
             && !key.modifiers.alt
             && matches!(key.key.as_str(), "left" | "right" | "up" | "down")
         {
-            if let Some(next) = adjacent(index, self.capacity.max_workers, &key.key) {
+            let count = self.slots(self.selected_project.as_deref()).len();
+            if let Some(next) = adjacent(index, count, &key.key) {
                 self.focus_slot(next, window, cx);
             }
             cx.stop_propagation();
@@ -227,13 +235,23 @@ impl Workspace {
             }
             Some(Shortcut::Settings) => self.toggle_settings(window, cx),
             Some(Shortcut::NewTask) => {
+                if self.terminal.is_some() {
+                    self.close_terminal(window, cx);
+                }
+                self.view = crate::View::Berths;
                 if !self.form_open {
                     self.open_new_task(window, cx);
                 }
             }
             Some(Shortcut::Berths) => self.close_terminal(window, cx),
-            Some(Shortcut::Project(0)) => self.select_project(None, window, cx),
+            Some(Shortcut::Inbox) => self.open_inbox(window, cx),
+            Some(Shortcut::OpenEditor) => self.open_in_editor(None, cx),
+            Some(Shortcut::Project(0)) => {
+                self.view = crate::View::Berths;
+                self.select_project(None, window, cx)
+            }
             Some(Shortcut::Project(index)) => {
+                self.view = crate::View::Berths;
                 if let Some(project) = self.projects.get(index - 1) {
                     self.select_project(Some(project.id.clone()), window, cx);
                 } else {
@@ -332,6 +350,36 @@ mod tests {
                 false
             ),
             Some(Shortcut::NewTask)
+        );
+        assert_eq!(
+            workspace_shortcut(
+                &Keystroke::parse("cmd-i").unwrap(),
+                true,
+                true,
+                false,
+                false
+            ),
+            Some(Shortcut::Inbox)
+        );
+        assert_eq!(
+            workspace_shortcut(
+                &Keystroke::parse("cmd-shift-o").unwrap(),
+                true,
+                true,
+                false,
+                false
+            ),
+            Some(Shortcut::OpenEditor)
+        );
+        assert_eq!(
+            workspace_shortcut(
+                &Keystroke::parse("cmd-shift-o").unwrap(),
+                false,
+                false,
+                false,
+                false
+            ),
+            None
         );
         assert_eq!(
             workspace_shortcut(

@@ -4,7 +4,10 @@ mod review;
 use anyhow::{Context, Result, bail};
 use reqwest::{Url, blocking::Client, redirect::Policy};
 use serde_json::Value;
-use sigmadock_core::{Checks, CiFeedback, Facts, ForgeConfig, PullRequestState, Review, task_text};
+use sigmadock_core::{
+    Checks, CiFeedback, Facts, ForgeConfig, InboxItem, InboxKind, PullRequestState, Review,
+    TokenSource, parse_rfc3339, task_text,
+};
 use std::{
     collections::HashMap,
     io::Read,
@@ -69,7 +72,11 @@ impl RestForge {
                 "github adapter requires https://api.github.com; use forgejo for self-hosted APIs"
             );
         }
-        let token = std::env::var(&config.token_env).ok();
+        let token = match config.token {
+            TokenSource::Env => std::env::var(&config.token_env).ok(),
+            TokenSource::GithubCli if config.kind == "github" => github_cli_token("github.com"),
+            TokenSource::GithubCli => bail!("GitHub CLI tokens apply to GitHub only"),
+        };
         let client = Client::builder()
             .timeout(Duration::from_secs(15))
             .redirect(Policy::none())
@@ -291,6 +298,147 @@ impl RestForge {
             }
         }
         bail!("Forgejo PR pagination limit reached; facts are incomplete")
+    }
+}
+/// The GitHub CLI's token for `host`, looking where Homebrew installs `gh` because
+/// apps opened from Finder have a minimal `PATH`. `None` when gh is missing or signed out.
+pub fn github_cli_token(host: &str) -> Option<String> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let gh = std::env::split_paths(&path)
+        .chain(["/opt/homebrew/bin", "/usr/local/bin"].map(std::path::PathBuf::from))
+        .map(|dir| dir.join("gh"))
+        .find(|candidate| candidate.is_file())?;
+    let output = std::process::Command::new(gh)
+        .args(["auth", "token", "--hostname", host])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let token = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+    (output.status.success() && !token.is_empty()).then_some(token)
+}
+impl RestForge {
+    /// The signed-in user's login, which proves the token and API URL work.
+    pub fn login(&self) -> Result<String> {
+        if self.token.is_none() {
+            bail!("{}", self.missing_token());
+        }
+        Ok(self.get("user", &[])?["login"]
+            .as_str()
+            .context("forge did not report the signed-in user")?
+            .to_owned())
+    }
+    fn missing_token(&self) -> String {
+        match self.config.token {
+            TokenSource::Env => format!(
+                "{} is not set in the daemon's environment; use a GitHub CLI login or start the daemon from a shell that sets it",
+                self.config.token_env
+            ),
+            TokenSource::GithubCli => {
+                "GitHub CLI is not installed or not signed in; run `gh auth login`".into()
+            }
+        }
+    }
+    /// `owner/repo` of the configured repository.
+    pub fn repository(&self) -> String {
+        format!("{}/{}", self.config.owner, self.config.repo)
+    }
+    /// Open issues assigned to the token's user and open pull requests in this repository
+    /// that request their review, newest first. Reads one page of each, which bounds API use.
+    ///
+    /// With `account_wide`, GitHub assignments come from every repository the token can
+    /// see (`GET /issues?filter=assigned`); without it GitHub assignments are skipped,
+    /// because another call for the same token already covers them. Forgejo has no
+    /// account-wide listing here, so it always reads this repository's assignments.
+    pub fn inbox(&self, account_wide: bool) -> Result<Vec<InboxItem>> {
+        let login = self.login()?;
+        let prefix = self.prefix();
+        let github = self.config.kind == "github";
+        let (page_key, page_size) = if github {
+            ("per_page", "100")
+        } else {
+            ("limit", "50")
+        };
+        let issues = match (github, account_wide) {
+            (true, true) => Some(self.get(
+                "issues",
+                &[
+                    ("filter", "assigned"),
+                    ("state", "open"),
+                    ("sort", "updated"),
+                    ("direction", "desc"),
+                    (page_key, page_size),
+                ],
+            )?),
+            (true, false) => None,
+            (false, _) => Some(self.get(
+                &format!("{prefix}/issues"),
+                &[
+                    ("state", "open"),
+                    ("type", "issues"),
+                    ("assigned_by", login.as_str()),
+                    (page_key, page_size),
+                ],
+            )?),
+        };
+        let mut items: Vec<_> = match &issues {
+            Some(issues) => issues
+                .as_array()
+                .context("invalid issue response")?
+                .iter()
+                .filter_map(|issue| self.inbox_item(InboxKind::Assigned, issue))
+                .collect(),
+            None => Vec::new(),
+        };
+        let mut query = vec![("state", "open"), (page_key, page_size)];
+        if github {
+            query.extend([("sort", "updated"), ("direction", "desc")]);
+        }
+        let pulls = self.get(&format!("{prefix}/pulls"), &query)?;
+        items.extend(
+            pulls
+                .as_array()
+                .context("invalid pull response")?
+                .iter()
+                .filter(|pull| {
+                    pull["requested_reviewers"].as_array().is_some_and(|users| {
+                        users
+                            .iter()
+                            .any(|user| user["login"].as_str() == Some(&login))
+                    })
+                })
+                .filter_map(|pull| self.inbox_item(InboxKind::ReviewRequested, pull)),
+        );
+        items.sort_by_key(|item| std::cmp::Reverse(item.updated_at));
+        Ok(items)
+    }
+    fn inbox_item(&self, kind: InboxKind, value: &Value) -> Option<InboxItem> {
+        Some(InboxItem {
+            kind,
+            // Account-wide results name their repository; per-repository ones do not.
+            repo: value["repository"]["full_name"]
+                .as_str()
+                .map_or_else(|| self.repository(), |name| task_text(name, 200)),
+            number: value["number"].as_u64()?,
+            title: task_text(value["title"].as_str()?, 300),
+            url: value["html_url"].as_str()?.to_owned(),
+            pull_request: kind == InboxKind::ReviewRequested || !value["pull_request"].is_null(),
+            labels: value["labels"]
+                .as_array()
+                .map(|labels| {
+                    labels
+                        .iter()
+                        .filter_map(|label| label["name"].as_str())
+                        .take(6)
+                        .map(|name| task_text(name, 40))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            updated_at: value["updated_at"]
+                .as_str()
+                .and_then(parse_rfc3339)
+                .unwrap_or(0),
+        })
     }
 }
 fn review_state(reviews: &[Value]) -> Review {
@@ -650,8 +798,83 @@ mod tests {
             repo: "repo".into(),
             token_env: "SIGMA_TEST_NO_TOKEN".into(),
             actions: false,
+            token: Default::default(),
         })
         .unwrap()
+    }
+    #[test]
+    fn inbox_lists_assigned_issues_and_requested_reviews_for_the_token_user() {
+        let (url, server) = mock(vec![
+            ("200 OK", "", r#"{"login":"me"}"#),
+            (
+                "200 OK",
+                "",
+                r#"[{"number":7,"title":"Fix it","html_url":"https://forge.invalid/i/7","labels":[{"name":"bug"}],"updated_at":"2026-10-07T10:00:00Z"}]"#,
+            ),
+            (
+                "200 OK",
+                "",
+                r#"[{"number":9,"title":"Mine","html_url":"https://forge.invalid/p/9","requested_reviewers":[{"login":"me"}],"updated_at":"2026-10-07T12:00:00Z"},{"number":10,"title":"Other","html_url":"https://forge.invalid/p/10","requested_reviewers":[{"login":"them"}]}]"#,
+            ),
+        ]);
+        let mut forge = local_forge(url);
+        forge.token = Some("token".into());
+        let items = forge.inbox(true).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            (items[0].kind, items[0].number),
+            (InboxKind::ReviewRequested, 9)
+        );
+        assert!(items[0].pull_request);
+        assert_eq!((items[1].kind, items[1].number), (InboxKind::Assigned, 7));
+        assert_eq!(items[1].labels, vec!["bug".to_owned()]);
+        assert_eq!(items[1].repo, "owner/repo");
+        let requests = server.join().unwrap();
+        assert!(requests[1].contains("assigned_by=me"), "{}", requests[1]);
+        assert!(
+            local_forge("http://127.0.0.1:1/api".into())
+                .inbox(true)
+                .is_err()
+        );
+    }
+    #[test]
+    fn github_inbox_reads_assignments_account_wide_once_per_token() {
+        let github = |url: String| {
+            let mut forge = local_forge(url);
+            // The adapter only accepts api.github.com; tests reach a loopback mock instead.
+            forge.config.kind = "github".into();
+            forge.token = Some("token".into());
+            forge
+        };
+        let (url, server) = mock(vec![
+            ("200 OK", "", r#"{"login":"me"}"#),
+            (
+                "200 OK",
+                "",
+                r#"[{"number":3,"title":"Elsewhere","html_url":"https://github.invalid/x/y/issues/3","repository":{"full_name":"x/y"},"updated_at":"2026-10-07T10:00:00Z"}]"#,
+            ),
+            ("200 OK", "", "[]"),
+        ]);
+        let items = github(url).inbox(true).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!((items[0].repo.as_str(), items[0].number), ("x/y", 3));
+        let requests = server.join().unwrap();
+        assert!(
+            requests[1].starts_with("GET /api/v1/issues?filter=assigned"),
+            "{}",
+            requests[1]
+        );
+        let (url, server) = mock(vec![
+            ("200 OK", "", r#"{"login":"me"}"#),
+            ("200 OK", "", "[]"),
+        ]);
+        assert!(github(url).inbox(false).unwrap().is_empty());
+        let requests = server.join().unwrap();
+        assert!(
+            requests[1].contains("/repos/owner/repo/pulls"),
+            "{}",
+            requests[1]
+        );
     }
     #[test]
     fn conditional_requests_use_cached_facts() {

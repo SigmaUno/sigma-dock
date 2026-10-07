@@ -1,14 +1,20 @@
 //! Native berths workspace and reconnectable terminal, backed by the daemon's PTYs.
+mod agent_ui;
 mod appearance_ui;
 mod berths_ui;
 mod bootstrap;
 mod checks_ui;
 mod ci_ui;
+mod diff_ui;
+mod editor;
 mod events;
 mod icons;
+mod inbox_ui;
 mod keyboard_ui;
 mod preferences;
 mod recovery_ui;
+mod settings_ui;
+mod summary_ui;
 mod theme;
 mod update_ui;
 mod updates;
@@ -20,7 +26,6 @@ use gpui::{
     App, Application, Bounds, Context, Entity, SharedString, Window, WindowBounds, WindowOptions,
     div, prelude::*, px, rgb, size,
 };
-use icons::{Icon, icon};
 use serde_json::json;
 use sigmadock_core::{Capacity, Client, Output, Project, Worker, socket_path};
 use sigmadock_terminal::{TerminalConfig, TerminalView};
@@ -136,7 +141,24 @@ fn full_capacity_message(max_workers: usize) -> String {
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum View {
+    Berths,
+    Inbox,
+}
+/// Popover menus in the agent view header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Menu {
+    Editor,
+    More,
+}
 struct Workspace {
+    view: View,
+    /// Projects whose agents are hidden in the sidebar tree.
+    collapsed: std::collections::HashSet<String>,
+    diff: diff_ui::DiffState,
+    inbox: inbox_ui::InboxState,
+    menu: Option<Menu>,
     events: events::EventMonitor,
     event_epoch: u64,
     client: Client,
@@ -168,6 +190,8 @@ struct Workspace {
     preferences: preferences::Preferences,
     preferences_path: PathBuf,
     settings_open: bool,
+    settings_section: settings_ui::Section,
+    forge_form: Option<settings_ui::ForgeForm>,
     settings_focus: gpui::FocusHandle,
     settings_editor: Option<(usize, String)>,
     settings_error: Option<String>,
@@ -192,6 +216,10 @@ struct Workspace {
     checking_update: bool,
     update_message: Option<String>,
     available_update: Option<updates::Available>,
+    /// Worker whose session summary is being built.
+    summary_loading: Option<String>,
+    /// Worker whose summary was just copied, for a brief confirmation.
+    summary_copied: Option<String>,
 }
 impl Workspace {
     fn new(client: Client, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -248,7 +276,32 @@ impl Workspace {
             this.refresh_terminal_appearance(cx);
             cx.notify();
         });
+        // Worktree diffs and forge activity have no daemon events; refresh while visible.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(3)).await;
+                if this
+                    .update(cx, |this, cx| {
+                        if this.terminal.is_some() {
+                            this.load_changes(cx);
+                        } else if this.view == View::Inbox {
+                            this.load_inbox(false, cx);
+                            this.ensure_chat(cx);
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
         let mut workspace = Self {
+            view: View::Berths,
+            collapsed: Default::default(),
+            diff: Default::default(),
+            inbox: Default::default(),
+            menu: None,
             events: event_monitor,
             event_epoch: 0,
             usage_open: false,
@@ -271,10 +324,14 @@ impl Workspace {
             checker: Arc::new(std::sync::Mutex::new(updates::Checker::default())),
             checking_update: false,
             update_message: None,
+            summary_loading: None,
+            summary_copied: None,
             available_update: None,
             preferences: loaded.unwrap_or_default(),
             preferences_path,
             settings_open: false,
+            settings_section: Default::default(),
+            forge_form: None,
             settings_focus: cx.focus_handle(),
             settings_editor: None,
             settings_error,
@@ -307,7 +364,46 @@ impl Workspace {
         workspace.workspace_focus.focus(window);
         workspace
     }
+    /// A terminal view attached to a worker's daemon PTY until `connected` is cleared.
+    fn connect_terminal(
+        &self,
+        id: &str,
+        connected: Arc<AtomicBool>,
+        cx: &mut Context<Self>,
+    ) -> Entity<TerminalView> {
+        let reader = RemoteReader {
+            client: self.client.clone(),
+            worker: id.to_owned(),
+            cursor: 0,
+            pending: Vec::new(),
+            offset: 0,
+            ended: false,
+            connected,
+            events: self.events.feed.clone(),
+            observed: None,
+            more: false,
+        };
+        let writer = RemoteWriter {
+            client: self.client.clone(),
+            worker: id.to_owned(),
+        };
+        let resize_client = self.client.clone();
+        let resize_worker = id.to_owned();
+        let config = self
+            .theme
+            .terminal(&self.preferences.appearance)
+            .apply(TerminalConfig::default());
+        cx.new(|cx| {
+            TerminalView::new(writer, reader, config, cx).with_resize_callback(move |cols, rows| {
+                let _ = resize_client.call(
+                    "resize",
+                    json!({"worker_id":resize_worker,"cols":cols,"rows":rows}),
+                );
+            })
+        })
+    }
     fn open_worker(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_open = false;
         self.focused_berth = Some(id.clone());
         self.details.clear();
         self.usage_open = false;
@@ -317,46 +413,17 @@ impl Workspace {
         self.ci_report = None;
         self.ci_error = None;
         self.ci_expanded = None;
+        self.menu = None;
         self.connection.store(false, Ordering::Relaxed);
         self.connection = Arc::new(AtomicBool::new(true));
-        let reader = RemoteReader {
-            client: self.client.clone(),
-            worker: id.clone(),
-            cursor: 0,
-            pending: Vec::new(),
-            offset: 0,
-            ended: false,
-            connected: self.connection.clone(),
-            events: self.events.feed.clone(),
-            observed: None,
-            more: false,
-        };
-        let writer = RemoteWriter {
-            client: self.client.clone(),
-            worker: id.clone(),
-        };
-        let resize_client = self.client.clone();
-        let resize_worker = id.clone();
-        let terminal = cx.new(|cx| {
-            TerminalView::new(
-                writer,
-                reader,
-                self.theme
-                    .terminal(&self.preferences.appearance)
-                    .apply(TerminalConfig::default()),
-                cx,
-            )
-            .with_resize_callback(move |cols, rows| {
-                let _ = resize_client.call(
-                    "resize",
-                    json!({"worker_id":resize_worker,"cols":cols,"rows":rows}),
-                );
-            })
-        });
+        let terminal = self.connect_terminal(&id, self.connection.clone(), cx);
         terminal.read(cx).focus_handle().focus(window);
         self.terminal = Some(terminal);
-        self.selected = Some(id.clone());
-        self.run_action("diff", json!({"worker_id":id}), cx);
+        if self.selected.as_ref() != Some(&id) {
+            self.diff = Default::default();
+        }
+        self.selected = Some(id);
+        self.load_changes(cx);
         cx.notify();
     }
 
@@ -578,10 +645,98 @@ impl Drop for Workspace {
         self.connection.store(false, Ordering::Relaxed);
     }
 }
-impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.prepare_berth_focus(cx);
-        let sidebar = self.sidebar(cx);
+impl Workspace {
+    fn error_banner(&self) -> Option<gpui::AnyElement> {
+        self.error.as_ref().map(|error| {
+            div()
+                .p_3()
+                .bg(rgb(self.theme.card))
+                .text_color(rgb(self.theme.error))
+                .border_l_4()
+                .border_color(rgb(self.theme.error))
+                .child(error.clone())
+                .into_any_element()
+        })
+    }
+    fn new_task_form(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let mut form = div()
+            .track_focus(&self.form_focus)
+            .border_1()
+            .border_color(rgb(self.theme.border))
+            .focus(|style| style.border_color(rgb(self.theme.focus)))
+            .on_key_down(cx.listener(Self::edit_key))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .rounded_lg()
+            .bg(rgb(self.theme.panel))
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(self.field(0, "Choose repository…", cx))
+                    .child(self.field(1, "Task title", cx)),
+            )
+            .child(self.field(2, "Initial instruction (optional)", cx))
+            .child(self.field(3, "Base ref override (optional)", cx));
+        let mut agents = div().flex().gap_2();
+        for name in ["claude", "codex", "gemini", "opencode", "aider", "shell"] {
+            agents = agents.child(
+                div()
+                    .id(SharedString::from(format!("agent-{name}")))
+                    .cursor_pointer()
+                    .p_2()
+                    .rounded_md()
+                    .bg(rgb(if self.agent == name {
+                        self.theme.accent
+                    } else {
+                        self.theme.button
+                    }))
+                    .when(self.agent == name, |button| {
+                        button.text_color(rgb(self.theme.base))
+                    })
+                    .child(name)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.agent = name.into();
+                        cx.notify();
+                    })),
+            );
+        }
+        let blocked = self.creation_blocked_reason();
+        let disabled = self.busy || blocked.is_some();
+        if let Some(reason) = &blocked {
+            form = form.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(self.theme.muted))
+                    .child(reason.clone()),
+            );
+        }
+        form = form.child(agents).child(
+            div()
+                .id("spawn")
+                .when(!disabled, |button| button.cursor_pointer())
+                .when(disabled, |button| button.opacity(0.5))
+                .p_2()
+                .rounded_md()
+                .bg(rgb(self.theme.accent))
+                .text_color(rgb(self.theme.base))
+                .child(if self.busy {
+                    "Creating…"
+                } else if blocked.is_some() {
+                    "Creation unavailable"
+                } else {
+                    "Create isolated worker"
+                })
+                .when(!disabled, |button| {
+                    button.on_click(cx.listener(|this, _, _, cx| this.create_worker(cx)))
+                }),
+        );
+        form.into_any_element()
+    }
+    /// The berths grid for all projects or the selected one.
+    fn berths_view(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let mut content = div()
             .id("workspace-content")
             .overflow_y_scroll()
@@ -591,75 +746,9 @@ impl Render for Workspace {
             .flex_col()
             .gap_5()
             .px_8()
-            .py_6();
-        let selected = self
-            .workers
-            .iter()
-            .find(|w| Some(&w.id) == self.selected.as_ref())
-            .cloned();
-        if self.terminal.is_none() {
-            content = content.child(self.header(cx));
-        } else {
-            content = content.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        div()
-                            .id("close-terminal")
-                            .cursor_pointer()
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
-                            .flex()
-                            .items_center()
-                            .gap_1p5()
-                            .bg(rgb(self.theme.button))
-                            .hover(|style| style.bg(rgb(self.theme.selection)))
-                            .child(icon(Icon::ArrowLeft, px(14.), rgb(self.theme.text)))
-                            .child("Berths")
-                            .tab_index(0)
-                            .border_1()
-                            .border_color(gpui::transparent_black())
-                            .focus(|style| style.border_color(rgb(self.theme.focus)))
-                            .tooltip(|_, cx| {
-                                keyboard_ui::tooltip("Return to berths · ⌘[".into(), cx)
-                            })
-                            .on_key_down(cx.listener(
-                                |this, event: &gpui::KeyDownEvent, window, cx| {
-                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                        this.close_terminal(window, cx);
-                                        cx.stop_propagation();
-                                    }
-                                },
-                            ))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.close_terminal(window, cx)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_xl()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(selected.as_ref().map_or_else(
-                                || "Session ended".to_owned(),
-                                |worker| worker.title.clone(),
-                            )),
-                    ),
-            );
-        }
-        if let Some(error) = &self.error {
-            content = content.child(
-                div()
-                    .p_3()
-                    .bg(rgb(self.theme.card))
-                    .text_color(rgb(self.theme.error))
-                    .border_l_4()
-                    .border_color(rgb(self.theme.error))
-                    .child(error.clone()),
-            );
-        }
+            .py_6()
+            .child(self.header(cx))
+            .children(self.error_banner());
         if let Some(update) = &self.available_update {
             content = content.child(self.update_notice(update, cx));
         }
@@ -667,207 +756,59 @@ impl Render for Workspace {
             content = content.child(self.recovery_panel(cx));
         }
         if self.form_open {
-            let mut form = div()
-                .track_focus(&self.form_focus)
-                .border_1()
-                .border_color(rgb(self.theme.border))
-                .focus(|style| style.border_color(rgb(self.theme.focus)))
-                .on_key_down(cx.listener(Self::edit_key))
-                .flex()
-                .flex_col()
-                .gap_2()
-                .p_3()
-                .rounded_lg()
-                .bg(rgb(self.theme.panel))
-                .child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(self.field(0, "Choose repository…", cx))
-                        .child(self.field(1, "Task title", cx)),
-                )
-                .child(self.field(2, "Initial instruction (optional)", cx))
-                .child(self.field(3, "Base ref override (optional)", cx));
-            let mut agents = div().flex().gap_2();
-            for name in ["claude", "codex", "gemini", "opencode", "aider", "shell"] {
-                agents = agents.child(
-                    div()
-                        .id(SharedString::from(format!("agent-{name}")))
-                        .cursor_pointer()
-                        .p_2()
-                        .rounded_md()
-                        .bg(rgb(if self.agent == name {
-                            self.theme.accent
-                        } else {
-                            self.theme.button
-                        }))
-                        .when(self.agent == name, |button| {
-                            button.text_color(rgb(self.theme.base))
-                        })
-                        .child(name)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.agent = name.into();
-                            cx.notify();
-                        })),
-                );
-            }
-            let blocked = self.creation_blocked_reason();
-            let disabled = self.busy || blocked.is_some();
-            if let Some(reason) = &blocked {
-                form = form.child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(self.theme.muted))
-                        .child(reason.clone()),
-                );
-            }
-            form = form.child(agents).child(
-                div()
-                    .id("spawn")
-                    .when(!disabled, |button| button.cursor_pointer())
-                    .when(disabled, |button| button.opacity(0.5))
-                    .p_2()
-                    .rounded_md()
-                    .bg(rgb(self.theme.accent))
-                    .text_color(rgb(self.theme.base))
-                    .child(if self.busy {
-                        "Creating…"
-                    } else if blocked.is_some() {
-                        "Creation unavailable"
-                    } else {
-                        "Create isolated worker"
-                    })
-                    .when(!disabled, |button| {
-                        button.on_click(cx.listener(|this, _, _, cx| this.create_worker(cx)))
-                    }),
-            );
-            content = content.child(form);
+            content = content.child(self.new_task_form(cx));
         }
         if self.checks.worker.is_some() {
             content = content.child(self.checks_panel(cx));
         }
-        if let Some(terminal) = &self.terminal {
-            if let Some(worker) = selected {
-                let id = worker.id.clone();
-                let mut actions = div().flex().gap_2().items_center().child(
-                    div()
-                        .flex_1()
-                        .text_sm()
-                        .text_color(rgb(self.theme.muted))
-                        .child(format!(
-                            "{} · {} · :{} · checks {:?} · review {:?}",
-                            berths_ui::agent_label(&worker.agent),
-                            worker.branch,
-                            worker.port,
-                            worker.facts.checks,
-                            worker.facts.review
-                        )),
-                );
-                for (label, method) in [
-                    ("Checks", "worker_checks"),
-                    ("Usage", "agent_usage"),
-                    ("Diff", "diff"),
-                    ("CI preview", "ci_feedback"),
-                    ("Send CI", "send_ci_feedback"),
-                    ("Review", "review_feedback"),
-                    ("Conflict plan", "conflict_instruction"),
-                    ("Stop", "stop_worker"),
-                    ("Resume", "resume_worker"),
-                    ("Archive", "archive_worker"),
-                ] {
-                    let id = id.clone();
-                    actions = actions.child(
-                        div()
-                            .id(SharedString::from(format!("action-{method}")))
-                            .cursor_pointer()
-                            .p_2()
-                            .rounded_md()
-                            .bg(rgb(self.theme.button))
-                            .hover(|style| style.bg(rgb(self.theme.selection)))
-                            .child(label)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                if method == "worker_checks" {
-                                    this.open_checks(id.clone(), window, cx);
-                                } else if method == "agent_usage" {
-                                    this.load_usage(cx);
-                                } else if method == "ci_feedback" {
-                                    this.load_ci(cx);
-                                } else {
-                                    this.run_action(method, json!({"worker_id":id}), cx)
-                                }
-                            })),
-                    );
-                }
-                if let Some(url) = worker.facts.pr_url {
-                    actions = actions.child(
-                        div()
-                            .id("open-pr")
-                            .cursor_pointer()
-                            .p_2()
-                            .rounded_md()
-                            .bg(rgb(self.theme.accent))
-                            .text_color(rgb(self.theme.base))
-                            .child("Open PR")
-                            .on_click(move |_, _, cx| cx.open_url(&url)),
-                    );
-                }
-                content = content.child(actions);
-            }
-            if self.usage_open {
-                content = content.child(self.usage_panel(cx));
-            }
-            if self.ci_open {
-                content = content.child(self.ci_panel(cx));
-            }
-            if !self.details.is_empty() {
-                content = content.child(
-                    div()
-                        .id("feedback-detail")
-                        .max_h(px(120.))
-                        .overflow_y_scroll()
-                        .text_sm()
-                        .text_color(rgb(self.theme.muted))
-                        .child(self.details.clone())
-                        .child(
-                            div()
-                                .id("copy-feedback-detail")
-                                .cursor_pointer()
-                                .child("Copy feedback")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                        this.details.clone(),
-                                    ))
-                                })),
-                        ),
-                );
-            }
-            content = content.child(div().flex_1().min_h(px(200.)).child(terminal.clone()));
-        } else {
-            content = content.child(self.needs_strip(cx)).child(
+        content
+            .child(self.needs_strip(cx))
+            .child(
                 div()
                     .flex()
                     .items_start()
                     .gap_6()
                     .child(div().flex_1().min_w(px(0.)).child(self.grid(cx)))
                     .child(self.side_panel(cx)),
-            );
-        }
-        content = content.child(self.footer());
+            )
+            .child(self.footer())
+            .into_any_element()
+    }
+}
+impl Render for Workspace {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.prepare_berth_focus(cx);
+        let sidebar = self.sidebar(cx);
+        let main = if self.settings_open {
+            self.settings_page(cx)
+        } else if self.terminal.is_some() {
+            self.agent_view(cx)
+        } else if self.view == View::Inbox {
+            self.inbox_view(cx)
+        } else {
+            self.berths_view(cx)
+        };
         div()
             .id("workspace")
             .track_focus(&self.workspace_focus)
             .size_full()
             .relative()
             .capture_key_down(cx.listener(Self::workspace_key))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.menu.is_some() {
+                        this.menu = None;
+                        cx.notify();
+                    }
+                }),
+            )
             .flex()
             .bg(rgb(self.theme.base))
             .text_color(rgb(self.theme.text))
             .font_family(".SystemUIFont")
             .child(sidebar)
-            .child(content)
-            .when(self.settings_open, |root| {
-                root.child(self.settings_panel(cx))
-            })
+            .child(main)
     }
 }
 fn main() -> Result<()> {

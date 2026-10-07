@@ -55,6 +55,26 @@ pub(crate) fn local_midnight(now: u64) -> u64 {
     now.saturating_sub((tm.tm_hour * 3600 + tm.tm_min * 60 + tm.tm_sec) as u64)
 }
 
+/// Numbered berth slots up to the larger of capacity and the highest docked berth.
+fn slot_layout(berths: Vec<&Worker>, max_workers: usize) -> Vec<(usize, Option<&Worker>)> {
+    let max_slot = berths
+        .iter()
+        .filter_map(|worker| worker.berth)
+        .map(usize::from)
+        .max()
+        .unwrap_or(0)
+        .max(max_workers);
+    (1..=max_slot)
+        .map(|number| {
+            let worker = berths
+                .iter()
+                .find(|worker| worker.berth == Some(number as u8))
+                .copied();
+            (number, worker)
+        })
+        .collect()
+}
+
 fn pr_number(worker: &Worker) -> Option<&str> {
     worker
         .facts
@@ -375,7 +395,7 @@ impl Workspace {
             .is_none_or(|project| project.id == worker.project_id)
     }
 
-    fn worker(&self, id: &str) -> Option<&Worker> {
+    pub(crate) fn worker(&self, id: &str) -> Option<&Worker> {
         self.workers.iter().find(|worker| worker.id == id)
     }
 
@@ -393,7 +413,7 @@ impl Workspace {
         self.capacity.live.len() >= self.capacity.max_workers
     }
 
-    fn tone_color(&self, tone: Tone) -> u32 {
+    pub(crate) fn tone_color(&self, tone: Tone) -> u32 {
         match tone {
             Tone::Working => self.theme.link,
             Tone::Input => self.theme.attention,
@@ -501,223 +521,455 @@ impl Workspace {
         div().size(px(size)).rounded_full().bg(rgb(color))
     }
 
-    fn sidebar_entry(
-        &self,
-        key: String,
-        title: String,
-        subtitle: String,
-        project: Option<String>,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let theme = self.theme;
-        let active = self.selected_project == project;
-        let hint = format!("{title} · Enter to select · ⌘1 All berths, ⌘2–⌘9 projects");
-        let key_project = project.clone();
-        let berths = self.berths(project.as_deref());
+    /// Inbox badge: workers that need you plus reviews requested from you.
+    pub(crate) fn inbox_count(&self) -> usize {
         let needs = self
             .workers
             .iter()
-            .filter(|worker| project.as_ref().is_none_or(|id| &worker.project_id == id))
             .filter(|worker| derived_status(&worker.facts) == DerivedStatus::NeedsYou)
             .count();
-        let mut dots = div().flex().items_center().gap_1();
-        for worker in &berths {
-            dots = dots.child(self.dot(self.tone_color(status(worker).tone), 7.));
-        }
-        if berths.is_empty() {
-            dots = dots.child(div().text_xs().text_color(rgb(theme.muted)).child("idle"));
-        }
+        needs + self.inbox.review_requests()
+    }
+
+    fn agent_row(&self, worker: &Worker, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let status = status(worker);
+        let active = self.terminal.is_some() && self.selected.as_deref() == Some(&worker.id);
+        let id = worker.id.clone();
         div()
-            .id(SharedString::from(key))
-            .tab_index(0)
-            .border_1()
-            .border_color(gpui::transparent_black())
-            .focus(|style| style.border_color(rgb(theme.focus)))
-            .tooltip(move |_, cx| crate::keyboard_ui::tooltip(hint.clone(), cx))
-            .on_key_down(
-                cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
-                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        this.select_project(key_project.clone(), window, cx);
-                        cx.stop_propagation();
-                    }
-                }),
-            )
+            .id(SharedString::from(format!("agent-{id}")))
             .flex()
-            .flex_col()
-            .gap_1()
-            .px_3()
-            .py_2()
+            .items_center()
+            .gap_2()
+            .ml_5()
+            .pl_2()
+            .pr_2()
+            .py_1()
             .rounded_md()
             .cursor_pointer()
-            .when(active, |row| row.bg(rgb(theme.selection)))
+            .border_l_2()
+            .border_color(if active {
+                rgb(theme.accent).into()
+            } else {
+                gpui::transparent_black()
+            })
+            .when(active, |row| row.bg(rgb(theme.base)))
             .when(!active, |row| row.hover(|style| style.bg(rgb(theme.panel))))
+            .child(crate::icons::app_icon(px(16.)))
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .truncate()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(if active { theme.accent } else { theme.text }))
-                            .child(title),
-                    )
-                    .when(needs > 0, |row| {
-                        row.child(
-                            div()
-                                .px_1p5()
-                                .rounded_full()
-                                .bg(rgb(theme.attention))
-                                .text_xs()
-                                .text_color(rgb(theme.surface))
-                                .child(needs.to_string()),
-                        )
-                    }),
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_sm()
+                    .text_color(rgb(if active { theme.text } else { theme.muted }))
+                    .child(worker.title.clone()),
             )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    .when(project.is_some(), |row| {
-                        row.child(icon(Icon::Folder, px(12.), rgb(theme.muted)))
-                    })
-                    .child(
-                        div()
-                            .min_w(px(0.))
-                            .truncate()
-                            .text_xs()
-                            .font_family(MONO)
-                            .text_color(rgb(theme.muted))
-                            .child(subtitle),
-                    ),
-            )
-            .child(dots)
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.select_project(project.clone(), window, cx);
+            .child(self.dot(self.tone_color(status.tone), 7.))
+            .tooltip({
+                let text = format!(
+                    "{} · {} · Enter to open",
+                    status.pill,
+                    agent_label(&worker.agent)
+                );
+                move |_, cx| crate::keyboard_ui::tooltip(text.clone(), cx)
+            })
+            .tab_index(0)
+            .on_key_down(cx.listener({
+                let id = id.clone();
+                move |this, event: &gpui::KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.open_worker(id.clone(), window, cx);
+                        cx.stop_propagation();
+                    }
+                }
             }))
+            .on_click(
+                cx.listener(move |this, _, window, cx| this.open_worker(id.clone(), window, cx)),
+            )
             .into_any_element()
     }
 
-    pub(crate) fn sidebar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn project_tree(
+        &self,
+        index: usize,
+        project: &Project,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let theme = self.theme;
-        let home = std::env::var("HOME").unwrap_or_default();
-        let mut projects = div().flex().flex_col().gap_1().child(self.sidebar_entry(
-            "all-berths".into(),
-            "All berths".into(),
-            format!(
-                "{} of {} in use",
-                self.capacity.live.len(),
-                self.capacity.max_workers
-            ),
-            None,
-            cx,
-        ));
-        for project in &self.projects {
-            let path = project.path.to_string_lossy();
-            let path = match path.strip_prefix(&home) {
-                Some(rest) if !home.is_empty() => format!("~{rest}"),
-                _ => path.into_owned(),
-            };
-            projects = projects.child(self.sidebar_entry(
-                format!("project-{}", project.id),
-                project.name.clone(),
-                path,
-                Some(project.id.clone()),
-                cx,
-            ));
-        }
-        let link = |id: &'static str, glyph: Icon, label: String| {
+        // Rotate through the terminal palette so each project keeps a stable color.
+        let color = theme.ansi[[5, 6, 3, 4, 2, 1][index % 6]];
+        let agents: Vec<&Worker> = self
+            .workers
+            .iter()
+            .filter(|worker| worker.project_id == project.id)
+            .collect();
+        let live = agents
+            .iter()
+            .filter(|worker| self.capacity.live.contains(&worker.id))
+            .count();
+        let collapsed = self.collapsed.contains(&project.id);
+        let active = self.terminal.is_none()
+            && self.view == crate::View::Berths
+            && self.selected_project.as_deref() == Some(&project.id);
+        let toggle = project.id.clone();
+        let select = project.id.clone();
+        let mut tree = div().flex().flex_col().child(
             div()
-                .id(id)
+                .id(SharedString::from(format!("project-{}", project.id)))
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .cursor_pointer()
+                .when(active, |row| row.bg(rgb(theme.selection)))
+                .when(!active, |row| row.hover(|style| style.bg(rgb(theme.panel))))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("toggle-{}", project.id)))
+                        .flex_none()
+                        .child(icon(
+                            if collapsed {
+                                Icon::ChevronRight
+                            } else {
+                                Icon::ChevronDown
+                            },
+                            px(12.),
+                            rgb(theme.muted),
+                        ))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            if !this.collapsed.remove(&toggle) {
+                                this.collapsed.insert(toggle.clone());
+                            }
+                            cx.notify();
+                        })),
+                )
+                .child(div().size(px(9.)).flex_none().rounded_sm().bg(rgb(color)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .truncate()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_sm()
+                        .child(project.name.clone()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(rgb(theme.muted))
+                        .child(match live {
+                            0 => "idle".to_owned(),
+                            1 => "1 agent".to_owned(),
+                            n => format!("{n} agents"),
+                        }),
+                )
+                .tooltip({
+                    let hint = format!(
+                        "{} · Enter to select · ⌘{} to jump",
+                        project.path.display(),
+                        (index + 2).min(9)
+                    );
+                    move |_, cx| crate::keyboard_ui::tooltip(hint.clone(), cx)
+                })
                 .tab_index(0)
                 .border_1()
                 .border_color(gpui::transparent_black())
                 .focus(|style| style.border_color(rgb(theme.focus)))
-                .flex()
-                .items_center()
-                .gap_2()
-                .px_3()
-                .py_1()
-                .rounded_md()
-                .cursor_pointer()
-                .text_color(rgb(theme.muted))
-                .hover(|style| style.bg(rgb(theme.panel)))
-                .child(icon(glyph, px(16.), rgb(theme.muted)))
-                .child(div().flex_1().child(label))
-        };
+                .on_key_down(cx.listener({
+                    let select = select.clone();
+                    move |this, event: &gpui::KeyDownEvent, window, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.view = crate::View::Berths;
+                            this.select_project(Some(select.clone()), window, cx);
+                            cx.stop_propagation();
+                        }
+                    }
+                }))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.view = crate::View::Berths;
+                    this.select_project(Some(select.clone()), window, cx);
+                })),
+        );
+        if !collapsed {
+            for worker in agents {
+                tree = tree.child(self.agent_row(worker, cx));
+            }
+        }
+        tree.into_any_element()
+    }
+
+    pub(crate) fn sidebar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let in_use = self.capacity.live.len();
+        let max = self.capacity.max_workers;
+        let inbox_active = self.terminal.is_none() && self.view == crate::View::Inbox;
+        let inbox_count = self.inbox_count();
+        let mut projects = div().flex().flex_col().gap_0p5();
+        for (index, project) in self.projects.iter().enumerate() {
+            projects = projects.child(self.project_tree(index, project, cx));
+        }
+        if self.projects.is_empty() {
+            projects = projects.child(
+                div()
+                    .px_2()
+                    .text_sm()
+                    .text_color(rgb(theme.muted))
+                    .child("Add a repository to dock agents"),
+            );
+        }
+        let mut capacity = div().flex().gap_1();
+        for slot in 0..max {
+            let color = self
+                .capacity
+                .live
+                .get(slot)
+                .and_then(|id| self.worker(id))
+                .map_or(theme.border, |worker| self.tone_color(status(worker).tone));
+            capacity = capacity.child(
+                div()
+                    .h(px(6.))
+                    .flex_1()
+                    .max_w(px(22.))
+                    .rounded_full()
+                    .bg(rgb(color)),
+            );
+        }
+        let unfinished = self.recovery_entries.len();
         div()
             .id("sidebar")
-            .w(px(260.))
+            // One sixth of the window, matching the agent view's 1:3:2 split.
+            .w(gpui::relative(1. / 6.))
+            .min_w(px(220.))
+            .flex_none()
             .h_full()
             .flex()
             .flex_col()
-            .gap_3()
-            .p_4()
             .bg(rgb(theme.sidebar))
             .border_r_1()
             .border_color(rgb(theme.border))
             .child(
                 div()
-                    .px_3()
+                    .id("brand")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_4()
+                    .pt_4()
+                    .pb_3()
+                    .cursor_pointer()
+                    .child(crate::icons::app_icon(px(26.)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("SigmaDock"),
+                    )
+                    .child(
+                        div()
+                            .px_2()
+                            .rounded_full()
+                            .bg(rgb(theme.chip))
+                            .text_xs()
+                            .text_color(rgb(theme.muted))
+                            .child(format!("{in_use} / {max} berths")),
+                    )
+                    .tooltip(|_, cx| crate::keyboard_ui::tooltip("All berths · ⌘1".into(), cx))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.view = crate::View::Berths;
+                        this.select_project(None, window, cx);
+                    })),
+            )
+            .child(
+                div().px_2().child(
+                    div()
+                        .id("inbox")
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_1p5()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .border_l_2()
+                        .border_color(if inbox_active {
+                            rgb(theme.accent).into()
+                        } else {
+                            gpui::transparent_black()
+                        })
+                        .when(inbox_active, |row| row.bg(rgb(theme.base)))
+                        .when(!inbox_active, |row| {
+                            row.hover(|style| style.bg(rgb(theme.panel)))
+                        })
+                        .child(icon(Icon::Inbox, px(16.), rgb(theme.accent)))
+                        .child(
+                            div()
+                                .flex_1()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_sm()
+                                .child("Inbox"),
+                        )
+                        .when(inbox_count > 0, |row| {
+                            row.child(
+                                div()
+                                    .px_1p5()
+                                    .rounded_full()
+                                    .bg(rgb(theme.accent))
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(theme.surface))
+                                    .child(inbox_count.to_string()),
+                            )
+                        })
+                        .tab_index(0)
+                        .tooltip(|_, cx| crate::keyboard_ui::tooltip("Inbox · ⌘I".into(), cx))
+                        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                this.open_inbox(window, cx);
+                                cx.stop_propagation();
+                            }
+                        }))
+                        .on_click(cx.listener(|this, _, window, cx| this.open_inbox(window, cx))),
+                ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_4()
+                    .pt_4()
+                    .pb_1()
                     .text_xs()
-                    .font_family(MONO)
                     .text_color(rgb(theme.muted))
-                    .child("PROJECTS"),
+                    .child("PROJECTS")
+                    .child(
+                        div()
+                            .id("add-repository")
+                            .p_0p5()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(theme.panel)))
+                            .child(icon(Icon::Plus, px(14.), rgb(theme.muted)))
+                            .tooltip(|_, cx| {
+                                crate::keyboard_ui::tooltip("Add repository…".into(), cx)
+                            })
+                            .tab_index(0)
+                            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                    this.add_repository(cx);
+                                    cx.stop_propagation();
+                                }
+                            }))
+                            .on_click(cx.listener(|this, _, _, cx| this.add_repository(cx))),
+                    ),
             )
             .child(
                 div()
                     .id("project-list")
                     .flex_1()
                     .overflow_y_scroll()
+                    .px_2()
                     .child(projects),
             )
-            .child(
-                link("add-repository", Icon::Plus, "Add repository…".into())
-                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            this.add_repository(cx);
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .on_click(cx.listener(|this, _, _, cx| this.add_repository(cx))),
-            )
-            .child(div().h(px(1.)).bg(rgb(theme.border)))
-            .child(
-                link(
-                    "show-unfinished",
-                    Icon::Terminal,
-                    format!("Unfinished sessions  {}", self.recovery_entries.len()),
+            .when(unfinished > 0, |sidebar| {
+                sidebar.child(
+                    div()
+                        .id("show-unfinished")
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .mx_2()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .text_sm()
+                        .text_color(rgb(theme.muted))
+                        .hover(|style| style.bg(rgb(theme.panel)))
+                        .child(icon(Icon::Terminal, px(14.), rgb(theme.muted)))
+                        .child(format!("Unfinished sessions  {unfinished}"))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if this.terminal.is_some() {
+                                this.close_terminal(window, cx);
+                            }
+                            this.view = crate::View::Berths;
+                            this.recovery_open = !this.recovery_open;
+                            cx.notify();
+                        })),
                 )
-                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        this.recovery_open = !this.recovery_open;
-                        cx.notify();
-                        cx.stop_propagation();
-                    }
-                }))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.recovery_open = !this.recovery_open;
-                    cx.notify();
-                })),
-            )
+            })
             .child(
-                link("terminal-settings", Icon::Settings, "Settings".into())
-                    .tab_index(0)
-                    .border_1()
-                    .border_color(gpui::transparent_black())
-                    .focus(|style| style.border_color(rgb(theme.focus)))
-                    .tooltip(|_, cx| cx.new(|_| crate::appearance_ui::SettingsTooltip).into())
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle_settings(window, cx)))
-                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            this.toggle_settings(window, cx);
-                            cx.stop_propagation();
-                        }
-                    })),
+                div()
+                    .flex()
+                    .items_end()
+                    .justify_between()
+                    .gap_3()
+                    .px_4()
+                    .py_3()
+                    .border_t_1()
+                    .border_color(rgb(theme.border))
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .text_xs()
+                            .text_color(rgb(theme.muted))
+                            .child("Workers")
+                            .child(capacity),
+                    )
+                    .child(
+                        div()
+                            .id("terminal-settings")
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .px_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_xs()
+                            .text_color(rgb(if self.settings_open {
+                                theme.accent
+                            } else {
+                                theme.muted
+                            }))
+                            .when(self.settings_open, |row| row.bg(rgb(theme.base)))
+                            .hover(|style| style.bg(rgb(theme.panel)))
+                            .tab_index(0)
+                            .border_1()
+                            .border_color(gpui::transparent_black())
+                            .focus(|style| style.border_color(rgb(theme.focus)))
+                            .child(icon(
+                                Icon::Settings,
+                                px(14.),
+                                rgb(if self.settings_open {
+                                    theme.accent
+                                } else {
+                                    theme.muted
+                                }),
+                            ))
+                            .child("Settings")
+                            .tooltip(|_, cx| {
+                                cx.new(|_| crate::appearance_ui::SettingsTooltip).into()
+                            })
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.toggle_settings(window, cx)),
+                            )
+                            .on_key_down(cx.listener(
+                                |this, event: &gpui::KeyDownEvent, window, cx| {
+                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        this.toggle_settings(window, cx);
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            )),
+                    ),
             )
             .into_any_element()
     }
@@ -1190,26 +1442,20 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// Grid slots in berth-number order: the worker docked at each number, if any.
+    /// Workers keep stable berth numbers, so occupied slots can have gaps between them.
+    pub(crate) fn slots(&self, project: Option<&str>) -> Vec<(usize, Option<&Worker>)> {
+        slot_layout(self.berths(project), self.capacity.max_workers)
+    }
+
     pub(crate) fn grid(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let project = self.current_project().map(|p| p.id.clone());
-        let berths = self.berths(project.as_deref());
         let mut grid = div().grid().grid_cols(3).gap_4();
-        let max_slot = berths
-            .iter()
-            .filter_map(|worker| worker.berth)
-            .map(usize::from)
-            .max()
-            .unwrap_or(0)
-            .max(self.capacity.max_workers);
-        for number in 1..=max_slot {
-            if let Some(worker) = berths
-                .iter()
-                .find(|worker| worker.berth == Some(number as u8))
-            {
-                grid = grid.child(self.berth(number, worker, cx));
-            } else {
-                grid = grid.child(self.empty_berth(number, cx));
-            }
+        for (number, worker) in self.slots(project.as_deref()) {
+            grid = grid.child(match worker {
+                Some(worker) => self.berth(number, worker, cx),
+                None => self.empty_berth(number, cx),
+            });
         }
         grid.into_any_element()
     }
@@ -1260,6 +1506,21 @@ impl Workspace {
                 }
                 text
             }))
+            .when(!clickable, |row| {
+                let id = id.clone();
+                row.child(
+                    div()
+                        .id(SharedString::from(format!("summary-{id}")))
+                        .text_xs()
+                        .text_color(rgb(theme.accent))
+                        .cursor_pointer()
+                        .hover(|style| style.underline())
+                        .child(self.summary_label(&id, "Copy summary"))
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.copy_summary(id.clone(), cx)),
+                        ),
+                )
+            })
             .when(clickable, |row| {
                 row.cursor_pointer()
                     .hover(|style| style.border_color(rgb(theme.focus)))
@@ -1402,6 +1663,25 @@ mod tests {
             "archived": false, "facts": facts,
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn slots_keep_berth_numbers_with_gaps() {
+        let mut first = worker(Facts::default());
+        first.berth = Some(3);
+        let mut second = worker(Facts::default());
+        second.id = "x".into();
+        second.berth = Some(7);
+        let slots = slot_layout(vec![&first, &second], 5);
+        assert_eq!(slots.len(), 7);
+        let docked: Vec<_> = slots
+            .iter()
+            .map(|(number, worker)| (*number, worker.map(|w| w.id.as_str())))
+            .filter(|(_, id)| id.is_some())
+            .collect();
+        assert_eq!(docked, [(3, Some("w")), (7, Some("x"))]);
+        assert!(slots[1].1.is_none());
+        assert_eq!(slot_layout(vec![], 2).len(), 2);
     }
 
     #[test]

@@ -249,6 +249,7 @@ mod tests {
     fn preserves_workers_and_marks_lost() {
         let store = Store::open(Path::new(":memory:")).unwrap();
         let project = Project {
+            forge: None,
             base_branch: None,
             id: "p".into(),
             path: "/repo".into(),
@@ -273,6 +274,8 @@ mod tests {
             feedback: Default::default(),
             orchestrator_spawn: false,
             archived_at: None,
+            prompt: None,
+            finished_at: None,
             usage_reporting: false,
         };
         store.save_worker(&worker).unwrap();
@@ -287,6 +290,7 @@ mod tests {
         let mut store = Store::open(Path::new(":memory:")).unwrap();
         store
             .save_project(&Project {
+                forge: None,
                 base_branch: None,
                 id: "p".into(),
                 path: "/p".into(),
@@ -352,6 +356,7 @@ mod context_tests {
         let store = Store::open(Path::new(":memory:")).unwrap();
         store
             .save_project(&Project {
+                forge: None,
                 base_branch: None,
                 id: "p".into(),
                 path: "/p".into(),
@@ -446,6 +451,7 @@ mod queue_tests {
     }
     fn project(id: &str) -> Project {
         Project {
+            forge: None,
             base_branch: None,
             id: id.into(),
             path: format!("/{id}").into(),
