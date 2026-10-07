@@ -840,6 +840,7 @@ fn main() -> Result<()> {
     };
     let app = Application::new().with_assets(icons::Assets);
     app.run(move |cx: &mut App| {
+        sigmadock_terminal::register_fonts(cx);
         let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
         cx.open_window(
             WindowOptions {

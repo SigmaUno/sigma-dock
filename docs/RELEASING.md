@@ -47,3 +47,7 @@ Issue #19 adds an API-2 `subscribe` stream without removing polling RPCs. Native
 ## Unreleased: app and installer notarization
 
 Production macOS packaging notarizes and staples the app before building the DMG, then separately notarizes and staples the final image. Verification requires tickets on both the image and the app copied from it, exact Developer ID authority and hardened runtime. Separate Apple diagnostics are retained for each submission. Apple credentials and clean-Mac online/offline qualification remain required; see [the issue #7 procedure](MACOS.md#production-qualification-for-issue-7).
+
+## Unreleased: deterministic terminal font
+
+The default monospace preference uses bundled JetBrains Mono instead of relying on a platform generic-family fallback. Font metrics and glyph painting use the same family and four styles. Existing custom font preferences are retained.
