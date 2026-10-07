@@ -181,7 +181,12 @@ impl Workspace {
                 } else {
                     self.open_worker(worker.id, window, cx);
                 }
-            } else if !self.global_full() && !self.form_open {
+            } else if self
+                .selected_project
+                .as_deref()
+                .is_some_and(|id| !self.project_full(id))
+                && !self.form_open
+            {
                 self.open_new_task(window, cx);
             }
             cx.stop_propagation();

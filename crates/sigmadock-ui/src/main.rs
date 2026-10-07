@@ -138,7 +138,7 @@ impl Read for RemoteReader {
 }
 fn full_capacity_message(max_workers: usize) -> String {
     format!(
-        "All {max_workers} berths are in use. Wait for a session to finish or stop a worker before creating this task. Automatic queuing is not available yet."
+        "All {max_workers} berths in this project are in use. Wait for one of its sessions to finish or stop a worker before creating this task. Automatic queuing is not available yet."
     )
 }
 
@@ -476,7 +476,12 @@ impl Workspace {
     fn creation_blocked_reason(&self) -> Option<String> {
         if !self.daemon_connected {
             Some("Connect to the daemon before creating a task.".into())
-        } else if self.capacity.live.len() >= self.capacity.max_workers {
+        } else if self
+            .projects
+            .iter()
+            .find(|project| project.path.to_string_lossy() == self.fields[0].trim())
+            .is_some_and(|project| self.project_full(&project.id))
+        {
             Some(full_capacity_message(self.capacity.max_workers))
         } else {
             None
@@ -507,20 +512,24 @@ impl Workspace {
         let last_capacity = self.capacity.clone();
         cx.spawn(async move |this, cx| {
             let result = cx.background_executor().spawn(async move {
-                // Recheck global capacity: the form snapshot may be up to two seconds old.
+                let project = client.call("add_project", json!({"path":path}))?;
+                // Recheck the project's berths: the form snapshot may be up to two seconds old.
                 let capacity: Capacity = match client.call("capacity", json!({})) {
                     Ok(value) => serde_json::from_value(value)?,
                     // Preserve the snapshot's fallback for older API-v1 daemons.
                     Err(error) if error.to_string() == "unknown method capacity" => last_capacity,
                     Err(error) => return Err(error),
                 };
-                if capacity.live.len() >= capacity.max_workers {
+                let in_use = project["id"]
+                    .as_str()
+                    .and_then(|id| capacity.per_project.get(id))
+                    .map_or(0, |project| project.in_use);
+                if in_use >= capacity.max_workers {
                     anyhow::bail!("{}", full_capacity_message(capacity.max_workers));
                 }
-                let project = client.call("add_project", json!({"path":path}))?;
                 let worker = client.call("spawn_worker", json!({"project_id":project["id"],"title":title,"agent":agent,"base":if base.is_empty() { None } else { Some(base) },"prompt":if prompt.is_empty() { None } else { Some(prompt) }})).map_err(|error| {
                     // Another client can take the final berth after the capacity check.
-                    if error.to_string().contains("maximum concurrent workers reached") {
+                    if error.to_string().contains("no free berth in this project") {
                         anyhow::anyhow!(full_capacity_message(capacity.max_workers))
                     } else {
                         error

@@ -144,7 +144,7 @@ with tempfile.TemporaryDirectory(prefix='sigma-smoke-', dir='/tmp') as temp:
         assert rpc('get_worker_status', {'worker_id': workers[4]['id']})['berth'] == 5
         rpc('spawn_worker', {'project_id': project['id'], 'title': 'over lowered limit', 'agent': 'shell'}, error=True)
         rpc('set_max_workers', {'max_workers': 5})
-        # A second project lets us verify a global FIFO rather than one queue per repo.
+        # A second project has its own berths, so a full first project does not hold it back.
         other_repo = temp / 'other-repo'
         run('git', 'clone', str(repo), str(other_repo))
         other_project = rpc('add_project', {'path': str(other_repo)})
@@ -158,15 +158,16 @@ with tempfile.TemporaryDirectory(prefix='sigma-smoke-', dir='/tmp') as temp:
         for task_id in paged_ids:
             rpc('cancel_queued', {'id': task_id})
         first = rpc('spawn_worker', {'project_id': project['id'], 'title': 'queued first', 'agent': 'shell', 'queue': True})
-        second = json.loads(run(str(BIN / 'sdk'), '--socket', sock, 'spawn', other_project['id'], '--title', 'queued second', '--agent', 'shell', '--queue'))
-        assert first['queued'] and first['position'] == 1 and second['position'] == 2
-        assert [task['id'] for task in rpc('list_queue')] == [first['id'], second['id']]
+        second = json.loads(run(str(BIN / 'sdk'), '--socket', sock, 'spawn', other_project['id'], '--title', 'started second', '--agent', 'shell', '--queue'))
+        assert first['queued'] and first['position'] == 1
+        assert not second.get('queued') and second['berth'] == 1
+        assert [task['id'] for task in rpc('list_queue')] == [first['id']]
         assert not (state / 'worktrees' / first['id']).exists()
-        assert not (state / 'worktrees' / second['id']).exists()
         capacity = rpc('capacity')
-        assert capacity['queued'] == 2 and capacity['per_project'][other_project['id']]['queued'] == 1
+        assert capacity['queued'] == 1 and capacity['in_use'] == 6
+        assert capacity['per_project'][other_project['id']] == {'in_use': 1, 'queued': 0}
         rpc('remove_project', {'project_id': other_project['id']}, error=True)
-        rpc('cancel_queued', {'id': second['id'], 'project_id': project['id']}, error=True)
+        rpc('cancel_queued', {'id': first['id'], 'project_id': other_project['id']}, error=True)
         # Queued tasks resolve main when they start, rather than freezing the old commit.
         (publisher / 'README').write_text('advanced while waiting\n')
         run('git', '-C', str(publisher), 'commit', '-am', 'advance main')
@@ -178,17 +179,16 @@ with tempfile.TemporaryDirectory(prefix='sigma-smoke-', dir='/tmp') as temp:
         first_worker = rpc('get_worker_status', {'worker_id': first['id']})['worker']
         assert first_worker['berth'] == 5
         assert run('git', '-C', first_worker['worktree'], 'rev-parse', 'HEAD').strip() == fresh_head
-        assert [task['id'] for task in rpc('list_queue')] == [second['id']]
+        assert not rpc('list_queue')
         assert rpc('get_worker_status', {'worker_id': workers[2]['id']})['berth'] == 3
         rpc('stop_worker', {'worker_id': first_worker['id']})
-        wait_for(lambda: any(worker['id'] == second['id'] for worker in rpc('list_workers')))
+        wait_for(lambda: exited(first_worker))
         second_worker = rpc('get_worker_status', {'worker_id': second['id']})['worker']
-        assert second_worker['berth'] == 5 and not rpc('list_queue')
         # A free remembered slot is preferred on resume; occupied slots fall back.
         rpc('stop_worker', {'worker_id': second_worker['id']})
         wait_for(lambda: exited(second_worker))
         rpc('resume_worker', {'worker_id': second_worker['id']})
-        assert rpc('get_worker_status', {'worker_id': second_worker['id']})['berth'] == 5
+        assert rpc('get_worker_status', {'worker_id': second_worker['id']})['berth'] == 1
         rpc('stop_worker', {'worker_id': second_worker['id']})
         wait_for(lambda: exited(second_worker))
         for queued_worker in [first_worker, second_worker]:
@@ -329,7 +329,7 @@ with tempfile.TemporaryDirectory(prefix='sigma-smoke-', dir='/tmp') as temp:
         assert next(p for p in rpc('list_projects') if p['id'] == project['id'])['base_branch'] == 'release'
         assert 'cached remote base' in rpc('get_worker_status', {'worker_id': offline['id']})['worker']['base_warning']
         assert run('git', '-C', str(repo), 'rev-parse', 'HEAD').strip() == checkout_head
-        print('PASS: stable berths, lowered capacity, global FIFO, fresh remote bases, explicit overrides, offline warnings, cancellation, queue restart, PTY I/O, recovery, project safety, CLI and MCP')
+        print('PASS: stable berths, lowered capacity, per-project berths and FIFO, fresh remote bases, explicit overrides, offline warnings, cancellation, queue restart, PTY I/O, recovery, project safety, CLI and MCP')
     finally:
         if daemon is not None and daemon.poll() is None:
             for worker in workers:

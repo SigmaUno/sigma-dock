@@ -397,7 +397,12 @@ impl Workspace {
                 .child(projects)
                 .child(agents);
         }
-        let full = self.capacity.live.len() >= self.capacity.max_workers;
+        let full = self
+            .inbox
+            .project
+            .as_deref()
+            .or_else(|| self.projects.first().map(|project| project.id.as_str()))
+            .is_some_and(|id| self.project_full(id));
         setup = setup.child(
             div()
                 .id("start-default-agent")
@@ -422,7 +427,7 @@ impl Workspace {
                 div()
                     .text_xs()
                     .text_color(rgb(theme.warning))
-                    .child("All berths are in use; stop an agent to free one."),
+                    .child("This project's berths are all in use; stop an agent to free one."),
             );
         }
         if let Some(error) = &self.inbox.error {
