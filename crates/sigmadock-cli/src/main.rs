@@ -22,6 +22,9 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Commands {
+    /// Internal, read-only observation of Claude hook events.
+    #[command(hide = true)]
+    AttentionReport,
     Capacity,
     MaxWorkers {
         value: usize,
@@ -199,8 +202,14 @@ fn main() -> Result<()> {
     let client = Client {
         socket: args.socket,
     };
+    if matches!(&args.command, Commands::AttentionReport) {
+        // Hooks never return a permission decision or fail/block the agent.
+        let _ = attention_report(&client);
+        return Ok(());
+    }
     client.check_version()?;
     let (method, params) = match args.command {
+        Commands::AttentionReport => unreachable!(),
         Commands::Capacity => ("capacity", json!({})),
         Commands::MaxWorkers { value } => ("set_max_workers", json!({"max_workers":value})),
         Commands::RemoveProject { project_id } => {
@@ -488,4 +497,39 @@ fn attach(client: Client, worker_id: String) -> Result<()> {
     })();
     running.store(false, Ordering::Relaxed);
     result
+}
+
+fn attention_report(client: &Client) -> Result<()> {
+    let mut bytes = Vec::new();
+    std::io::stdin().take(65537).read_to_end(&mut bytes)?;
+    if bytes.len() > 65536 {
+        return Ok(());
+    }
+    let hook: Value = serde_json::from_slice(&bytes)?;
+    // Subagent activity must not clear or set its parent's interactive prompt.
+    if hook.get("agent_id").is_some_and(|id| !id.is_null()) {
+        return Ok(());
+    }
+    let event = hook["hook_event_name"].as_str().unwrap_or("");
+    let tool = hook["tool_name"].as_str().unwrap_or("");
+    let waiting = match event {
+        "PermissionRequest" => true,
+        "PreToolUse" if matches!(tool, "AskUserQuestion" | "ExitPlanMode") => true,
+        "PostToolUse" | "PostToolUseFailure" | "UserPromptSubmit" => false,
+        _ => return Ok(()),
+    };
+    let key = hook["tool_use_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(|id| format!("id:{id}"))
+        .unwrap_or_else(|| format!("tool:{tool}"));
+    client.call(
+        "session_attention",
+        json!({
+            "worker_id": std::env::var("SIGMA_DOCK_WORKER_ID")?,
+            "token": std::env::var("SIGMA_DOCK_SESSION_TOKEN")?,
+            "key": key, "tool": tool, "waiting": waiting, "clear_all": event == "UserPromptSubmit"
+        }),
+    )?;
+    Ok(())
 }

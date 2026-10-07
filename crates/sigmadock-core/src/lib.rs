@@ -112,6 +112,10 @@ impl Status {
 }
 /// Merged work stays visible; any blocker takes precedence over an approval.
 pub fn status(f: &Facts) -> Status {
+    // A live user question still needs a response after its PR has merged.
+    if f.session == SessionState::NeedsInput {
+        return Status::NeedsYou;
+    }
     if f.pr == PullRequestState::Merged {
         return Status::ReadyToMerge;
     }
@@ -699,6 +703,15 @@ mod tests {
             Some(1_791_384_987)
         );
         assert_eq!(parse_rfc3339("yesterday"), None);
+    }
+    #[test]
+    fn an_input_request_takes_precedence_over_a_merged_pr() {
+        let facts = Facts {
+            session: SessionState::NeedsInput,
+            pr: PullRequestState::Merged,
+            ..Facts::default()
+        };
+        assert_eq!(status(&facts), Status::NeedsYou);
     }
     #[test]
     fn status_precedence() {

@@ -27,7 +27,7 @@ with tempfile.TemporaryDirectory(prefix='sigma-feedback-', dir='/tmp') as direct
     fake_bin = temp / 'bin'; fake_bin.mkdir()
     harness = fake_bin / 'claude'
     harness.write_text('#!' + sys.executable + '\n' + r'''
-import json, pathlib, subprocess, sys
+import json, os, pathlib, subprocess, sys
 pathlib.Path('launch.json').write_text(json.dumps(sys.argv[1:]))
 if '--mcp-config' in sys.argv:
     config=json.loads(pathlib.Path(sys.argv[sys.argv.index('--mcp-config')+1]).read_text())['mcpServers']['sigma']
@@ -36,6 +36,9 @@ if '--mcp-config' in sys.argv:
     pathlib.Path('mcp-result.json').write_text(result.stdout)
 if '--settings' in sys.argv:
     settings=json.loads(sys.argv[sys.argv.index('--settings')+1])
+    pathlib.Path('attention-launch.json').write_text(json.dumps({'token':os.environ.get('SIGMA_DOCK_SESSION_TOKEN'), 'hooks':settings.get('hooks')}))
+    if 'statusLine' not in settings:
+        settings['statusLine']={'command':'true'}
     raw={'rate_limits':{'five_hour':{'used_percentage':37,'resets_at':1234567890}},'context_window':{'total_input_tokens':111},'email':'DO_NOT_FORWARD','workspace':{'current_dir':'DO_NOT_FORWARD'}}
     result=subprocess.run(settings['statusLine']['command'],shell=True,input=json.dumps(raw),text=True,capture_output=True,check=True)
     pathlib.Path('usage-line.txt').write_text(result.stdout)
@@ -129,6 +132,36 @@ with open('received.txt','w') as out:
         other = rpc('spawn_worker', {'project_id': other_project['id'], 'title': 'other', 'agent': 'claude'}); workers.append(other)
         worker = rpc('spawn_worker', {'project_id': p['id'], 'title': 'repair', 'agent': 'claude'}); workers.append(worker)
         branches.append(worker['branch'])
+        launch = Path(worker['worktree'])/'attention-launch.json'
+        wait_for(launch.exists)
+        attention = json.loads(launch.read_text())
+        assert attention['hooks'] and attention['token']
+        old_attention_token = attention['token']
+        def hook(event, tool='', tool_id='', **extra):
+            hook_env = dict(env, SIGMA_DOCK_WORKER_ID=worker['id'], SIGMA_DOCK_SESSION_TOKEN=attention['token'])
+            result = subprocess.run([str(BIN/'sdk'), 'attention-report'],
+                input=json.dumps(dict(hook_event_name=event, tool_name=tool, tool_use_id=tool_id, **extra)),
+                env=hook_env, text=True, capture_output=True, check=True)
+            assert result.stdout == '' and result.stderr == ''  # no permission decision or terminal injection
+        def session_state():
+            return rpc('get_worker_status', {'worker_id':worker['id']})['worker']['facts']['session']
+        hook('PermissionRequest', 'Bash')
+        assert session_state() == 'needs_input'
+        hook('PreToolUse', 'AskUserQuestion', 'question-1')
+        hook('PostToolUse', 'Bash', 'bash-1')
+        assert session_state() == 'needs_input'  # the question is still waiting
+        hook('PostToolUse', 'AskUserQuestion', 'question-1', agent_id='child-agent')
+        assert session_state() == 'needs_input'  # child hooks cannot clear parent attention
+        hook('PostToolUse', 'AskUserQuestion', 'question-1')
+        assert session_state() == 'running'
+        hook('PreToolUse', 'ExitPlanMode', 'plan-1')
+        assert session_state() == 'needs_input'
+        hook('PostToolUseFailure', 'ExitPlanMode', 'plan-1')
+        assert session_state() == 'running'
+        hook('PermissionRequest', 'Edit')
+        hook('UserPromptSubmit')
+        assert session_state() == 'running'
+        rpc('session_attention', {'worker_id':worker['id'], 'token':'stale', 'key':'id:x', 'tool':'Bash', 'waiting':True, 'clear_all':False}, error=True)
         rpc('configure_forge', {'worker_id': worker['id'], 'forge': {'kind': 'forgejo', 'api_url': 'http://127.0.0.1:'+str(server.server_address[1])+'/api/v1', 'owner': 'owner', 'repo': 'repo', 'token_env': 'SIGMA_TEST_NO_TOKEN', 'actions': True}})
         rpc('refresh_facts', {'worker_id': worker['id']})
         assert rpc('get_worker_status', {'worker_id': worker['id']})['worker']['facts']['checks'] == 'failed'
@@ -211,6 +244,7 @@ with open('received.txt','w') as out:
         assert not rpc('agent_usage', {'worker_id': worker['id']})['windows']
         rpc('configure_usage', {'worker_id': worker['id'], 'enabled': True})
         rpc('resume_worker', {'worker_id': worker['id']})
+        rpc('session_attention', {'worker_id':worker['id'], 'token':old_attention_token, 'key':'id:x', 'tool':'Bash', 'waiting':True, 'clear_all':False}, error=True)
         wait_for(lambda: bool(rpc('agent_usage', {'worker_id': worker['id']})['windows']))
         usage = rpc('agent_usage', {'worker_id': worker['id']})
         assert usage['windows'][0]['used_percent'] == 37

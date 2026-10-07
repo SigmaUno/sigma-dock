@@ -47,3 +47,7 @@ Issue #19 adds an API-2 `subscribe` stream without removing polling RPCs. Native
 ## Unreleased: app and installer notarization
 
 Production macOS packaging notarizes and staples the app before building the DMG, then separately notarizes and staples the final image. Verification requires tickets on both the image and the app copied from it, exact Developer ID authority and hardened runtime. Separate Apple diagnostics are retained for each submission. Apple credentials and clean-Mac online/offline qualification remain required; see [the issue #7 procedure](MACOS.md#production-qualification-for-issue-7).
+
+## Unreleased: red input attention
+
+User input/approval requests use red status decorations in light and dark themes. Claude workers and orchestrators report questions and permission dialogs through observation-only session hooks, including completion/cancellation cleanup and stale-session protection. The settings take effect on launch/resume; other harnesses continue using PTY BEL/OSC signals.

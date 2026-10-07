@@ -266,6 +266,21 @@ impl Daemon {
                 .join("sdk");
             sigmadock_agents::claude_usage_settings(&mut command, &sdk)?;
         }
+        if worker.agent == "claude" {
+            let sdk = std::env::current_exe()?
+                .parent()
+                .context("daemon path has no parent")?
+                .join("sdk");
+            if sdk.is_file() {
+                sigmadock_agents::claude_attention_settings(&mut command, &sdk)?;
+            } else {
+                eprintln!("Claude attention hooks unavailable: install sdk beside sigmadockd");
+            }
+            command.env.push((
+                "SIGMA_DOCK_SESSION_TOKEN".into(),
+                Uuid::new_v4().to_string(),
+            ));
+        }
         command.env.extend([
             ("PORT".into(), worker.port.to_string()),
             ("SIGMA_DOCK_WORKER_ID".into(), worker.id.clone()),
@@ -287,6 +302,21 @@ impl Daemon {
     fn dispatch(&mut self, method: &str, params: Value) -> Result<Value> {
         self.sync()?;
         match method {
+            "session_attention" => {
+                self.session(&params)?.attention(
+                    string(&params, "token")?,
+                    string(&params, "key")?,
+                    params["tool"].as_str().context("tool must be a string")?,
+                    params["waiting"]
+                        .as_bool()
+                        .context("waiting must be boolean")?,
+                    params["clear_all"]
+                        .as_bool()
+                        .context("clear_all must be boolean")?,
+                )?;
+                self.sync()?;
+                Ok(json!(true))
+            }
             "ping" => {
                 Ok(json!({"version": API_VERSION, "name":"SigmaDock", "pid":std::process::id()}))
             }

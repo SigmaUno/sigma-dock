@@ -3,7 +3,7 @@ use anyhow::{Result, bail};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use sigmadock_core::{Output, OutputSignal, SessionContext, SessionState, output_text, unix_time};
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     io::{Read, Write},
     path::Path,
     sync::{Arc, Mutex},
@@ -20,12 +20,14 @@ struct State {
     last_activity: Instant,
     activity_at: u64,
     needs_input: bool,
+    hook_waiting: HashSet<String>,
     exited: bool,
     eof: bool,
     exit_code: Option<u32>,
 }
 pub struct Session {
     generation: u64,
+    attention_token: Option<String>,
     writer: Mutex<Box<dyn Write + Send>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
@@ -67,6 +69,7 @@ impl Session {
             last_activity: Instant::now(),
             activity_at: unix_time(),
             needs_input: false,
+            hook_waiting: HashSet::new(),
             exited: false,
             eof: false,
             exit_code: None,
@@ -116,6 +119,10 @@ impl Session {
         static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Ok(Self {
             generation: NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            attention_token: env
+                .iter()
+                .find(|(name, _)| name == "SIGMA_DOCK_SESSION_TOKEN")
+                .map(|(_, value)| value.clone()),
             writer: Mutex::new(writer),
             master: Mutex::new(pair.master),
             child,
@@ -135,6 +142,42 @@ impl Session {
         self.writer.lock().unwrap().write_all(bytes)?;
         let mut state = self.state.lock().unwrap();
         state.needs_input = false;
+        state.last_activity = Instant::now();
+        state.activity_at = unix_time();
+        Ok(())
+    }
+    /// Session-local hook reports cannot affect a resumed session with a new token.
+    pub fn attention(
+        &self,
+        token: &str,
+        key: &str,
+        tool: &str,
+        waiting: bool,
+        clear_all: bool,
+    ) -> Result<()> {
+        if self.attention_token.as_deref() != Some(token) || token.is_empty() {
+            bail!("attention report belongs to a different session");
+        }
+        if key.len() > 256 || tool.len() > 256 || (key.is_empty() && !clear_all) {
+            bail!("invalid attention episode");
+        }
+        let mut state = self.state.lock().unwrap();
+        if state.exited {
+            bail!("session has exited");
+        }
+        if clear_all {
+            state.hook_waiting.clear();
+            state.needs_input = false;
+        } else if waiting {
+            if state.hook_waiting.len() >= 64 && !state.hook_waiting.contains(key) {
+                bail!("too many pending attention episodes");
+            }
+            state.hook_waiting.insert(key.into());
+        } else {
+            state.hook_waiting.remove(key);
+            // PermissionRequest payloads can omit tool_use_id; clear their named episode too.
+            state.hook_waiting.remove(&format!("tool:{tool}"));
+        }
         state.last_activity = Instant::now();
         state.activity_at = unix_time();
         Ok(())
@@ -165,7 +208,7 @@ impl Session {
         let state = self.state.lock().unwrap();
         let status = if state.exited {
             SessionState::Exited
-        } else if state.needs_input {
+        } else if state.needs_input || !state.hook_waiting.is_empty() {
             SessionState::NeedsInput
         } else if state.last_activity.elapsed() > self.idle_timeout {
             SessionState::Idle
@@ -181,7 +224,7 @@ impl Session {
             state.activity_at,
             if state.exited {
                 SessionState::Exited
-            } else if state.needs_input {
+            } else if state.needs_input || !state.hook_waiting.is_empty() {
                 SessionState::NeedsInput
             } else if state.last_activity.elapsed() > self.idle_timeout {
                 SessionState::Idle
@@ -212,7 +255,7 @@ impl Session {
             last_activity: state.activity_at,
             state: if state.exited {
                 SessionState::Exited
-            } else if state.needs_input {
+            } else if state.needs_input || !state.hook_waiting.is_empty() {
                 SessionState::NeedsInput
             } else if state.last_activity.elapsed() > self.idle_timeout {
                 SessionState::Idle
@@ -301,6 +344,50 @@ mod tests {
         assert!(!detector.feed(b"\x1b]0;title\x07"));
         assert!(detector.feed(b"\x07"));
         assert!(detector.feed(b"\x1b]9;hello\x07"));
+    }
+    #[test]
+    fn hook_attention_survives_typing_and_other_episodes_until_resolved() {
+        let session = Session::spawn(
+            "/bin/sh",
+            &["-c".into(), "read a; read b".into()],
+            &[("SIGMA_DOCK_SESSION_TOKEN".into(), "current".into())],
+            Path::new("/tmp"),
+        )
+        .unwrap();
+        assert!(
+            session
+                .attention("old", "id:q", "AskUserQuestion", true, false)
+                .is_err()
+        );
+        session
+            .attention("current", "id:q", "AskUserQuestion", true, false)
+            .unwrap();
+        session
+            .attention("current", "tool:Bash", "Bash", true, false)
+            .unwrap();
+        session.write(b"x").unwrap();
+        assert_eq!(session.facts().0, SessionState::NeedsInput);
+        session
+            .attention("current", "id:q", "AskUserQuestion", false, false)
+            .unwrap();
+        assert_eq!(session.facts().0, SessionState::NeedsInput);
+        session
+            .attention("current", "id:permission", "Bash", false, false)
+            .unwrap();
+        assert_eq!(session.facts().0, SessionState::Running);
+        session
+            .attention("current", "id:q2", "AskUserQuestion", true, false)
+            .unwrap();
+        session.attention("current", "", "", false, true).unwrap();
+        assert_eq!(session.facts().0, SessionState::Running);
+        session.state.lock().unwrap().exited = true;
+        assert!(
+            session
+                .attention("current", "id:q3", "AskUserQuestion", true, false)
+                .is_err()
+        );
+        session.state.lock().unwrap().exited = false;
+        session.stop().unwrap();
     }
     #[test]
     fn real_pty_roundtrip() {

@@ -424,7 +424,7 @@ impl Workspace {
     pub(crate) fn tone_color(&self, tone: Tone) -> u32 {
         match tone {
             Tone::Working => self.theme.link,
-            Tone::Input => self.theme.attention,
+            Tone::Input => self.theme.error,
             Tone::Blocked => self.theme.error,
             Tone::Review => self.theme.review,
             Tone::Ready => self.theme.success,
