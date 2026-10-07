@@ -1,3 +1,4 @@
+use crate::ellipsis::Ellipsis;
 use crate::{
     Workspace,
     preferences::{Appearance, Cursor, parse_color},
@@ -150,198 +151,342 @@ impl Workspace {
             )
             .into_any_element()
     }
+    /// A small bordered button; `active` marks the selected option of a group.
+    fn option_button(
+        &self,
+        id: SharedString,
+        label: String,
+        active: bool,
+    ) -> gpui::Stateful<gpui::Div> {
+        let theme = self.theme;
+        div()
+            .id(id)
+            .flex_none()
+            .px_2p5()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .cursor_pointer()
+            .text_sm()
+            .map(|button| {
+                if active {
+                    button
+                        .border_color(rgb(theme.accent))
+                        .bg(rgb(theme.selection))
+                        .text_color(rgb(theme.text))
+                } else {
+                    button
+                        .border_color(rgb(theme.border))
+                        .bg(rgb(theme.surface))
+                        .hover(|style| style.bg(rgb(theme.panel)))
+                }
+            })
+            .child(label)
+    }
+    fn setting_row(&self, label: &'static str, control: impl IntoElement) -> gpui::Div {
+        div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .min_h(px(36.))
+            .child(
+                div()
+                    .w(px(130.))
+                    .flex_none()
+                    .text_sm()
+                    .text_color(rgb(self.theme.muted))
+                    .child(label),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(control),
+            )
+    }
     /// Terminal appearance controls for the Settings page.
     pub(crate) fn appearance_section(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let effective = self.theme.terminal(&self.preferences.appearance);
+        let theme = self.theme;
+        let effective = theme.terminal(&self.preferences.appearance);
         let appearance = &effective;
+        let editing_font = self.settings_editor.as_ref().filter(|(i, _)| *i == 0);
+        let font_value = appearance.font.clone();
+        let mut font = div().flex().items_center().gap_2().child(
+            div()
+                .id("appearance-0")
+                .w(px(200.))
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(if editing_font.is_some() {
+                    theme.accent
+                } else {
+                    theme.border
+                }))
+                .bg(rgb(theme.surface))
+                .cursor_text()
+                .text_sm()
+                .ellipsis()
+                .child(editing_font.map_or(font_value.clone(), |(_, text)| text.clone()))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.settings_editor = Some((0, font_value.clone()));
+                    this.settings_focus.focus(window);
+                    cx.notify();
+                })),
+        );
+        for name in ["Menlo", "JetBrains Mono", "monospace"] {
+            font = font.child(
+                self.option_button(
+                    SharedString::from(format!("font-{name}")),
+                    name.into(),
+                    appearance.font == name,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings_editor = None;
+                    this.preferences.appearance.font = name.into();
+                    this.apply_appearance(cx);
+                })),
+            );
+        }
         let mut panel = div()
             .flex()
             .flex_col()
-            .gap_2()
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(self.theme.muted))
-                    .child("Changes apply live. Click a value; Cmd/Ctrl+A replaces it."),
-            )
-            .child(self.appearance_field(0, "Font family".into(), appearance.font.clone(), cx));
-        let mut fonts = div().flex().gap_2();
-        for font in ["monospace", "Menlo", "JetBrains Mono"] {
-            fonts = fonts.child(
-                div()
-                    .id(SharedString::from(format!("font-{font}")))
-                    .p_1()
-                    .bg(rgb(self.theme.button))
-                    .hover(|style| style.bg(rgb(self.theme.selection)))
-                    .cursor_pointer()
-                    .text_sm()
-                    .child(font)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.settings_editor = None;
-                        this.preferences.appearance.font = font.into();
-                        this.apply_appearance(cx);
-                    })),
-            );
-        }
-        panel = panel.child(fonts);
+            .gap_1()
+            .child(self.setting_row("Font", font));
         for (index, label, value) in [
             (0, "Font size", format!("{} px", appearance.size)),
             (1, "Line spacing", format!("{:.1}×", appearance.line_height)),
             (2, "Padding", format!("{} px", appearance.padding)),
         ] {
-            let mut row = div()
-                .flex()
-                .gap_2()
-                .items_center()
-                .child(div().w(px(130.)).child(label))
-                .child(div().flex_1().child(value));
-            for (direction, label) in [(-1., "−"), (1., "+")] {
-                row = row.child(
-                    div()
-                        .id(SharedString::from(format!("step-{index}-{direction}")))
-                        .p_2()
-                        .bg(rgb(self.theme.button))
-                        .hover(|style| style.bg(rgb(self.theme.selection)))
-                        .cursor_pointer()
-                        .child(label)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let a = &mut this.preferences.appearance;
-                            match index {
-                                0 => a.size = (a.size + direction).clamp(8., 40.),
-                                1 => {
-                                    a.line_height = ((a.line_height * 10.).round() + direction)
-                                        .clamp(10., 20.)
-                                        / 10.
-                                }
-                                _ => a.padding = (a.padding + direction * 2.).clamp(0., 32.),
-                            }
-                            this.apply_appearance(cx);
-                        })),
-                );
-            }
-            panel = panel.child(row);
-        }
-        let mut themes = div().flex().gap_2().child(div().w(px(130.)).child("Theme"));
-        for (light, label) in [(false, "Dark"), (true, "Light")] {
-            themes = themes.child(
-                div()
-                    .id(SharedString::from(format!("theme-{label}")))
-                    .p_2()
-                    .bg(rgb(self.theme.button))
-                    .hover(|style| style.bg(rgb(self.theme.selection)))
-                    .cursor_pointer()
-                    .child(label)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let preset = if light {
-                            Appearance::light()
-                        } else {
-                            Appearance::default()
-                        };
-                        let a = &mut this.preferences.appearance;
-                        a.follow_system = false;
-                        a.background = preset.background;
-                        a.foreground = preset.foreground;
-                        a.ansi = preset.ansi;
-                        this.settings_editor = None;
-                        this.apply_appearance(cx);
-                    })),
-            );
-        }
-        panel = panel
-            .child(
-                div()
-                    .id("terminal-system-theme")
-                    .p_2()
-                    .bg(rgb(self.theme.button))
-                    .cursor_pointer()
-                    .child(if appearance.follow_system {
-                        "Terminal colors: follow system"
-                    } else {
-                        "Terminal colors: custom"
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let effective = this.theme.terminal(&this.preferences.appearance);
-                        let a = &mut this.preferences.appearance;
-                        if a.follow_system {
-                            a.background = effective.background;
-                            a.foreground = effective.foreground;
-                            a.ansi = effective.ansi;
-                        }
-                        a.follow_system = !a.follow_system;
-                        this.settings_editor = None;
-                        this.apply_appearance(cx);
-                    })),
-            )
-            .child(themes)
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .id("cursor-shape")
-                            .flex_1()
-                            .p_2()
-                            .bg(rgb(self.theme.button))
-                            .hover(|style| style.bg(rgb(self.theme.selection)))
-                            .cursor_pointer()
-                            .child(format!("Cursor: {:?} ↻", appearance.cursor))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.preferences.appearance.cursor =
-                                    match this.preferences.appearance.cursor {
-                                        Cursor::Block => Cursor::Underline,
-                                        Cursor::Underline => Cursor::Beam,
-                                        Cursor::Beam => Cursor::Block,
-                                    };
-                                this.apply_appearance(cx);
-                            })),
+            let mut stepper = div().flex().items_center().gap_1();
+            for (direction, symbol) in [(-1., "−"), (1., "+")] {
+                let button = self
+                    .option_button(
+                        SharedString::from(format!("step-{index}-{direction}")),
+                        symbol.into(),
+                        false,
                     )
-                    .child(
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let a = &mut this.preferences.appearance;
+                        match index {
+                            0 => a.size = (a.size + direction).clamp(8., 40.),
+                            1 => {
+                                a.line_height = ((a.line_height * 10.).round() + direction)
+                                    .clamp(10., 20.)
+                                    / 10.
+                            }
+                            _ => a.padding = (a.padding + direction * 2.).clamp(0., 32.),
+                        }
+                        this.apply_appearance(cx);
+                    }));
+                if direction < 0. {
+                    stepper = stepper.child(button).child(
                         div()
-                            .id("cursor-blink")
-                            .p_2()
-                            .bg(rgb(self.theme.button))
-                            .hover(|style| style.bg(rgb(self.theme.selection)))
-                            .cursor_pointer()
-                            .child(if appearance.blink {
-                                "Blink: on"
-                            } else {
-                                "Blink: off"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.preferences.appearance.blink =
-                                    !this.preferences.appearance.blink;
-                                this.apply_appearance(cx);
-                            })),
-                    ),
-            );
-        for index in 0..18 {
-            let label = match index {
-                0 => "Background".into(),
-                1 => "Foreground".into(),
-                _ => format!("ANSI {}", index - 2),
+                            .w(px(56.))
+                            .text_center()
+                            .text_sm()
+                            .child(value.clone()),
+                    );
+                } else {
+                    stepper = stepper.child(button);
+                }
+            }
+            panel = panel.child(self.setting_row(label, stepper));
+        }
+        // System follows the app theme; Dark and Light pin a preset palette.
+        let mut colors = div().flex().gap_1();
+        for (choice, label) in [
+            (None, "System"),
+            (Some(false), "Dark"),
+            (Some(true), "Light"),
+        ] {
+            let active = match choice {
+                None => appearance.follow_system,
+                Some(light) => {
+                    let preset = if light {
+                        Appearance::light()
+                    } else {
+                        Appearance::default()
+                    };
+                    !appearance.follow_system && appearance.background == preset.background
+                }
             };
-            panel = panel.child(self.appearance_field(
-                index + 1,
-                label,
-                format!("#{:06x}", appearance.color(index)),
-                cx,
-            ));
+            colors = colors.child(
+                self.option_button(
+                    SharedString::from(format!("theme-{label}")),
+                    label.into(),
+                    active,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let a = &mut this.preferences.appearance;
+                    match choice {
+                        None => a.follow_system = true,
+                        Some(light) => {
+                            let preset = if light {
+                                Appearance::light()
+                            } else {
+                                Appearance::default()
+                            };
+                            a.follow_system = false;
+                            a.background = preset.background;
+                            a.foreground = preset.foreground;
+                            a.ansi = preset.ansi;
+                        }
+                    }
+                    this.settings_editor = None;
+                    this.apply_appearance(cx);
+                })),
+            );
+        }
+        panel = panel.child(self.setting_row("Colors", colors));
+        let mut cursor = div().flex().gap_1();
+        for (shape, label) in [
+            (Cursor::Block, "Block"),
+            (Cursor::Underline, "Underline"),
+            (Cursor::Beam, "Beam"),
+        ] {
+            cursor = cursor.child(
+                self.option_button(
+                    SharedString::from(format!("cursor-{label}")),
+                    label.into(),
+                    appearance.cursor == shape,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.preferences.appearance.cursor = shape;
+                    this.apply_appearance(cx);
+                })),
+            );
+        }
+        cursor = cursor.child(div().w(px(8.))).child(
+            self.option_button("cursor-blink".into(), "Blink".into(), appearance.blink)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.preferences.appearance.blink = !this.preferences.appearance.blink;
+                    this.apply_appearance(cx);
+                })),
+        );
+        panel = panel.child(self.setting_row("Cursor", cursor));
+        // Background, foreground, then the 16 ANSI colors in two rows of eight.
+        let swatch = |index: usize, label: String, cx: &mut Context<Self>| {
+            let color = appearance.color(index);
+            let value = format!("#{color:06x}");
+            let editing = self
+                .settings_editor
+                .as_ref()
+                .is_some_and(|(i, _)| *i == index + 1);
+            div()
+                .id(SharedString::from(format!("appearance-{}", index + 1)))
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_0p5()
+                .w(px(52.))
+                .cursor_pointer()
+                .child(
+                    div()
+                        .size(px(28.))
+                        .rounded_md()
+                        .border_2()
+                        .border_color(rgb(if editing { theme.accent } else { theme.border }))
+                        .bg(rgb(color)),
+                )
+                .child(div().text_xs().text_color(rgb(theme.muted)).child(label))
+                .tooltip({
+                    let value = value.clone();
+                    move |_, cx| crate::keyboard_ui::tooltip(value.clone(), cx)
+                })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.settings_editor = Some((index + 1, value.clone()));
+                    this.settings_focus.focus(window);
+                    cx.notify();
+                }))
+        };
+        let base = div()
+            .flex()
+            .gap_1()
+            .child(swatch(0, "Bg".into(), cx))
+            .child(swatch(1, "Fg".into(), cx));
+        let mut normal = div().flex().gap_1();
+        let mut bright = div().flex().gap_1();
+        for ansi in 0..8 {
+            normal = normal.child(swatch(ansi + 2, ansi.to_string(), cx));
+            bright = bright.child(swatch(ansi + 10, (ansi + 8).to_string(), cx));
+        }
+        panel = panel.child(
+            div()
+                .flex()
+                .items_start()
+                .gap_3()
+                .pt_2()
+                .child(
+                    div()
+                        .w(px(130.))
+                        .flex_none()
+                        .pt_1()
+                        .text_sm()
+                        .text_color(rgb(theme.muted))
+                        .child("Palette"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(base)
+                        .child(normal)
+                        .child(bright),
+                ),
+        );
+        if let Some((index, text)) = self
+            .settings_editor
+            .as_ref()
+            .filter(|(i, _)| (1..=18).contains(i))
+        {
+            let name = match index - 1 {
+                0 => "Background".to_owned(),
+                1 => "Foreground".to_owned(),
+                n => format!("ANSI {}", n - 2),
+            };
+            panel = panel.child(
+                self.setting_row(
+                    "Editing",
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().text_sm().child(name))
+                        .child(
+                            div()
+                                .w(px(120.))
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(theme.accent))
+                                .bg(rgb(theme.surface))
+                                .font_family(sigmadock_terminal::DEFAULT_MONOSPACE_FONT)
+                                .text_sm()
+                                .child(text.clone()),
+                        ),
+                ),
+            );
         }
         panel
             .child(
-                div()
-                    .id("restore-appearance")
-                    .p_2()
-                    .bg(rgb(self.theme.accent))
-                    .text_color(rgb(self.theme.base))
-                    .cursor_pointer()
-                    .child("Restore appearance defaults")
+                div().flex().pt_3().child(
+                    self.option_button(
+                        "restore-appearance".into(),
+                        "Restore defaults".into(),
+                        false,
+                    )
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.settings_editor = None;
                         this.preferences.appearance = Appearance::default();
                         this.apply_appearance(cx);
                     })),
+                ),
             )
             .into_any_element()
     }

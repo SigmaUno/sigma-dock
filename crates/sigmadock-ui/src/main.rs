@@ -822,14 +822,12 @@ impl Workspace {
             .id("workspace-content")
             .overflow_y_scroll()
             .flex_1()
-            .min_w(px(0.))
-            .h_full()
+            .min_h(px(0.))
             .flex()
             .flex_col()
-            .gap_5()
-            .px_8()
-            .py_6()
-            .child(self.header(cx))
+            .gap_4()
+            .px_6()
+            .py_5()
             .children(self.error_banner());
         if let Some(update) = &self.available_update {
             content = content.child(self.update_notice(update, cx));
@@ -843,9 +841,15 @@ impl Workspace {
         if self.checks.worker.is_some() {
             content = content.child(self.checks_panel(cx));
         }
-        content
-            .child(self.agent_list(cx))
-            .child(self.footer())
+        let content = content.child(self.agent_list(cx)).child(self.footer());
+        div()
+            .flex_1()
+            .min_w(px(0.))
+            .h_full()
+            .flex()
+            .flex_col()
+            .child(self.header(cx))
+            .child(content)
             .into_any_element()
     }
 }

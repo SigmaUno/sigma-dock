@@ -269,7 +269,7 @@ impl Workspace {
                     div()
                         .flex()
                         .min_w(px(0.))
-                        .max_w(px(220.))
+                        .max_w(px(160.))
                         .flex_shrink()
                         .items_center()
                         .gap_1()
