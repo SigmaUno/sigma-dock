@@ -97,6 +97,10 @@ Spawning is disabled by default: the user creates proposed workers with `sdk spa
 
 Project-scoped tools include `read_planning_notes` and `write_planning_notes`; writes require the previous revision and persist locally in SQLite. `sdk notes PROJECT_ID` reads them. Tool scope prevents accidental cross-project calls but does not sandbox the harness, which runs as your user.
 
+## Subscription usage
+
+Open **Usage** on a worker for provider-reported subscription windows, used/remaining percentages and reset times. Codex queries its CLI account API; Claude offers an opt-in session-local status-line collector. Unsupported data is labeled unavailable, and account quotas are never treated as per-worker allowances. See [usage and privacy details](docs/USAGE.md).
+
 ## Zero-telemetry policy
 
 SigmaDock sends no analytics, crash reports, tracking events, or remote logs. Local terminal data is never uploaded by SigmaDock. Logs stay on local stderr; metadata stays in SQLite. There is no analytics SDK, hosted backend, account, or telemetry endpoint. `deny.toml` bans known tracking crates; both CI workflows enforce the ban against the complete dependency graph. A crate-name ban is a guardrail, not proof of all transitive behavior: [the verification procedure](docs/PRIVACY.md) describes runtime checks.

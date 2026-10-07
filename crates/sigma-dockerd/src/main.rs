@@ -46,6 +46,7 @@ struct Daemon {
     store: Store,
     workers: HashMap<String, Worker>,
     sessions: HashMap<String, Arc<Session>>,
+    usage: HashMap<String, sigma_dock_core::AgentUsage>,
     context_floor: HashMap<String, u64>,
     checkpoints: HashMap<String, (std::time::Instant, (u64, u64, SessionState))>,
     ports: PortPool,
@@ -173,6 +174,13 @@ impl Daemon {
         } else {
             Harness(worker.agent.clone()).command(prompt, resume)?
         };
+        if worker.agent == "claude" && worker.usage_reporting {
+            let sdk = std::env::current_exe()?
+                .parent()
+                .context("daemon path has no parent")?
+                .join("sdk");
+            sigma_dock_agents::claude_usage_settings(&mut command, &sdk)?;
+        }
         command.env.extend([
             ("PORT".into(), worker.port.to_string()),
             ("SIGMA_DOCK_WORKER_ID".into(), worker.id.clone()),
@@ -228,6 +236,43 @@ impl Daemon {
                     .collect();
                 workers.sort_by_key(|w| w.created_at);
                 Ok(serde_json::to_value(workers)?)
+            }
+            "configure_usage" => {
+                let mut worker = self.worker(&params)?.clone();
+                if worker.agent != "claude" {
+                    bail!("session-local usage reporting currently supports Claude only");
+                }
+                worker.usage_reporting = params["enabled"]
+                    .as_bool()
+                    .context("enabled must be boolean")?;
+                if !worker.usage_reporting {
+                    self.usage.remove(&worker.id);
+                }
+                self.store.save_worker(&worker)?;
+                self.workers.insert(worker.id.clone(), worker);
+                Ok(
+                    json!({"text":"Claude usage reporting preference saved. It applies on the next launch/resume; the current session was not restarted."}),
+                )
+            }
+            "report_usage" => {
+                let worker = self.worker(&params)?;
+                if worker.agent != "claude" || !worker.usage_reporting || worker.archived {
+                    bail!("Claude usage reporting is not enabled for this worker");
+                }
+                let report: sigma_dock_core::AgentUsage =
+                    serde_json::from_value(params["report"].clone())?;
+                if report.provider != "claude"
+                    || report.windows.len() > 16
+                    || report.windows.iter().any(|window| {
+                        !window.used_percent.is_finite()
+                            || !(0. ..=100.).contains(&window.used_percent)
+                    })
+                    || serde_json::to_vec(&report)?.len() > 8192
+                {
+                    bail!("invalid usage report");
+                }
+                self.usage.insert(worker.id.clone(), report);
+                Ok(json!(true))
             }
             "list_unfinished" => {
                 let mut values = Vec::new();
@@ -323,6 +368,7 @@ impl Daemon {
                     forge: None,
                     role,
                     feedback: Default::default(),
+                    usage_reporting: params["usage_reporting"] == true,
                     orchestrator_spawn: method == "start_orchestrator"
                         && params["allow_spawn"] == true,
                 };
@@ -386,6 +432,7 @@ impl Daemon {
                 }
                 self.context_floor.remove(&worker.id);
                 self.checkpoints.remove(&worker.id);
+                self.usage.remove(&worker.id);
                 self.sessions.insert(worker.id.clone(), session);
                 self.workers.insert(worker.id.clone(), worker.clone());
                 Ok(serde_json::to_value(worker)?)
@@ -435,6 +482,7 @@ impl Daemon {
                 self.store.clear_context(&worker.id)?;
                 self.context_floor.remove(&worker.id);
                 self.checkpoints.remove(&worker.id);
+                self.usage.remove(&worker.id);
                 worker.archived = true;
                 self.store.save_worker(&worker)?;
                 self.ports.release(worker.port);
@@ -530,6 +578,24 @@ fn dimension(params: &Value, key: &str) -> Result<u16> {
     )?)
 }
 fn external_call(state: &Arc<Mutex<Daemon>>, method: &str, params: &Value) -> Result<Value> {
+    if method == "agent_usage" {
+        let (worker, cwd, cached) = {
+            let daemon = state.lock().unwrap();
+            let worker = daemon.worker(params)?.clone();
+            (
+                worker.clone(),
+                daemon.state_dir.clone(),
+                daemon.usage.get(&worker.id).cloned(),
+            )
+        };
+        let report=match worker.agent.as_str(){
+            "codex"=>sigma_dock_agents::usage::codex(&cwd)?,
+            "claude"=>cached.unwrap_or_else(||sigma_dock_agents::usage::unavailable("claude",if worker.usage_reporting {"Waiting for the next launched/resumed Claude session to report usage. Quota fields require a supported subscription and a completed response."} else {"Enable session-local Claude status-line reporting for the next launch. This temporarily supplies a SigmaDock status line without editing global settings."})),
+            "gemini"=>sigma_dock_agents::usage::unavailable("gemini","Native structured quota reading is not implemented for Gemini. Use /stats model at the agent prompt to view its quota information."),
+            _=>sigma_dock_agents::usage::unavailable(&worker.agent,"This harness has no native SigmaDock subscription-usage adapter. No quota estimate is presented."),
+        };
+        return Ok(serde_json::to_value(report)?);
+    }
     let (worker, forge) = {
         let mut state = state.lock().unwrap();
         let worker = state.worker(params)?.clone();
@@ -655,7 +721,12 @@ fn serve(mut stream: UnixStream, state: Arc<Mutex<Daemon>>) -> Result<()> {
     } else if matches!(
         request["method"].as_str(),
         Some(
-            "refresh_facts" | "review_feedback" | "ci_feedback" | "send_ci_feedback" | "ci_preview"
+            "refresh_facts"
+                | "review_feedback"
+                | "ci_feedback"
+                | "send_ci_feedback"
+                | "ci_preview"
+                | "agent_usage"
         )
     ) {
         external_call(
@@ -743,6 +814,7 @@ fn main() -> Result<()> {
         store,
         workers,
         sessions: HashMap::new(),
+        usage: HashMap::new(),
         checkpoints: HashMap::new(),
         context_floor: HashMap::new(),
         ports,

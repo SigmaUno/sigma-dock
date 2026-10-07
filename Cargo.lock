@@ -5397,6 +5397,7 @@ dependencies = [
  "clap",
  "crossterm",
  "serde_json",
+ "sigma-dock-agents",
  "sigma-dock-core",
 ]
 

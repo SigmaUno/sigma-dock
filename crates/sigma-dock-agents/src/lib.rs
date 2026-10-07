@@ -1,4 +1,5 @@
 //! Thin argument adapters. No shell interpolation and no permission bypass flags.
+pub mod usage;
 use anyhow::{Result, bail};
 
 #[derive(Debug, Clone)]
@@ -234,5 +235,60 @@ mod tests {
         );
         assert_eq!(&codex.args[codex.args.len() - 2..], &["--", "plan"]);
         assert!(orchestrator_command("shell", None, false, &launch).is_err());
+    }
+}
+
+/// Session-local opt-in; preserve global/user settings files and quote executable paths for the shell.
+pub fn claude_usage_settings(command: &mut Command, sdk: &std::path::Path) -> Result<()> {
+    let path = sdk
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("usage helper path must be UTF-8"))?;
+    if !sdk.is_file() {
+        bail!("install sdk beside the daemon to enable Claude usage reporting");
+    }
+    let invocation = format!("'{}' usage-report", path.replace("'", "'\\''"));
+    let settings = serde_json::to_string(
+        &serde_json::json!({"statusLine":{"type":"command","command":invocation,"padding":0}}),
+    )?;
+    let at = command
+        .args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(command.args.len());
+    command.args.splice(at..at, ["--settings".into(), settings]);
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod usage_launch_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn status_line_quotes_shell_metacharacters_and_preserves_prompt_and_resume_flags() {
+        let root = std::env::temp_dir().join(format!("sigma-usage-quote-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let sdk = root.join("sdk ' $HOME `uname` $(uname)");
+        std::fs::write(&sdk, "#!/bin/sh\nprintf '%s' \"$1\"\n").unwrap();
+        std::fs::set_permissions(&sdk, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut command = Harness("claude".into())
+            .command(Some("prompt"), true)
+            .unwrap();
+        claude_usage_settings(&mut command, &sdk).unwrap();
+        assert!(command.args.contains(&"--continue".to_string()));
+        assert_eq!(command.args.last().unwrap(), "prompt");
+        let index = command
+            .args
+            .iter()
+            .position(|arg| arg == "--settings")
+            .unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&command.args[index + 1]).unwrap();
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(settings["statusLine"]["command"].as_str().unwrap())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"usage-report");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -7,6 +7,7 @@ mod recovery_ui;
 mod theme;
 mod update_ui;
 mod updates;
+mod usage_ui;
 
 use anyhow::Result;
 use clap::Parser;
@@ -120,6 +121,10 @@ struct Workspace {
     settings_focus: gpui::FocusHandle,
     settings_editor: Option<(usize, String)>,
     settings_error: Option<String>,
+    usage_open: bool,
+    usage_report: Option<sigma_dock_core::AgentUsage>,
+    usage_loading: bool,
+    usage_error: Option<String>,
     ci_open: bool,
     ci_report: Option<sigma_dock_core::CiPreview>,
     ci_loading: bool,
@@ -198,6 +203,10 @@ impl Workspace {
             cx.notify();
         });
         Self {
+            usage_open: false,
+            usage_report: None,
+            usage_loading: false,
+            usage_error: None,
             ci_open: false,
             ci_report: None,
             ci_loading: false,
@@ -237,6 +246,9 @@ impl Workspace {
     }
     fn open_worker(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.details.clear();
+        self.usage_open = false;
+        self.usage_report = None;
+        self.usage_error = None;
         self.ci_open = false;
         self.ci_report = None;
         self.ci_error = None;
@@ -702,6 +714,7 @@ impl Render for Workspace {
                         )),
                 );
                 for (label, method) in [
+                    ("Usage", "agent_usage"),
                     ("Diff", "diff"),
                     ("CI preview", "ci_feedback"),
                     ("Send CI", "send_ci_feedback"),
@@ -722,7 +735,9 @@ impl Render for Workspace {
                             .hover(|style| style.bg(rgb(self.theme.selection)))
                             .child(label)
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                if method == "ci_feedback" {
+                                if method == "agent_usage" {
+                                    this.load_usage(cx);
+                                } else if method == "ci_feedback" {
                                     this.load_ci(cx);
                                 } else {
                                     this.run_action(method, json!({"worker_id":id}), cx)
@@ -744,6 +759,9 @@ impl Render for Workspace {
                     );
                 }
                 content = content.child(actions);
+            }
+            if self.usage_open {
+                content = content.child(self.usage_panel(cx));
             }
             if self.ci_open {
                 content = content.child(self.ci_panel(cx));

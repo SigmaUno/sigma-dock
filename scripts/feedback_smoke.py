@@ -34,6 +34,11 @@ if '--mcp-config' in sys.argv:
     request={'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'list_workers','arguments':{}}}
     result=subprocess.run([config['command']]+config['args'],input=json.dumps(request)+'\n',text=True,capture_output=True,check=True)
     pathlib.Path('mcp-result.json').write_text(result.stdout)
+if '--settings' in sys.argv:
+    settings=json.loads(sys.argv[sys.argv.index('--settings')+1])
+    raw={'rate_limits':{'five_hour':{'used_percentage':37,'resets_at':1234567890}},'context_window':{'total_input_tokens':111},'email':'DO_NOT_FORWARD','workspace':{'current_dir':'DO_NOT_FORWARD'}}
+    result=subprocess.run(settings['statusLine']['command'],shell=True,input=json.dumps(raw),text=True,capture_output=True,check=True)
+    pathlib.Path('usage-line.txt').write_text(result.stdout)
 print('FAKE_AGENT_READY',flush=True)
 with open('received.txt','w') as out:
     while True:
@@ -148,6 +153,25 @@ with open('received.txt','w') as out:
         for w in workers:
             rpc('stop_worker', {'worker_id': w['id']})
         wait_for(lambda: all(rpc('get_worker_status', {'worker_id': w['id']})['worker']['facts']['session'] == 'exited' for w in workers))
+        # Configuration must preserve the worker until an explicit resume; only allowlisted
+        # status-line metrics cross the socket, never workspace/account strings.
+        assert not rpc('agent_usage', {'worker_id': worker['id']})['windows']
+        rpc('configure_usage', {'worker_id': worker['id'], 'enabled': True})
+        rpc('resume_worker', {'worker_id': worker['id']})
+        wait_for(lambda: bool(rpc('agent_usage', {'worker_id': worker['id']})['windows']))
+        usage = rpc('agent_usage', {'worker_id': worker['id']})
+        assert usage['windows'][0]['used_percent'] == 37
+        assert usage['context_input_tokens'] == 111 and usage['plan'] is None
+        assert 'DO_NOT_FORWARD' not in json.dumps(usage)
+        usage_text = (Path(worker['worktree'])/'usage-line.txt').read_text()
+        assert '37.0%' in usage_text and 'DO_NOT_FORWARD' not in usage_text
+        pid = rpc('get_worker_status', {'worker_id': worker['id']})['pid']
+        rpc('agent_usage', {'worker_id': worker['id']})
+        assert rpc('get_worker_status', {'worker_id': worker['id']})['pid'] == pid
+        rpc('configure_usage', {'worker_id': worker['id'], 'enabled': False})
+        rpc('report_usage', {'worker_id': worker['id'], 'report': usage}, error=True)
+        rpc('stop_worker', {'worker_id': worker['id']})
+        wait_for(lambda: rpc('get_worker_status', {'worker_id': worker['id']})['worker']['facts']['session'] == 'exited')
         daemon.terminate(); daemon.wait(timeout=5); daemon = start()
         assert rpc('read_planning_notes', {'project_id': p['id']})['revision'] == 1
         assert rpc('get_worker_status', {'worker_id': worker['id']})['worker']['feedback']['last_ci_head'] == sha

@@ -153,6 +153,8 @@ pub struct Worker {
     pub feedback: FeedbackPolicy,
     #[serde(default)]
     pub orchestrator_spawn: bool,
+    #[serde(default)]
+    pub usage_reporting: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ForgeConfig {
@@ -455,4 +457,24 @@ pub struct CiPreview {
     pub entries: Vec<CiEntry>,
     pub warnings: Vec<String>,
     pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageWindow {
+    pub name: String,
+    pub used_percent: f64,
+    pub duration_minutes: Option<u64>,
+    pub resets_at: Option<u64>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentUsage {
+    pub provider: String,
+    pub source: String,
+    pub recorded_at: u64,
+    pub plan: Option<String>,
+    pub windows: Vec<UsageWindow>,
+    pub lifetime_tokens: Option<u64>,
+    pub context_input_tokens: Option<u64>,
+    pub context_output_tokens: Option<u64>,
+    pub warnings: Vec<String>,
 }

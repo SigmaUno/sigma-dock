@@ -85,6 +85,19 @@ enum Commands {
         worker_id: String,
         message: String,
     },
+    Usage {
+        worker_id: String,
+    },
+    UsageReporting {
+        worker_id: String,
+        #[arg(long)]
+        enable: bool,
+    },
+    /// Receive allowlisted Claude status-line metrics; never stores raw input.
+    UsageReport {
+        #[arg(long, env = "SIGMA_DOCK_WORKER_ID")]
+        worker_id: String,
+    },
     CiPreview {
         worker_id: String,
     },
@@ -148,6 +161,32 @@ fn main() -> Result<()> {
         socket: args.socket,
     };
     let (method, params) = match args.command {
+        Commands::Usage { worker_id } => ("agent_usage", json!({"worker_id":worker_id})),
+        Commands::UsageReporting { worker_id, enable } => (
+            "configure_usage",
+            json!({"worker_id":worker_id,"enabled":enable}),
+        ),
+        Commands::UsageReport { worker_id } => {
+            let mut bytes = Vec::new();
+            std::io::stdin().take(65537).read_to_end(&mut bytes)?;
+            anyhow::ensure!(bytes.len() <= 65536, "Status line payload exceeds 64 KiB");
+            let raw: Value = serde_json::from_slice(&bytes)?;
+            let usage = sigma_dock_agents::usage::claude_status(&raw);
+            client.call(
+                "report_usage",
+                json!({"worker_id":worker_id,"report":usage}),
+            )?;
+            println!(
+                "{}",
+                usage
+                    .windows
+                    .iter()
+                    .map(|window| format!("{}: {:.1}% used", window.name, window.used_percent))
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            );
+            return Ok(());
+        }
         Commands::Ping => ("ping", json!({})),
         Commands::Orchestrator {
             project_id,

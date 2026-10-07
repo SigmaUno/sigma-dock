@@ -168,6 +168,7 @@ mod tests {
             role: Default::default(),
             feedback: Default::default(),
             orchestrator_spawn: false,
+            usage_reporting: false,
         };
         store.save_worker(&worker).unwrap();
         store.mark_disconnected().unwrap();
