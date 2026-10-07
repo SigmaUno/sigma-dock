@@ -74,11 +74,6 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_2()
-            .mt_3()
-            .pt_3()
-            .border_t_1()
-            .border_color(rgb(self.theme.border))
-            .child(div().text_lg().child("Updates"))
             .child(
                 div()
                     .text_sm()

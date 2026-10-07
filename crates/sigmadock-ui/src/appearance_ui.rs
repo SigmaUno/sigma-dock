@@ -55,7 +55,7 @@ impl Workspace {
             .map(|error| error.to_string());
         cx.notify();
     }
-    fn edit_appearance(
+    pub(crate) fn edit_appearance(
         &mut self,
         event: &gpui::KeyDownEvent,
         window: &mut Window,
@@ -86,7 +86,9 @@ impl Workspace {
         }
         let index = *index;
         let text = text.clone();
-        if index == EDITOR_COMMAND {
+        if let Some(field) = index.checked_sub(crate::settings_ui::FORGE_FIELD) {
+            self.edit_forge_field(field, text);
+        } else if index == EDITOR_COMMAND {
             self.preferences.editor.custom_command = text;
             self.settings_error = self
                 .preferences
@@ -111,7 +113,7 @@ impl Workspace {
         cx.stop_propagation();
         cx.notify();
     }
-    fn appearance_field(
+    pub(crate) fn appearance_field(
         &self,
         index: usize,
         label: String,
@@ -148,43 +150,14 @@ impl Workspace {
             )
             .into_any_element()
     }
-    pub(crate) fn settings_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// Terminal appearance controls for the Settings page.
+    pub(crate) fn appearance_section(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let effective = self.theme.terminal(&self.preferences.appearance);
         let appearance = &effective;
         let mut panel = div()
-            .id("terminal-settings-panel")
-            .absolute()
-            .right(px(16.))
-            .bottom(px(60.))
-            .w(px(460.))
-            .max_h(px(640.))
-            .overflow_y_scroll()
-            .track_focus(&self.settings_focus)
-            .focus(|style| style.border_color(rgb(self.theme.focus)))
-            .on_key_down(cx.listener(Self::edit_appearance))
             .flex()
             .flex_col()
             .gap_2()
-            .p_4()
-            .rounded_lg()
-            .border_1()
-            .border_color(rgb(self.theme.border))
-            .bg(rgb(self.theme.panel))
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .child(div().text_lg().child("Terminal Appearance"))
-                    .child(
-                        div()
-                            .id("close-settings")
-                            .cursor_pointer()
-                            .child("Close ×")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.toggle_settings(window, cx)),
-                            ),
-                    ),
-            )
             .child(
                 div()
                     .text_sm()
@@ -355,14 +328,6 @@ impl Workspace {
                 cx,
             ));
         }
-        if let Some(error) = &self.settings_error {
-            panel = panel.child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(self.theme.error))
-                    .child(error.clone()),
-            );
-        }
         panel
             .child(
                 div()
@@ -378,13 +343,11 @@ impl Workspace {
                         this.apply_appearance(cx);
                     })),
             )
-            .child(self.editor_settings(cx))
-            .child(self.update_controls(cx))
             .into_any_element()
     }
 }
 impl Workspace {
-    fn editor_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn editor_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         use crate::editor::{Editor, detected};
         let theme = self.theme;
         let current = self.preferences.editor.editor;
@@ -437,11 +400,6 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_2()
-            .pt_3()
-            .mt_2()
-            .border_t_1()
-            .border_color(rgb(theme.border))
-            .child(div().text_lg().child("Editor"))
             .child(
                 div()
                     .text_sm()

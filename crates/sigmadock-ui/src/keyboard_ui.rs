@@ -90,16 +90,14 @@ fn workspace_shortcut(
 
 impl Workspace {
     pub(crate) fn prepare_berth_focus(&mut self, cx: &mut Context<Self>) {
-        let ids: Vec<_> = self
-            .berths(self.selected_project.as_deref())
-            .iter()
-            .map(|w| w.id.clone())
-            .collect();
-        let keys: Vec<_> = (0..self.capacity.max_workers.max(ids.len()))
-            .map(|i| {
-                ids.get(i).map_or_else(
-                    || format!("empty-berth-{}", i + 1),
-                    |id| format!("berth-{id}"),
+        // One handle per grid slot, keyed exactly as the grid renders it.
+        let keys: Vec<_> = self
+            .slots(self.selected_project.as_deref())
+            .into_iter()
+            .map(|(number, worker)| {
+                worker.map_or_else(
+                    || format!("empty-berth-{number}"),
+                    |worker| format!("berth-{}", worker.id),
                 )
             })
             .collect();
@@ -113,9 +111,9 @@ impl Workspace {
 
     fn focus_slot(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let id = self
-            .berths(self.selected_project.as_deref())
+            .slots(self.selected_project.as_deref())
             .get(index)
-            .map(|w| w.id.clone());
+            .and_then(|(_, worker)| worker.map(|worker| worker.id.clone()));
         let key = id.as_ref().map_or_else(
             || format!("empty-berth-{}", index + 1),
             |id| format!("berth-{id}"),
@@ -146,6 +144,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.settings_open = false;
         if self.terminal.is_some() {
             self.close_terminal(window, cx);
         }
@@ -167,9 +166,9 @@ impl Workspace {
         let key = &event.keystroke;
         if key.key == "enter" {
             let worker = self
-                .berths(self.selected_project.as_deref())
+                .slots(self.selected_project.as_deref())
                 .get(index)
-                .map(|w| (*w).clone());
+                .and_then(|(_, worker)| worker.cloned());
             if let Some(worker) = worker {
                 if key.modifiers.platform {
                     if let Some(action) = berths_ui::status(&worker).action {
@@ -187,7 +186,8 @@ impl Workspace {
             && !key.modifiers.alt
             && matches!(key.key.as_str(), "left" | "right" | "up" | "down")
         {
-            if let Some(next) = adjacent(index, self.capacity.max_workers, &key.key) {
+            let count = self.slots(self.selected_project.as_deref()).len();
+            if let Some(next) = adjacent(index, count, &key.key) {
                 self.focus_slot(next, window, cx);
             }
             cx.stop_propagation();

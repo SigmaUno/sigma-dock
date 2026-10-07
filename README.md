@@ -79,9 +79,12 @@ Each launch fetches only that branch with an eight-second timeout. A failed fetc
 
 ## Forge facts and feedback
 
-Export a forge token into the daemon's environment before starting it. Configuration stores **the environment variable name**, never the token. For example:
+Connect a project in **Settings → Forges** (⌘,). SigmaDock fills in the forge, owner and repository from the `origin` remote, **Test connection** confirms the token, and **Save** applies the forge to the project's current agents and every new one. The token comes from your GitHub CLI login (`gh auth token`; run `gh auth login` once) or from an environment variable of the daemon. Apps opened from Finder have no shell environment, so the GitHub CLI is the simplest choice there. SigmaDock stores where to read the token, never the token itself.
+
+Single workers can still be configured from the CLI:
 
 ```sh
+sdk forge WORKER_ID --owner my-org --repo my-repo --github-cli
 sdk forge WORKER_ID --owner my-org --repo my-repo
 sdk forge WORKER_ID --kind forgejo --api-url https://forge.example/api/v1 --owner my-org --repo my-repo --token-env FORGEJO_TOKEN
 sdk refresh WORKER_ID
