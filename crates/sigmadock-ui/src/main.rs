@@ -4,6 +4,7 @@ mod berths_ui;
 mod bootstrap;
 mod ci_ui;
 mod icons;
+mod keyboard_ui;
 mod preferences;
 mod recovery_ui;
 mod theme;
@@ -118,6 +119,8 @@ struct Workspace {
     previews: std::collections::HashMap<String, berths_ui::Preview>,
     /// Berth highlighted from the needs-you strip or the last closed terminal.
     focused_berth: Option<String>,
+    berth_focus: std::collections::HashMap<String, gpui::FocusHandle>,
+    workspace_focus: gpui::FocusHandle,
     projects: Vec<Project>,
     /// `None` shows all berths.
     selected_project: Option<String>,
@@ -230,6 +233,8 @@ impl Workspace {
             capacity: Capacity::default(),
             previews: Default::default(),
             focused_berth: None,
+            berth_focus: Default::default(),
+            workspace_focus: cx.focus_handle(),
             projects: Vec::new(),
             selected_project: None,
             daemon_connected: false,
@@ -248,6 +253,7 @@ impl Workspace {
         };
         workspace.apply_snapshot(initial);
         workspace.spawn_preview_loop(cx);
+        workspace.workspace_focus.focus(window);
         workspace
     }
     fn open_worker(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -519,6 +525,7 @@ impl Drop for Workspace {
 }
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.prepare_berth_focus(cx);
         let sidebar = self.sidebar(cx);
         let mut content = div()
             .id("workspace-content")
@@ -557,7 +564,24 @@ impl Render for Workspace {
                             .hover(|style| style.bg(rgb(self.theme.selection)))
                             .child(icon(Icon::ArrowLeft, px(14.), rgb(self.theme.text)))
                             .child("Berths")
-                            .on_click(cx.listener(|this, _, _, cx| this.close_terminal(cx))),
+                            .tab_index(0)
+                            .border_1()
+                            .border_color(gpui::transparent_black())
+                            .focus(|style| style.border_color(rgb(self.theme.focus)))
+                            .tooltip(|_, cx| {
+                                keyboard_ui::tooltip("Return to berths · ⌘[".into(), cx)
+                            })
+                            .on_key_down(cx.listener(
+                                |this, event: &gpui::KeyDownEvent, window, cx| {
+                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        this.close_terminal(window, cx);
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            ))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.close_terminal(window, cx)),
+                            ),
                     )
                     .child(
                         div()
@@ -768,21 +792,11 @@ impl Render for Workspace {
         }
         content = content.child(self.footer());
         div()
+            .id("workspace")
+            .track_focus(&self.workspace_focus)
             .size_full()
             .relative()
-            .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                if event.keystroke.key == ","
-                    && (event.keystroke.modifiers.platform || event.keystroke.modifiers.control)
-                {
-                    this.toggle_settings(window, cx);
-                    cx.stop_propagation();
-                } else if event.keystroke.key == "n" && event.keystroke.modifiers.platform {
-                    if !this.form_open {
-                        this.open_new_task(window, cx);
-                    }
-                    cx.stop_propagation();
-                }
-            }))
+            .capture_key_down(cx.listener(Self::workspace_key))
             .flex()
             .bg(rgb(self.theme.base))
             .text_color(rgb(self.theme.text))
