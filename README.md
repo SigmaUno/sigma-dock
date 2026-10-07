@@ -4,6 +4,8 @@ A native, local-first workspace for supervising parallel coding agents. Rust, GP
 
 **Status: early working prototype.** The daemon, CLI, native board and embedded terminal are implemented. Full agent TUI compatibility and distribution packaging are not yet release-qualified. See [the roadmap](docs/ROADMAP.md) for the remaining work.
 
+Project website: [sigmadock.dev](https://sigmadock.dev). See the [crate and executable migration guide](docs/MIGRATION.md) for version 0.1.2.
+
 ## macOS app download
 
 [macOS builds](docs/MACOS.md) provide a universal DMG: drag SigmaDock to Applications and open it. The app starts its bundled daemon; Rust is not required. Initial test downloads are not Apple-notarized. Git and agent CLIs remain external prerequisites.
@@ -14,25 +16,25 @@ Requires macOS or Linux, Rust 1.88+ (newer dependencies may require newer stable
 
 ```sh
 cargo build
-cargo run -p sigma-dockerd
+cargo run -p sigmadockd
 ```
 
 In another terminal:
 
 ```sh
 # Returns a project ID. The repo needs at least one commit.
-cargo run -p sigma-dock-cli -- project /absolute/path/to/repo
+cargo run -p sigmadock-cli -- project /absolute/path/to/repo
 # Use the returned project ID here.
-cargo run -p sigma-dock-cli -- spawn PROJECT_ID --title "Fix the login bug" --agent claude --prompt "Fix the login bug and run the relevant tests"
-cargo run -p sigma-dock-cli -- ls
-cargo run -p sigma-dock-cli -- attach WORKER_ID
+cargo run -p sigmadock-cli -- spawn PROJECT_ID --title "Fix the login bug" --agent claude --prompt "Fix the login bug and run the relevant tests"
+cargo run -p sigmadock-cli -- ls
+cargo run -p sigmadock-cli -- attach WORKER_ID
 # Ctrl-] detaches; the agent continues in the daemon.
-cargo run -p sigma-dock-ui
+cargo run -p sigmadock-ui
 ```
 
-Build/install binaries with `cargo install --path crates/sigma-dock-cli`, `cargo install --path crates/sigma-dockerd`, and `cargo install --path crates/sigma-dock-ui`. Binaries are `sdk`, `sigma-dockerd`, and `sigma-dock`. Start the daemon separately before the UI. Use `--agent shell` to test without an agent subscription. Adapters also exist for `codex`, `gemini`, `opencode`, and `aider`; their current flags must be tested against your installed versions.
+Build/install binaries with `cargo install --path crates/sigmadock-cli`, `cargo install --path crates/sigmadockd`, and `cargo install --path crates/sigmadock-ui`. Binaries are `sdk`, `sigmadockd`, and `sigma-dock`. Start the daemon separately before the UI. Use `--agent shell` to test without an agent subscription. Adapters also exist for `codex`, `gemini`, `opencode`, and `aider`; their current flags must be tested against your installed versions.
 
-Each worker gets a unique `sigma/UUID` branch, a worktree outside the source checkout, a PTY, and `PORT` and `SIGMA_DOCK_WORKER_ID` environment variables. At most five sessions run concurrently by default (`sigma-dockerd --max-workers N`). Ports 4200–4999 are assigned uniquely among active workers and checked for availability; they are best-effort leases, not OS reservations.
+Each worker gets a unique `sigma/UUID` branch, a worktree outside the source checkout, a PTY, and `PORT` and `SIGMA_DOCK_WORKER_ID` environment variables. At most five sessions run concurrently by default (`sigmadockd --max-workers N`). Ports 4200–4999 are assigned uniquely among active workers and checked for availability; they are best-effort leases, not OS reservations.
 
 `SIGMA_DOCK_STATE_DIR` overrides local state. Defaults: `~/Library/Application Support/SigmaDock` on macOS, `$XDG_STATE_HOME/sigma-dock` or `~/.local/state/sigma-dock` on Linux. `SIGMA_DOCK_SOCKET` overrides the socket for all binaries. Keep the daemon socket and database on a local filesystem. The state directory is mode 0700 and the socket and database are mode 0600.
 
@@ -91,9 +93,9 @@ The four board columns are computed, never dragged manually:
 
 ## Project orchestrator tools
 
-`sigma-dock-mcp` is a local stdio MCP bridge to the same daemon. Configure your agent's MCP client to launch it (install with `cargo install --path crates/sigma-dock-mcp`). It exposes `list_workers`, `get_worker_status`, `message_worker`, and `archive_worker`. The daemon must already be running and the socket environment must match.
+`sigmadock-mcp` is a local stdio MCP bridge to the same daemon. Configure your agent's MCP client to launch it (install with `cargo install --path crates/sigmadock-mcp`). It exposes `list_workers`, `get_worker_status`, `message_worker`, and `archive_worker`. The daemon must already be running and the socket environment must match.
 
-Spawning is disabled by default: the user creates proposed workers with `sdk spawn`. Explicitly launching `sigma-dock-mcp --allow-spawn` enables `spawn_worker` within the daemon's concurrency limit. Archive never removes worktrees through MCP. Managed Claude and Codex orchestrators are available with `sdk orchestrator PROJECT_ID --agent claude --prompt "Plan the next tasks"`. Add `--allow-spawn` to authorize worker creation. Install `sigma-dock-mcp` next to the daemon, or pass `sigma-dockerd --mcp-binary /absolute/path/sigma-dock-mcp`. Each project has at most one unarchived orchestrator; resume or archive it before creating another. Per-session MCP settings do not alter global harness configuration.
+Spawning is disabled by default: the user creates proposed workers with `sdk spawn`. Explicitly launching `sigmadock-mcp --allow-spawn` enables `spawn_worker` within the daemon's concurrency limit. Archive never removes worktrees through MCP. Managed Claude and Codex orchestrators are available with `sdk orchestrator PROJECT_ID --agent claude --prompt "Plan the next tasks"`. Add `--allow-spawn` to authorize worker creation. Install `sigmadock-mcp` next to the daemon, or pass `sigmadockd --mcp-binary /absolute/path/sigmadock-mcp`. Each project has at most one unarchived orchestrator; resume or archive it before creating another. Per-session MCP settings do not alter global harness configuration.
 
 Project-scoped tools include `read_planning_notes` and `write_planning_notes`; writes require the previous revision and persist locally in SQLite. `sdk notes PROJECT_ID` reads them. Tool scope prevents accidental cross-project calls but does not sandbox the harness, which runs as your user.
 
@@ -120,7 +122,7 @@ python3 scripts/smoke.py
 python3 scripts/feedback_smoke.py
 ```
 
-`cargo build` defaults to the headless binaries. `cargo build -p sigma-dock-ui` builds the native UI. Both `.forgejo/workflows/ci.yml` and `.github/workflows/ci.yml` run the same checks. Mirror setup is an administrator operation and is not performed by the repository.
+`cargo build` defaults to the headless binaries. `cargo build -p sigmadock-ui` builds the native UI. Both `.forgejo/workflows/ci.yml` and `.github/workflows/ci.yml` run the same checks. Mirror setup is an administrator operation and is not performed by the repository.
 
 [Releasing crates](docs/RELEASING.md) · [Architecture](docs/ARCHITECTURE.md) · [Roadmap](docs/ROADMAP.md) · [Privacy verification](docs/PRIVACY.md)
 

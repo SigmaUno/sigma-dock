@@ -13,7 +13,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARIES = ['sigma-dock', 'sigma-dockerd', 'sigma-dock-mcp', 'sdk']
+BINARIES = ['sigma-dock', 'sigmadockd', 'sigmadock-mcp', 'sdk']
 
 
 def run(*command):
@@ -127,7 +127,7 @@ def main():
     shutil.copy2(ROOT / 'LICENSE', resources / 'LICENSE')
     shutil.copy2(ROOT / 'packaging/licenses/Catppuccin.txt', resources / 'Catppuccin-LICENSE.txt')
     for name in ('NOTICE', 'LICENSE-MIT', 'LICENSE-APACHE'):
-        shutil.copy2(ROOT / 'crates/sigma-dock-terminal' / name, resources / ('terminal-' + name))
+        shutil.copy2(ROOT / 'crates/sigmadock-terminal' / name, resources / ('terminal-' + name))
     shutil.copy2(ROOT / 'packaging/macos/INSTALL.txt', resources / 'INSTALL.txt')
     # Sign nested helpers first. Signing the main executable inside an app
     # also discovers the enclosing bundle and requires its helpers to be signed.

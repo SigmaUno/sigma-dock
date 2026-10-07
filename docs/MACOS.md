@@ -35,7 +35,7 @@ On macOS, install Rust, Python 3 and Xcode command-line tools (`xcode-select --i
 
 ```sh
 MACOSX_DEPLOYMENT_TARGET=13.0 cargo build --locked --release \
-  -p sigma-dock-ui -p sigma-dockerd -p sigma-dock-cli -p sigma-dock-mcp
+  -p sigmadock-ui -p sigmadockd -p sigmadock-cli -p sigmadock-mcp
 
 version=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
 python3 scripts/package_macos.py --bin-dir target/release \
@@ -43,7 +43,7 @@ python3 scripts/package_macos.py --bin-dir target/release \
   --arch "$(uname -m)"
 ```
 
-The output is `dist/SigmaDock.app`, a DMG and its SHA-256 checksum. Open the DMG, drag the app into Applications, then launch it. This creates a native Apple Silicon or Intel test installer for the machine running the build. Apple signing credentials are not required; the app is ad-hoc signed and not notarized. Git and your chosen agent CLI still need to be installed separately. The GitHub workflow builds the universal installer containing both architectures.
+The output is `dist/SigmaDock.app`, a DMG and its SHA-256 checksum. If `dist/SigmaDock.app` already exists, pass `--output /path/to/a/fresh-directory` to package another build. Open the DMG, drag the app into Applications, then launch it. This creates a native Apple Silicon or Intel test installer for the machine running the build. Apple signing credentials are not required; the app is ad-hoc signed and not notarized. Git and your chosen agent CLI still need to be installed separately. The GitHub workflow builds the universal installer containing both architectures.
 
 Add `--app-only` to the packaging command to skip DMG creation. To smoke-test the bundled daemon, CLI, worker and PTY without launching the GUI:
 

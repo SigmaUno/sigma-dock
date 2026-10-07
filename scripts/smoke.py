@@ -52,7 +52,7 @@ with tempfile.TemporaryDirectory(prefix='sigma-smoke-', dir='/tmp') as temp:
         return reply['result']
 
     def start():
-        process = subprocess.Popen([str(BIN / 'sigma-dockerd'), '--state-dir', str(state), '--max-workers', '5'], env=env, stdout=log, stderr=log)
+        process = subprocess.Popen([str(BIN / 'sigmadockd'), '--state-dir', str(state), '--max-workers', '5'], env=env, stdout=log, stderr=log)
         def ready():
             if process.poll() is not None:
                 raise AssertionError((temp / 'daemon.log').read_text())
@@ -125,7 +125,7 @@ with tempfile.TemporaryDirectory(prefix='sigma-smoke-', dir='/tmp') as temp:
         assert 'BEFORE_CLEAR_CHECKPOINT' not in rpc('session_context', {'worker_id': w['id']})['text']
         # MCP is local, does not offer autonomous spawn by default.
         request = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list', 'params': {}}
-        mcp = subprocess.run([str(BIN / 'sigma-dock-mcp')], env=env, input=json.dumps(request)+'\n', capture_output=True, text=True, check=True)
+        mcp = subprocess.run([str(BIN / 'sigmadock-mcp')], env=env, input=json.dumps(request)+'\n', capture_output=True, text=True, check=True)
         assert 'spawn_worker' not in [t['name'] for t in json.loads(mcp.stdout)['result']['tools']]
         rpc('stop_worker', {'worker_id': w['id']})
         wait_for(lambda: exited(w))

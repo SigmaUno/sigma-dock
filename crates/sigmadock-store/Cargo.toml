@@ -1,0 +1,17 @@
+[package]
+name = "sigmadock-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+include = ["src/**", "README.md", "LICENSE"]
+description = "SQLite metadata and planning notes for SigmaDock"
+
+[dependencies]
+anyhow.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+sigmadock-core = { version = "0.1.2", path = "../sigmadock-core" }

@@ -1,15 +1,15 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-default-members = ["crates/sigma-dock-cli", "crates/sigma-dockerd", "crates/sigma-dock-mcp"]
+default-members = ["crates/sigmadock-cli", "crates/sigmadockd", "crates/sigmadock-mcp"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.88"
 repository = "https://github.com/SigmaUno/sigma-dock"
-homepage = "https://sigmauno.com"
+homepage = "https://sigmadock.dev"
 
 [workspace.dependencies]
 anyhow = "1"

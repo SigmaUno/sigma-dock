@@ -1,0 +1,21 @@
+[package]
+name = "sigmadock-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+include = ["src/**", "README.md", "LICENSE"]
+description = "Project-scoped local MCP tools for SigmaDock"
+
+[[bin]]
+name = "sigmadock-mcp"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+sigmadock-core = { version = "0.1.2", path = "../sigmadock-core" }
+clap.workspace = true

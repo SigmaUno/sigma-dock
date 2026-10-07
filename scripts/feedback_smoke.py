@@ -93,7 +93,7 @@ with open('received.txt','w') as out:
         assert 'error' not in reply, reply
         return reply['result']
     def start():
-        p = subprocess.Popen([str(BIN/'sigma-dockerd'), '--state-dir', str(temp/'state'), '--idle-seconds', '1'], env=env, stdout=log, stderr=log)
+        p = subprocess.Popen([str(BIN/'sigmadockd'), '--state-dir', str(temp/'state'), '--idle-seconds', '1'], env=env, stdout=log, stderr=log)
         def ready():
             if p.poll() is not None:
                 raise AssertionError((temp/'daemon.log').read_text())
@@ -110,7 +110,7 @@ with open('received.txt','w') as out:
         return rpc('add_project', {'path': str(repo)})
     def mcp(scope, name, arguments):
         request = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': name, 'arguments': arguments}}
-        result = subprocess.run([str(BIN/'sigma-dock-mcp'), '--project-id', scope], env=env, input=json.dumps(request)+'\n', text=True, capture_output=True, check=True)
+        result = subprocess.run([str(BIN/'sigmadock-mcp'), '--project-id', scope], env=env, input=json.dumps(request)+'\n', text=True, capture_output=True, check=True)
         return json.loads(result.stdout)['result']
     try:
         daemon = start()

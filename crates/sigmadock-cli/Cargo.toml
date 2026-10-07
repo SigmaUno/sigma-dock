@@ -1,0 +1,23 @@
+[package]
+name = "sigmadock-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+include = ["src/**", "README.md", "LICENSE"]
+description = "Command-line client for the SigmaDock local daemon"
+
+[[bin]]
+name = "sdk"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+serde_json.workspace = true
+sigmadock-core = { version = "0.1.2", path = "../sigmadock-core" }
+sigmadock-agents = { version = "0.1.2", path = "../sigmadock-agents" }

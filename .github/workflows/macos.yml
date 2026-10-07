@@ -75,13 +75,13 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
       - name: Build native binaries
-        run: cargo build --locked --release --target '${{ matrix.target }}' -p sigma-dock-ui -p sigma-dockerd -p sigma-dock-mcp -p sigma-dock-cli
+        run: cargo build --locked --release --target '${{ matrix.target }}' -p sigmadock-ui -p sigmadockd -p sigmadock-mcp -p sigmadock-cli
       - name: Collect binaries
         env:
           BUILD_TARGET: ${{ matrix.target }}
         run: |
           mkdir -p binaries
-          cp "target/$BUILD_TARGET/release/"{sigma-dock,sigma-dockerd,sigma-dock-mcp,sdk} binaries/
+          cp "target/$BUILD_TARGET/release/"{sigma-dock,sigmadockd,sigmadock-mcp,sdk} binaries/
       - uses: actions/upload-artifact@v4
         with:
           name: binaries-${{ matrix.arch }}
@@ -99,7 +99,7 @@ jobs:
       - name: Combine Apple Silicon and Intel slices
         run: |
           mkdir universal
-          for binary in sigma-dock sigma-dockerd sigma-dock-mcp sdk; do
+          for binary in sigma-dock sigmadockd sigmadock-mcp sdk; do
             lipo -create "binaries/binaries-arm64/$binary" "binaries/binaries-x86_64/$binary" -output "universal/$binary"
             chmod +x "universal/$binary"
           done

@@ -15,18 +15,18 @@ flowchart LR
 
 | Crate | Responsibility |
 |---|---|
-| `sigma-dock-core` | Domain types, pure column derivation, bounded JSON-RPC client/framing |
-| `sigma-dock-store` | SQLite schema version, project/worker persistence and recovery markers |
-| `sigma-dock-pty` | PTY input, output replay, process status, resize and notification detection |
-| `sigma-dock-git` | Worktree creation, safe removal, prune and diff summaries |
-| `sigma-dock-forge` | Forge trait, GitHub and Forgejo REST facts and inline review comments |
-| `sigma-dock-agents` | Thin harness command/environment adapters |
-| `sigma-dock-ports` | Worker port leases |
-| `sigma-dock-mcp` | Local orchestrator tools via stdio MCP |
-| `sigma-dockerd` | Session supervision, persistence, facts polling and socket API |
-| `sigma-dock-terminal` | Alacritty-backed GPUI terminal with live appearance and cursor controls |
-| `sigma-dock-ui` | GPUI sidebar, derived board and `sigma-dock-terminal` backed by Alacritty |
-| `sigma-dock-cli` | `sdk` CLI with raw-terminal attach |
+| `sigmadock-core` | Domain types, pure column derivation, bounded JSON-RPC client/framing |
+| `sigmadock-store` | SQLite schema version, project/worker persistence and recovery markers |
+| `sigmadock-pty` | PTY input, output replay, process status, resize and notification detection |
+| `sigmadock-git` | Worktree creation, safe removal, prune and diff summaries |
+| `sigmadock-forge` | Forge trait, GitHub and Forgejo REST facts and inline review comments |
+| `sigmadock-agents` | Thin harness command/environment adapters |
+| `sigmadock-ports` | Worker port leases |
+| `sigmadock-mcp` | Local orchestrator tools via stdio MCP |
+| `sigmadockd` | Session supervision, persistence, facts polling and socket API |
+| `sigmadock-terminal` | Alacritty-backed GPUI terminal with live appearance and cursor controls |
+| `sigmadock-ui` | GPUI sidebar, derived board and `sigmadock-terminal` backed by Alacritty |
+| `sigmadock-cli` | `sdk` CLI with raw-terminal attach |
 
 ## IPC version 1
 
@@ -48,7 +48,7 @@ The terminal component receives a reader and writer connected to RPC, rather tha
 
 ## Decisions
 
-SigmaDock name; Apache-2.0; daemon/UI split; GPUI pinned at 0.2.2; a local terminal component derived from `gpui-terminal` 0.1.0; synchronous `rusqlite`; local newline JSON-RPC; GitHub.com plus Forgejo; Linux/macOS targets. The project uses sigmauno.com. Crates are published by the release workflow; distribution packaging is pending.
+SigmaDock name; Apache-2.0; daemon/UI split; GPUI pinned at 0.2.2; a local terminal component derived from `gpui-terminal` 0.1.0; synchronous `rusqlite`; local newline JSON-RPC; GitHub.com plus Forgejo; Linux/macOS targets. The project uses sigmadock.dev. Crates are published by the release workflow; distribution packaging is pending.
 
 Recovery checkpoints retain at most 16 KiB per worker, seven days and 512 entries. Checkpoint state is historical, separate from current runtime state. Resuming a worker that was marked lost requires an explicit acknowledgement of unknown process state; known live sessions refuse resume. Clearing context moves its in-memory capture boundary so earlier output is not written back on the next checkpoint. See [session recovery](RECOVERY.md).
 

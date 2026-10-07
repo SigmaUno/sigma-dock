@@ -52,7 +52,7 @@ def main():
         for package in packages:
             manifest = Path(package['manifest_path'])
             text = manifest.read_text()
-            text = re.sub(r'(sigma-dock[^\s=]*\s*=\s*\{\s*version\s*=\s*")' + re.escape(old) + r'(")',
+            text = re.sub(r'(sigmadock[^\s=]*\s*=\s*\{\s*version\s*=\s*")' + re.escape(old) + r'(")',
                           lambda match: match[1] + args.version + match[2], text)
             manifest.write_text(text)
         subprocess.run(['cargo', 'generate-lockfile'], cwd=ROOT, check=True)

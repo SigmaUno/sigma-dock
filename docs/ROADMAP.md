@@ -8,7 +8,7 @@ This is an implementation roadmap, not a claim that every phase is complete.
 - [x] Eleven-crate Rust workspace with daemon/UI separation.
 - [x] Forgejo and GitHub CI definitions for fmt, clippy, tests and dependency policy.
 - [x] Zero-telemetry policy, tracking-crate bans and verification guide.
-- [x] Use the existing sigmauno.com domain; prepare sigma-dock-* crate metadata.
+- [x] Use the existing sigmadock.dev domain; prepare sigmadock-* crate metadata.
 - [ ] Publish crate names in dependency order; configure repository mirroring externally.
 
 ## Phase 1 — One agent in a window
