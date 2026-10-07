@@ -774,6 +774,7 @@ impl Workspace {
             .min_w(px(220.))
             .flex_none()
             .h_full()
+            .overflow_hidden()
             .flex()
             .flex_col()
             .bg(rgb(theme.sidebar))
@@ -943,28 +944,28 @@ impl Workspace {
                     .child(
                         div()
                             .flex_1()
+                            .min_w(px(0.))
                             .flex()
                             .flex_col()
                             .gap_1()
                             .text_xs()
                             .text_color(rgb(theme.muted))
-                            .child(match scope {
+                            .child(div().truncate().child(match scope {
                                 Some(id) => {
                                     format!(
                                         "Agents · {} of {max} running",
                                         self.berths(Some(id)).len()
                                     )
                                 }
-                                None => format!(
-                                    "Agents · {} running · {max} per project",
-                                    self.capacity.live.len()
-                                ),
-                            })
+                                // The per-project limit is in the All agents header.
+                                None => format!("Agents · {} running", self.capacity.live.len()),
+                            }))
                             .children(capacity),
                     )
                     .child(
                         div()
                             .id("terminal-settings")
+                            .flex_none()
                             .flex()
                             .items_center()
                             .gap_1()

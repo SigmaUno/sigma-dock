@@ -40,6 +40,8 @@ use std::{
     },
     time::Duration,
 };
+/// Window width in points below which dense headers drop secondary labels.
+const COMPACT_WIDTH: f32 = 1280.;
 #[derive(Parser)]
 struct Args {
     #[arg(long, env = "SIGMA_DOCK_SOCKET", default_value_os_t = socket_path())]
@@ -176,6 +178,8 @@ struct Workspace {
     terminal_script: Option<String>,
     inbox: inbox_ui::InboxState,
     menu: Option<Menu>,
+    /// The window is narrower than `COMPACT_WIDTH`; dense headers drop secondary labels.
+    compact: bool,
     events: events::EventMonitor,
     event_epoch: u64,
     client: Client,
@@ -325,6 +329,7 @@ impl Workspace {
             terminal_script: None,
             inbox: Default::default(),
             menu: None,
+            compact: false,
             events: event_monitor,
             event_epoch: 0,
             usage_open: false,
@@ -813,6 +818,7 @@ impl Workspace {
             .id("workspace-content")
             .overflow_y_scroll()
             .flex_1()
+            .min_w(px(0.))
             .h_full()
             .flex()
             .flex_col()
@@ -840,7 +846,8 @@ impl Workspace {
     }
 }
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.compact = window.viewport_size().width < px(COMPACT_WIDTH);
         self.prepare_berth_focus(cx);
         let sidebar = self.sidebar(cx);
         let main = if self.settings_open {
