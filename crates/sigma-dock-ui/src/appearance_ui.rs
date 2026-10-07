@@ -6,12 +6,13 @@ use gpui::{Context, SharedString, Window, div, prelude::*, px, rgb};
 
 pub struct SettingsTooltip;
 impl gpui::Render for SettingsTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let theme = crate::theme::Theme::for_appearance(window.appearance());
         div()
             .p_2()
             .rounded_md()
-            .bg(rgb(0x243248))
-            .text_color(rgb(0xe1e8f2))
+            .bg(rgb(theme.button))
+            .text_color(rgb(theme.text))
             .child("Terminal appearance settings · Cmd/Ctrl+,")
     }
 }
@@ -26,19 +27,24 @@ impl Workspace {
         }
         cx.notify();
     }
+    pub(crate) fn refresh_terminal_appearance(&mut self, cx: &mut Context<Self>) {
+        if let Some(terminal) = &self.terminal {
+            terminal.update(cx, |terminal, cx| {
+                terminal.update_config(
+                    self.theme
+                        .terminal(&self.preferences.appearance)
+                        .apply(terminal.config().clone()),
+                    cx,
+                );
+            });
+        }
+    }
     fn apply_appearance(&mut self, cx: &mut Context<Self>) {
         if let Err(error) = self.preferences.appearance.validate() {
             self.settings_error = Some(error.to_string());
             return;
         }
-        if let Some(terminal) = &self.terminal {
-            terminal.update(cx, |terminal, cx| {
-                terminal.update_config(
-                    self.preferences.appearance.apply(terminal.config().clone()),
-                    cx,
-                );
-            });
-        }
+        self.refresh_terminal_appearance(cx);
         self.settings_error = self
             .preferences
             .save(&self.preferences_path)
@@ -82,6 +88,7 @@ impl Workspace {
             self.apply_appearance(cx);
         } else if index != 0 {
             if let Some(color) = parse_color(&text) {
+                self.preferences.appearance.follow_system = false;
                 self.preferences.appearance.set_color(index - 1, color);
                 self.apply_appearance(cx);
             } else {
@@ -117,9 +124,9 @@ impl Workspace {
                     .p_2()
                     .rounded_md()
                     .bg(rgb(if editing.is_some() {
-                        0x2c4058
+                        self.theme.selection
                     } else {
-                        0x1d2b3e
+                        self.theme.card
                     }))
                     .cursor_text()
                     .child(displayed)
@@ -132,7 +139,8 @@ impl Workspace {
             .into_any_element()
     }
     pub(crate) fn settings_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let appearance = &self.preferences.appearance;
+        let effective = self.theme.terminal(&self.preferences.appearance);
+        let appearance = &effective;
         let mut panel = div()
             .id("terminal-settings-panel")
             .absolute()
@@ -142,6 +150,7 @@ impl Workspace {
             .max_h(px(640.))
             .overflow_y_scroll()
             .track_focus(&self.settings_focus)
+            .focus(|style| style.border_color(rgb(self.theme.focus)))
             .on_key_down(cx.listener(Self::edit_appearance))
             .flex()
             .flex_col()
@@ -149,8 +158,8 @@ impl Workspace {
             .p_4()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(0x3a4d65))
-            .bg(rgb(0x172031))
+            .border_color(rgb(self.theme.border))
+            .bg(rgb(self.theme.panel))
             .child(
                 div()
                     .flex()
@@ -169,7 +178,7 @@ impl Workspace {
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(0xa6b4c8))
+                    .text_color(rgb(self.theme.muted))
                     .child("Changes apply live. Click a value; Cmd/Ctrl+A replaces it."),
             )
             .child(self.appearance_field(0, "Font family".into(), appearance.font.clone(), cx));
@@ -179,7 +188,8 @@ impl Workspace {
                 div()
                     .id(SharedString::from(format!("font-{font}")))
                     .p_1()
-                    .bg(rgb(0x243248))
+                    .bg(rgb(self.theme.button))
+                    .hover(|style| style.bg(rgb(self.theme.selection)))
                     .cursor_pointer()
                     .text_sm()
                     .child(font)
@@ -207,7 +217,8 @@ impl Workspace {
                     div()
                         .id(SharedString::from(format!("step-{index}-{direction}")))
                         .p_2()
-                        .bg(rgb(0x243248))
+                        .bg(rgb(self.theme.button))
+                        .hover(|style| style.bg(rgb(self.theme.selection)))
                         .cursor_pointer()
                         .child(label)
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -233,7 +244,8 @@ impl Workspace {
                 div()
                     .id(SharedString::from(format!("theme-{label}")))
                     .p_2()
-                    .bg(rgb(0x243248))
+                    .bg(rgb(self.theme.button))
+                    .hover(|style| style.bg(rgb(self.theme.selection)))
                     .cursor_pointer()
                     .child(label)
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -243,6 +255,7 @@ impl Workspace {
                             Appearance::default()
                         };
                         let a = &mut this.preferences.appearance;
+                        a.follow_system = false;
                         a.background = preset.background;
                         a.foreground = preset.foreground;
                         a.ansi = preset.ansi;
@@ -251,45 +264,74 @@ impl Workspace {
                     })),
             );
         }
-        panel = panel.child(themes).child(
-            div()
-                .flex()
-                .gap_2()
-                .child(
-                    div()
-                        .id("cursor-shape")
-                        .flex_1()
-                        .p_2()
-                        .bg(rgb(0x243248))
-                        .cursor_pointer()
-                        .child(format!("Cursor: {:?} ↻", appearance.cursor))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.preferences.appearance.cursor =
-                                match this.preferences.appearance.cursor {
-                                    Cursor::Block => Cursor::Underline,
-                                    Cursor::Underline => Cursor::Beam,
-                                    Cursor::Beam => Cursor::Block,
-                                };
-                            this.apply_appearance(cx);
-                        })),
-                )
-                .child(
-                    div()
-                        .id("cursor-blink")
-                        .p_2()
-                        .bg(rgb(0x243248))
-                        .cursor_pointer()
-                        .child(if appearance.blink {
-                            "Blink: on"
-                        } else {
-                            "Blink: off"
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.preferences.appearance.blink = !this.preferences.appearance.blink;
-                            this.apply_appearance(cx);
-                        })),
-                ),
-        );
+        panel = panel
+            .child(
+                div()
+                    .id("terminal-system-theme")
+                    .p_2()
+                    .bg(rgb(self.theme.button))
+                    .cursor_pointer()
+                    .child(if appearance.follow_system {
+                        "Terminal colors: follow system"
+                    } else {
+                        "Terminal colors: custom"
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let effective = this.theme.terminal(&this.preferences.appearance);
+                        let a = &mut this.preferences.appearance;
+                        if a.follow_system {
+                            a.background = effective.background;
+                            a.foreground = effective.foreground;
+                            a.ansi = effective.ansi;
+                        }
+                        a.follow_system = !a.follow_system;
+                        this.settings_editor = None;
+                        this.apply_appearance(cx);
+                    })),
+            )
+            .child(themes)
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("cursor-shape")
+                            .flex_1()
+                            .p_2()
+                            .bg(rgb(self.theme.button))
+                            .hover(|style| style.bg(rgb(self.theme.selection)))
+                            .cursor_pointer()
+                            .child(format!("Cursor: {:?} ↻", appearance.cursor))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.preferences.appearance.cursor =
+                                    match this.preferences.appearance.cursor {
+                                        Cursor::Block => Cursor::Underline,
+                                        Cursor::Underline => Cursor::Beam,
+                                        Cursor::Beam => Cursor::Block,
+                                    };
+                                this.apply_appearance(cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id("cursor-blink")
+                            .p_2()
+                            .bg(rgb(self.theme.button))
+                            .hover(|style| style.bg(rgb(self.theme.selection)))
+                            .cursor_pointer()
+                            .child(if appearance.blink {
+                                "Blink: on"
+                            } else {
+                                "Blink: off"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.preferences.appearance.blink =
+                                    !this.preferences.appearance.blink;
+                                this.apply_appearance(cx);
+                            })),
+                    ),
+            );
         for index in 0..18 {
             let label = match index {
                 0 => "Background".into(),
@@ -307,7 +349,7 @@ impl Workspace {
             panel = panel.child(
                 div()
                     .text_sm()
-                    .text_color(rgb(0xffb0bc))
+                    .text_color(rgb(self.theme.error))
                     .child(error.clone()),
             );
         }
@@ -316,7 +358,8 @@ impl Workspace {
                 div()
                     .id("restore-appearance")
                     .p_2()
-                    .bg(rgb(0x275f54))
+                    .bg(rgb(self.theme.accent))
+                    .text_color(rgb(self.theme.base))
                     .cursor_pointer()
                     .child("Restore appearance defaults")
                     .on_click(cx.listener(|this, _, _, cx| {

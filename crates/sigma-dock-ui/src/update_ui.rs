@@ -77,15 +77,20 @@ impl Workspace {
             .mt_3()
             .pt_3()
             .border_t_1()
-            .border_color(rgb(0x3a4d65))
+            .border_color(rgb(self.theme.border))
             .child(div().text_lg().child("Updates"))
-            .child(div().text_sm().text_color(rgb(0xa6b4c8)).child(format!(
-                "Installed {} · {} · {}\nSource {}",
-                updates::VERSION,
-                updates::BUILD_CHANNEL,
-                std::env::consts::ARCH,
-                updates::COMMIT
-            )))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(self.theme.muted))
+                    .child(format!(
+                        "Installed {} · {} · {}\nSource {}",
+                        updates::VERSION,
+                        updates::BUILD_CHANNEL,
+                        std::env::consts::ARCH,
+                        updates::COMMIT
+                    )),
+            )
             .child(
                 div()
                     .text_sm()
@@ -96,7 +101,8 @@ impl Workspace {
                     .id("check-updates")
                     .p_2()
                     .rounded_md()
-                    .bg(rgb(0x275f54))
+                    .bg(rgb(self.theme.accent))
+                    .text_color(rgb(self.theme.base))
                     .cursor_pointer()
                     .child(if self.checking_update {
                         "Checking…"
@@ -109,7 +115,8 @@ impl Workspace {
                 div()
                     .id("automatic-updates")
                     .p_2()
-                    .bg(rgb(0x243248))
+                    .bg(rgb(self.theme.button))
+                    .hover(|style| style.bg(rgb(self.theme.selection)))
                     .cursor_pointer()
                     .child(if self.preferences.updates.automatic {
                         "Automatic daily checks: on"
@@ -129,7 +136,8 @@ impl Workspace {
                 div()
                     .id("update-channel")
                     .p_2()
-                    .bg(rgb(0x243248))
+                    .bg(rgb(self.theme.button))
+                    .hover(|style| style.bg(rgb(self.theme.selection)))
                     .cursor_pointer()
                     .child(format!(
                         "Release channel: {:?} ↻",
@@ -162,7 +170,7 @@ impl Workspace {
         div()
             .p_3()
             .rounded_md()
-            .bg(rgb(0x22473e))
+            .bg(rgb(self.theme.card))
             .flex()
             .flex_col()
             .gap_2()
@@ -194,7 +202,8 @@ impl Workspace {
                             .id("open-update-release")
                             .cursor_pointer()
                             .p_2()
-                            .bg(rgb(0x275f54))
+                            .bg(rgb(self.theme.accent))
+                            .text_color(rgb(self.theme.base))
                             .child("Release notes & download")
                             .on_click(move |_, _, cx| cx.open_url(&url)),
                     )
@@ -203,7 +212,8 @@ impl Workspace {
                             .id("dismiss-update")
                             .cursor_pointer()
                             .p_2()
-                            .bg(rgb(0x243248))
+                            .bg(rgb(self.theme.button))
+                            .hover(|style| style.bg(rgb(self.theme.selection)))
                             .child("Dismiss")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.preferences.updates.dismissed = Some(version.clone());

@@ -72,6 +72,7 @@ def main():
     with (app / 'Contents' / 'Info.plist').open('wb') as file:
         plistlib.dump(info, file)
     shutil.copy2(ROOT / 'LICENSE', resources / 'LICENSE')
+    shutil.copy2(ROOT / 'packaging/licenses/Catppuccin.txt', resources / 'Catppuccin-LICENSE.txt')
     for name in ('NOTICE', 'LICENSE-MIT', 'LICENSE-APACHE'):
         shutil.copy2(ROOT / 'crates/sigma-dock-terminal' / name, resources / ('terminal-' + name))
     shutil.copy2(ROOT / 'packaging/macos/INSTALL.txt', resources / 'INSTALL.txt')

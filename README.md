@@ -123,3 +123,5 @@ python3 scripts/feedback_smoke.py
 Terminal appearance is available from **⚙ Settings** in the bottom-right corner (Cmd/Ctrl+,). Change fonts, size, dark/light themes, individual RGB/ANSI colors, cursor shape/blinking, line spacing and padding without restarting workers. Preferences stay in the local state directory’s `preferences.json`; **Restore appearance defaults** resets this section.
 
 Update checks compare tagged semantic versions and require a compatible macOS installer. Preview enables prereleases; stable skips them. Development snapshots retain their Cargo version and source commit, but hashes are never ordered. [Update design and installation](docs/UPDATES.md) describes caching, privacy and the manual upgrade path.
+
+The interface follows system appearance using Catppuccin Latte (light) and Mocha (dark), including live system-mode changes. New terminal preferences also follow the system palette. **Terminal colors: custom** and edited colors preserve your choices independently; existing preference files retain their saved colors. Catppuccin attribution is included in app and crate packages.

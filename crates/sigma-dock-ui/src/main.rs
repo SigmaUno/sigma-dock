@@ -2,6 +2,7 @@
 mod appearance_ui;
 mod bootstrap;
 mod preferences;
+mod theme;
 mod update_ui;
 mod updates;
 
@@ -117,13 +118,15 @@ struct Workspace {
     settings_focus: gpui::FocusHandle,
     settings_editor: Option<(usize, String)>,
     settings_error: Option<String>,
+    theme: theme::Theme,
+    _appearance_subscription: gpui::Subscription,
     checker: Arc<std::sync::Mutex<updates::Checker>>,
     checking_update: bool,
     update_message: Option<String>,
     available_update: Option<updates::Available>,
 }
 impl Workspace {
-    fn new(client: Client, cx: &mut Context<Self>) -> Self {
+    fn new(client: Client, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let initial = client.workers();
         let (workers, error) = match initial {
             Ok(workers) => (workers, None),
@@ -167,7 +170,14 @@ impl Workspace {
             .as_ref()
             .err()
             .map(|error| format!("Preferences could not be loaded: {error}"));
+        let appearance_subscription = cx.observe_window_appearance(window, |this, window, cx| {
+            this.theme = theme::Theme::for_appearance(window.appearance());
+            this.refresh_terminal_appearance(cx);
+            cx.notify();
+        });
         Self {
+            theme: theme::Theme::for_appearance(window.appearance()),
+            _appearance_subscription: appearance_subscription,
             checker: Arc::new(std::sync::Mutex::new(updates::Checker::default())),
             checking_update: false,
             update_message: None,
@@ -216,7 +226,9 @@ impl Workspace {
             TerminalView::new(
                 writer,
                 reader,
-                self.preferences.appearance.apply(TerminalConfig::default()),
+                self.theme
+                    .terminal(&self.preferences.appearance)
+                    .apply(TerminalConfig::default()),
                 cx,
             )
             .with_resize_callback(move |cols, rows| {
@@ -380,9 +392,9 @@ impl Workspace {
             .p_2()
             .rounded_md()
             .bg(rgb(if self.active_field == index {
-                0x2c4058
+                self.theme.selection
             } else {
-                0x1d2b3e
+                self.theme.card
             }))
             .when(index == 0, |field| field.cursor_pointer())
             .when(index != 0, |field| field.cursor_text())
@@ -411,12 +423,17 @@ impl Render for Workspace {
             .flex_col()
             .gap_3()
             .p_4()
-            .bg(rgb(0x121925))
-            .child(div().text_xl().text_color(rgb(0x69e2bd)).child("SigmaDock"))
+            .bg(rgb(self.theme.sidebar))
+            .child(
+                div()
+                    .text_xl()
+                    .text_color(rgb(self.theme.accent))
+                    .child("SigmaDock"),
+            )
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(0x8b99ad))
+                    .text_color(rgb(self.theme.muted))
                     .child("LOCAL WORKSPACE"),
             );
         for worker in &self.workers {
@@ -427,7 +444,7 @@ impl Render for Workspace {
                     .cursor_pointer()
                     .p_2()
                     .rounded_md()
-                    .bg(rgb(0x1b2535))
+                    .bg(rgb(self.theme.card))
                     .child(worker.title.clone())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_worker(id.clone(), window, cx)
@@ -440,7 +457,8 @@ impl Render for Workspace {
                 .cursor_pointer()
                 .p_3()
                 .rounded_md()
-                .bg(rgb(0x275f54))
+                .bg(rgb(self.theme.accent))
+                .text_color(rgb(self.theme.base))
                 .child("+ New task")
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.form_open = !this.form_open;
@@ -458,12 +476,20 @@ impl Render for Workspace {
                 .child(
                     div()
                         .text_sm()
-                        .text_color(rgb(0x69e2bd))
+                        .text_color(rgb(self.theme.accent))
                         .child("LOCAL · NO ANALYTICS"),
                 ),
         );
         if let Some(error) = &self.error {
-            content = content.child(div().p_3().bg(rgb(0x502634)).child(error.clone()));
+            content = content.child(
+                div()
+                    .p_3()
+                    .bg(rgb(self.theme.card))
+                    .text_color(rgb(self.theme.error))
+                    .border_l_4()
+                    .border_color(rgb(self.theme.error))
+                    .child(error.clone()),
+            );
         }
         if let Some(update) = &self.available_update {
             content = content.child(self.update_notice(update, cx));
@@ -471,13 +497,16 @@ impl Render for Workspace {
         if self.form_open {
             let mut form = div()
                 .track_focus(&self.form_focus)
+                .border_1()
+                .border_color(rgb(self.theme.border))
+                .focus(|style| style.border_color(rgb(self.theme.focus)))
                 .on_key_down(cx.listener(Self::edit_key))
                 .flex()
                 .flex_col()
                 .gap_2()
                 .p_3()
                 .rounded_lg()
-                .bg(rgb(0x172031))
+                .bg(rgb(self.theme.panel))
                 .child(
                     div()
                         .flex()
@@ -495,10 +524,13 @@ impl Render for Workspace {
                         .p_2()
                         .rounded_md()
                         .bg(rgb(if self.agent == name {
-                            0x275f54
+                            self.theme.accent
                         } else {
-                            0x243248
+                            self.theme.button
                         }))
+                        .when(self.agent == name, |button| {
+                            button.text_color(rgb(self.theme.base))
+                        })
                         .child(name)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.agent = name.into();
@@ -512,7 +544,8 @@ impl Render for Workspace {
                     .cursor_pointer()
                     .p_2()
                     .rounded_md()
-                    .bg(rgb(0x275f54))
+                    .bg(rgb(self.theme.accent))
+                    .text_color(rgb(self.theme.base))
                     .child(if self.busy {
                         "Creating…"
                     } else {
@@ -524,6 +557,12 @@ impl Render for Workspace {
         }
         let mut board = div().flex().gap_3();
         for status in Column::ALL {
+            let status_color = match status {
+                Column::Working => self.theme.link,
+                Column::NeedsYou => self.theme.error,
+                Column::InReview => self.theme.warning,
+                Column::ReadyToMerge => self.theme.success,
+            };
             let mut lane = div()
                 .flex_1()
                 .min_h(px(170.))
@@ -532,11 +571,13 @@ impl Render for Workspace {
                 .gap_2()
                 .p_3()
                 .rounded_lg()
-                .bg(rgb(0x172031))
+                .bg(rgb(self.theme.panel))
+                .border_t_2()
+                .border_color(rgb(status_color))
                 .child(
                     div()
                         .text_sm()
-                        .text_color(rgb(0xa6b4c8))
+                        .text_color(rgb(self.theme.muted))
                         .child(status.label()),
                 );
             for worker in self
@@ -551,7 +592,8 @@ impl Render for Workspace {
                         .cursor_pointer()
                         .p_3()
                         .rounded_md()
-                        .bg(rgb(0x243248))
+                        .bg(rgb(self.theme.button))
+                        .hover(|style| style.bg(rgb(self.theme.selection)))
                         .flex()
                         .flex_col()
                         .gap_1()
@@ -559,7 +601,7 @@ impl Render for Workspace {
                         .child(
                             div()
                                 .text_sm()
-                                .text_color(rgb(0x90a5bf))
+                                .text_color(rgb(self.theme.muted))
                                 .child(format!("{} · :{}", worker.agent, worker.port)),
                         )
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -582,7 +624,7 @@ impl Render for Workspace {
                     div()
                         .flex_1()
                         .text_sm()
-                        .text_color(rgb(0x8b99ad))
+                        .text_color(rgb(self.theme.muted))
                         .child(format!(
                             "{} · {:?} · checks {:?} · review {:?}",
                             worker.title,
@@ -608,7 +650,8 @@ impl Render for Workspace {
                             .cursor_pointer()
                             .p_2()
                             .rounded_md()
-                            .bg(rgb(0x243248))
+                            .bg(rgb(self.theme.button))
+                            .hover(|style| style.bg(rgb(self.theme.selection)))
                             .child(label)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.run_action(method, json!({"worker_id":id}), cx)
@@ -622,7 +665,8 @@ impl Render for Workspace {
                             .cursor_pointer()
                             .p_2()
                             .rounded_md()
-                            .bg(rgb(0x275f54))
+                            .bg(rgb(self.theme.accent))
+                            .text_color(rgb(self.theme.base))
                             .child("Open PR")
                             .on_click(move |_, _, cx| cx.open_url(&url)),
                     );
@@ -635,7 +679,7 @@ impl Render for Workspace {
                         .max_h(px(80.))
                         .overflow_hidden()
                         .text_sm()
-                        .text_color(rgb(0x8b99ad))
+                        .text_color(rgb(self.theme.muted))
                         .child(self.details.clone()),
                 );
             }
@@ -647,7 +691,7 @@ impl Render for Workspace {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_color(rgb(0x8b99ad))
+                    .text_color(rgb(self.theme.muted))
                     .child("Select a worker to connect to its terminal"),
             );
         }
@@ -663,8 +707,8 @@ impl Render for Workspace {
                 }
             }))
             .flex()
-            .bg(rgb(0x0d1420))
-            .text_color(rgb(0xe1e8f2))
+            .bg(rgb(self.theme.base))
+            .text_color(rgb(self.theme.text))
             .font_family(".SystemUIFont")
             .child(sidebar)
             .child(content)
@@ -672,12 +716,16 @@ impl Render for Workspace {
                 div()
                     .id("terminal-settings")
                     .tab_index(0)
+                    .border_1()
+                    .border_color(rgb(self.theme.border))
+                    .focus(|style| style.border_color(rgb(self.theme.focus)))
                     .absolute()
                     .right(px(16.))
                     .bottom(px(12.))
                     .p_2()
                     .rounded_md()
-                    .bg(rgb(0x243248))
+                    .bg(rgb(self.theme.button))
+                    .hover(|style| style.bg(rgb(self.theme.selection)))
                     .cursor_pointer()
                     .child("⚙ Settings")
                     .tooltip(|_, cx| cx.new(|_| appearance_ui::SettingsTooltip).into())
@@ -717,9 +765,9 @@ fn main() -> Result<()> {
                 }),
                 ..Default::default()
             },
-            |_, cx| {
+            |window, cx| {
                 cx.new(|cx| {
-                    let mut workspace = Workspace::new(client, cx);
+                    let mut workspace = Workspace::new(client, window, cx);
                     if startup_error.is_some() {
                         workspace.error = startup_error;
                     }

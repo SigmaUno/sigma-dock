@@ -4,7 +4,7 @@ The **Build macOS installer** workflow builds on native Apple Silicon and Intel 
 
 Opening the installed app starts the bundled daemon when no compatible daemon is reachable. Closing the app leaves its workers running. Reopening reconnects. Logout/reboot and daemon crashes still lose live sessions; this does not install a login item or launch service. `--no-daemon` keeps explicit daemon management available. The bundled CLI is `/Applications/SigmaDock.app/Contents/MacOS/sdk`.
 
-Finder does not inherit terminal shell configuration. The bundled daemon receives the inherited PATH plus the app's helpers, `~/.local/bin`, `~/.cargo/bin`, `/opt/homebrew/bin` and `/usr/local/bin`. Custom shell setup and forge tokens are not loaded automatically; start the bundled daemon from a terminal with the intended environment if needed. Logs stay in the local state directory (`daemon.log`). No update checking is added.
+Finder does not inherit terminal shell configuration. The bundled daemon receives the inherited PATH plus the app's helpers, `~/.local/bin`, `~/.cargo/bin`, `/opt/homebrew/bin` and `/usr/local/bin`. Custom shell setup and forge tokens are not loaded automatically; start the bundled daemon from a terminal with the intended environment if needed. Logs stay in the local state directory (`daemon.log`). Manual update checks and opt-in daily checks are available in Settings; see [the update design](UPDATES.md).
 
 ## Build and download
 

@@ -19,6 +19,9 @@ pub enum Cursor {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct Appearance {
+    /// Existing preference files lack this field and retain their custom colors.
+    #[serde(default)]
+    pub follow_system: bool,
     pub font: String,
     pub size: f32,
     pub line_height: f32,
@@ -39,6 +42,7 @@ impl Default for Appearance {
                 | (c.b * 255.).round() as u32
         };
         Self {
+            follow_system: true,
             font: "monospace".into(),
             size: 14.,
             line_height: 1.2,
@@ -176,6 +180,14 @@ pub fn parse_color(text: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_preferences_keep_explicit_terminal_colors() {
+        let appearance: Appearance =
+            serde_json::from_value(serde_json::json!({"background":0x123456})).unwrap();
+        assert!(!appearance.follow_system);
+        assert_eq!(appearance.background, 0x123456);
+        assert!(Appearance::default().follow_system);
+    }
     #[test]
     fn colors_require_a_complete_rgb_value() {
         assert_eq!(parse_color("#aBc123"), Some(0xabc123));
