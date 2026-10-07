@@ -5494,11 +5494,14 @@ dependencies = [
  "clap",
  "gpui",
  "libc",
+ "objc2-app-kit",
+ "objc2-foundation",
  "reqwest",
  "semver",
  "serde",
  "serde_json",
  "sigmadock-core",
+ "sigmadock-pty",
  "sigmadock-terminal",
 ]
 

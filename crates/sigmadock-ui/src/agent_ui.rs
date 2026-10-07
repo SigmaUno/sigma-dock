@@ -84,20 +84,18 @@ impl Workspace {
     }
 
     fn choose_editor(&mut self, editor: Option<Editor>, cx: &mut Context<Self>) {
-        self.preferences.editor.editor = editor;
+        self.editor_override = editor;
         self.menu = None;
-        self.settings_error = self
-            .preferences
-            .save(&self.preferences_path)
-            .err()
-            .map(|error| error.to_string());
         cx.notify();
     }
 
     fn editor_menu(&self, cx: &mut Context<Self>) -> AnyElement {
-        let current = self.preferences.editor.editor;
+        let current = self.editor_override;
         let mut items = Vec::new();
         let mut choices: Vec<Editor> = editor::detected();
+        if !choices.contains(&Editor::Environment) {
+            choices.push(Editor::Environment);
+        }
         choices.push(Editor::System);
         if !self.preferences.editor.custom_command.trim().is_empty() {
             choices.push(Editor::Custom);
@@ -109,6 +107,11 @@ impl Workspace {
                     choice.label().into(),
                     current == Some(choice),
                 )
+                .child(crate::editor_icons::editor_icon(
+                    choice,
+                    px(16.),
+                    self.theme.text,
+                ))
                 .on_click(cx.listener(move |this, _, _, cx| this.choose_editor(Some(choice), cx)))
                 .into_any_element(),
             );
@@ -117,8 +120,8 @@ impl Workspace {
             self.menu_item(
                 "editor-auto".into(),
                 format!(
-                    "Automatic ({})",
-                    editor::EditorPreferences::default().resolved().label()
+                    "Saved default ({})",
+                    self.preferences.editor.resolved().label()
                 ),
                 current.is_none(),
             )
@@ -319,45 +322,52 @@ impl Workspace {
                     this.run_action("resume_worker", json!({"worker_id": stop_id}), cx)
                 }))
         });
-        let editor = self.preferences.editor.resolved();
+        let editor = self.active_editor();
         let editor_open = self.menu == Some(Menu::Editor);
-        header = header.child(
-            div()
-                .flex()
-                .flex_none()
-                .child(
-                    self.header_button("open-in-editor")
-                        .rounded_r_none()
-                        .child(icon(Icon::ExternalLink, px(14.), rgb(theme.accent)))
-                        .when(!self.compact, |button| {
-                            button.child(format!("Open in {}", editor.label()))
-                        })
-                        .tooltip(move |_, cx| {
-                            crate::keyboard_ui::tooltip(
-                                format!("Open the worktree in {} · ⌘⇧O", editor.label()),
-                                cx,
+        header =
+            header.child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .child(
+                        self.header_button("open-in-editor")
+                            .rounded_r_none()
+                            .child(crate::editor_icons::editor_icon(
+                                editor,
+                                px(14.),
+                                theme.accent,
+                            ))
+                            .when(!self.compact, |button| {
+                                button.child(format!("Open in {}", editor.label()))
+                            })
+                            .tooltip(move |_, cx| {
+                                crate::keyboard_ui::tooltip(
+                                    format!("Open the worktree in {} · ⌘⇧O", editor.label()),
+                                    cx,
+                                )
+                            })
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_in_editor(None, window, cx)
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                self.header_button("choose-editor")
+                                    .px_1p5()
+                                    .rounded_l_none()
+                                    .border_l_0()
+                                    .child(icon(Icon::ChevronDown, px(14.), rgb(theme.muted)))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.menu = (!editor_open).then_some(Menu::Editor);
+                                        cx.notify();
+                                    })),
                             )
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| this.open_in_editor(None, cx))),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            self.header_button("choose-editor")
-                                .px_1p5()
-                                .rounded_l_none()
-                                .border_l_0()
-                                .child(icon(Icon::ChevronDown, px(14.), rgb(theme.muted)))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.menu = (!editor_open).then_some(Menu::Editor);
-                                    cx.notify();
-                                })),
-                        )
-                        .when(editor_open, |anchor| anchor.child(self.editor_menu(cx))),
-                ),
-        );
+                            .when(editor_open, |anchor| anchor.child(self.editor_menu(cx))),
+                    ),
+            );
         let primary = worker
             .facts
             .pr_url
@@ -431,7 +441,7 @@ impl Workspace {
         let mut notices = div().flex().flex_col().gap_2().px_4().pt_2();
         let mut any_notice = true;
         notices = notices.child(self.scripts_panel(cx));
-        if let Some(error) = self.error_banner() {
+        if let Some(error) = self.error_banner(cx) {
             notices = notices.child(error);
             any_notice = true;
         }

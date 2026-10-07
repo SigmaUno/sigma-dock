@@ -7,6 +7,8 @@ mod checks_ui;
 mod ci_ui;
 mod diff_ui;
 mod editor;
+mod editor_icons;
+mod editor_terminal;
 mod ellipsis;
 mod events;
 mod icons;
@@ -199,6 +201,9 @@ struct Workspace {
     daemon_connected: bool,
     error: Option<String>,
     terminal: Option<Entity<TerminalView>>,
+    editor_pane: Option<editor_terminal::EditorPane>,
+    editor_override: Option<editor::Editor>,
+    editor_error: Option<String>,
     selected: Option<String>,
     form_open: bool,
     fork_source: Option<String>,
@@ -302,6 +307,15 @@ impl Workspace {
             .as_ref()
             .err()
             .map(|error| format!("Preferences could not be loaded: {error}"));
+        cx.on_app_quit(|this, cx| {
+            let session = this.editor_pane.as_ref().map(|pane| pane.session.clone());
+            cx.background_executor().spawn(async move {
+                if let Some(session) = session {
+                    let _ = session.stop();
+                }
+            })
+        })
+        .detach();
         let appearance_subscription = cx.observe_window_appearance(window, |this, window, cx| {
             this.theme = theme::Theme::for_appearance(window.appearance());
             this.refresh_terminal_appearance(cx);
@@ -384,6 +398,9 @@ impl Workspace {
             daemon_connected: false,
             error: None,
             terminal: None,
+            editor_pane: None,
+            editor_override: None,
+            editor_error: None,
             selected: None,
             form_open: false,
             fork_source: None,
@@ -447,6 +464,9 @@ impl Workspace {
         })
     }
     fn open_worker(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected.as_ref() != Some(&id) {
+            self.editor_override = None;
+        }
         self.settings_open = false;
         self.focused_berth = Some(id.clone());
         self.details.clear();
@@ -757,7 +777,7 @@ impl Drop for Workspace {
     }
 }
 impl Workspace {
-    fn error_banner(&self) -> Option<gpui::AnyElement> {
+    fn error_banner(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         self.error.as_ref().map(|error| {
             div()
                 .p_3()
@@ -766,6 +786,26 @@ impl Workspace {
                 .border_l_4()
                 .border_color(rgb(self.theme.error))
                 .child(error.clone())
+                .when(
+                    self.editor_error.is_some()
+                        && self.editor_error.as_ref() == self.error.as_ref(),
+                    |banner| {
+                        banner.child(
+                            div()
+                                .id("editor-error-settings")
+                                .cursor_pointer()
+                                .underline()
+                                .child("Choose an editor in Settings…")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_settings(
+                                        crate::settings_ui::Section::Editor,
+                                        window,
+                                        cx,
+                                    )
+                                })),
+                        )
+                    },
+                )
                 .into_any_element()
         })
     }
@@ -892,7 +932,7 @@ impl Workspace {
             .gap_4()
             .px_6()
             .py_5()
-            .children(self.error_banner())
+            .children(self.error_banner(cx))
             .when_some(self.task_notice.clone(), |content, notice| {
                 content.child(
                     div()
@@ -959,7 +999,16 @@ impl Render for Workspace {
             .text_color(rgb(self.theme.text))
             .font_family(".SystemUIFont")
             .child(sidebar)
-            .child(main)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .child(div().flex_1().min_h(px(0.)).child(main))
+                    .children(self.editor_terminal_panel(cx)),
+            )
     }
 }
 fn main() -> Result<()> {

@@ -194,12 +194,15 @@ impl Workspace {
         match workspace_shortcut(
             &event.keystroke,
             self.terminal.is_some(),
-            self.terminal.as_ref().is_some_and(|terminal| {
-                terminal
-                    .read(cx)
-                    .focus_handle()
-                    .contains_focused(window, cx)
-            }),
+            self.terminal
+                .iter()
+                .chain(self.editor_pane.iter().map(|pane| &pane.terminal))
+                .any(|terminal| {
+                    terminal
+                        .read(cx)
+                        .focus_handle()
+                        .contains_focused(window, cx)
+                }),
             self.form_open,
             self.settings_open,
         ) {
@@ -232,7 +235,7 @@ impl Workspace {
             }
             Some(Shortcut::Berths) => self.close_terminal(window, cx),
             Some(Shortcut::Inbox) => self.open_inbox(window, cx),
-            Some(Shortcut::OpenEditor) => self.open_in_editor(None, cx),
+            Some(Shortcut::OpenEditor) => self.open_in_editor(None, window, cx),
             Some(Shortcut::Project(0)) => {
                 self.view = crate::View::Berths;
                 self.select_project(None, window, cx)
