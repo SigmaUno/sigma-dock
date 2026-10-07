@@ -463,6 +463,7 @@ impl TerminalView {
         W: Write + Send + 'static,
         R: Read + Send + 'static,
     {
+        crate::fonts::register(cx);
         // Create event channel for terminal events
         let (event_tx, event_rx) = mpsc::channel();
 
@@ -924,7 +925,7 @@ impl TerminalView {
 
     pub fn update_config(&mut self, config: TerminalConfig, cx: &mut Context<Self>) {
         // Update renderer with new font settings and palette
-        self.renderer.font_family = config.font_family.clone();
+        self.renderer.font_family = crate::fonts::family(&config.font_family).into();
         self.renderer.font_size = config.font_size;
         self.renderer.line_height_multiplier = config.line_height_multiplier;
         self.renderer.palette = config.colors.clone();

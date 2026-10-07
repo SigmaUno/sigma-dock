@@ -184,6 +184,8 @@ struct Workspace {
     active_field: usize,
     agent: String,
     form_focus: gpui::FocusHandle,
+    /// The Inbox message box for the default agent.
+    composer_focus: gpui::FocusHandle,
     busy: bool,
     repo_picker_open: bool,
     details: String,
@@ -355,6 +357,7 @@ impl Workspace {
             active_field: 0,
             agent: "claude".into(),
             form_focus: cx.focus_handle(),
+            composer_focus: cx.focus_handle(),
             busy: false,
             repo_picker_open: false,
             details: String::new(),
@@ -837,6 +840,7 @@ fn main() -> Result<()> {
     };
     let app = Application::new().with_assets(icons::Assets);
     app.run(move |cx: &mut App| {
+        sigmadock_terminal::register_fonts(cx);
         let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
         cx.open_window(
             WindowOptions {

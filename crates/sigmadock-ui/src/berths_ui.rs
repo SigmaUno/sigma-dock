@@ -13,7 +13,7 @@ use sigmadock_core::{
 use sigmadock_terminal::{GpuiEventProxy, TerminalState};
 use std::time::Duration;
 
-const MONO: &str = "Menlo";
+const MONO: &str = sigmadock_terminal::DEFAULT_MONOSPACE_FONT;
 /// Matches the daemon's initial PTY size so previews lay out like the session.
 const PREVIEW_COLS: usize = 120;
 const PREVIEW_ROWS: usize = 30;
