@@ -12,6 +12,7 @@ mod inbox_ui;
 mod keyboard_ui;
 mod preferences;
 mod recovery_ui;
+mod settings_ui;
 mod summary_ui;
 mod theme;
 mod update_ui;
@@ -188,6 +189,8 @@ struct Workspace {
     preferences: preferences::Preferences,
     preferences_path: PathBuf,
     settings_open: bool,
+    settings_section: settings_ui::Section,
+    forge_form: Option<settings_ui::ForgeForm>,
     settings_focus: gpui::FocusHandle,
     settings_editor: Option<(usize, String)>,
     settings_error: Option<String>,
@@ -322,6 +325,8 @@ impl Workspace {
             preferences: loaded.unwrap_or_default(),
             preferences_path,
             settings_open: false,
+            settings_section: Default::default(),
+            forge_form: None,
             settings_focus: cx.focus_handle(),
             settings_editor: None,
             settings_error,
@@ -393,6 +398,7 @@ impl Workspace {
         })
     }
     fn open_worker(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_open = false;
         self.focused_berth = Some(id.clone());
         self.details.clear();
         self.usage_open = false;
@@ -765,7 +771,9 @@ impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.prepare_berth_focus(cx);
         let sidebar = self.sidebar(cx);
-        let main = if self.terminal.is_some() {
+        let main = if self.settings_open {
+            self.settings_page(cx)
+        } else if self.terminal.is_some() {
             self.agent_view(cx)
         } else if self.view == View::Inbox {
             self.inbox_view(cx)
@@ -793,9 +801,6 @@ impl Render for Workspace {
             .font_family(".SystemUIFont")
             .child(sidebar)
             .child(main)
-            .when(self.settings_open, |root| {
-                root.child(self.settings_panel(cx))
-            })
     }
 }
 fn main() -> Result<()> {

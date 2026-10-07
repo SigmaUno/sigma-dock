@@ -81,6 +81,7 @@ impl Workspace {
     }
 
     pub(crate) fn open_inbox(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_open = false;
         if self.terminal.is_some() {
             self.close_terminal(window, cx);
         }
@@ -678,7 +679,8 @@ impl Workspace {
                     .child("Nothing waits on you"),
             );
         }
-        let no_forge = self.workers.iter().all(|worker| worker.forge.is_none());
+        let no_forge = self.workers.iter().all(|worker| worker.forge.is_none())
+            && self.projects.iter().all(|project| project.forge.is_none());
         let mut notes: Vec<String> = self
             .inbox
             .data
@@ -692,8 +694,8 @@ impl Workspace {
         }
         if no_forge {
             notes.push(
-                "Configure a forge for a worker (sdk forge) to see assigned issues and review \
-                 requests here."
+                "Connect a project to GitHub or Forgejo in Settings → Forges to see assigned \
+                 issues and review requests here."
                     .into(),
             );
         }

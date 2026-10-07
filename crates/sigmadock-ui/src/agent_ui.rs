@@ -132,9 +132,7 @@ impl Workspace {
             self.menu_item("editor-settings".into(), "Editor settings…".into(), false)
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.menu = None;
-                    if !this.settings_open {
-                        this.toggle_settings(window, cx);
-                    }
+                    this.open_settings(crate::settings_ui::Section::Editor, window, cx);
                 }))
                 .into_any_element(),
         );

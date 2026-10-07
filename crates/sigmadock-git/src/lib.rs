@@ -207,6 +207,10 @@ fn git_raw(repo: &Path, args: &[&str]) -> Result<String> {
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
+/// URL of the `origin` remote.
+pub fn remote_url(repo: &Path) -> Result<String> {
+    git(repo, &["remote", "get-url", "origin"])
+}
 pub fn clean(path: &Path) -> Result<bool> {
     Ok(git(path, &["status", "--porcelain"])?.is_empty())
 }
