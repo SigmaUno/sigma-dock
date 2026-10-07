@@ -11,14 +11,12 @@ use sigmadock_core::{
     Status as DerivedStatus, Worker, status as derived_status, unix_time,
 };
 use sigmadock_terminal::{GpuiEventProxy, TerminalState};
-use std::time::Duration;
 
 const MONO: &str = "Menlo";
 /// Matches the daemon's initial PTY size so previews lay out like the session.
 const PREVIEW_COLS: usize = 120;
 const PREVIEW_ROWS: usize = 30;
 const PREVIEW_LINES: usize = 6;
-const PREVIEW_INTERVAL: Duration = Duration::from_millis(750);
 /// The daemon returns at most this many bytes per `output` call.
 const OUTPUT_CHUNK: usize = 64 * 1024;
 
@@ -141,13 +139,13 @@ pub(crate) fn status(worker: &Worker) -> Status {
 /// Headless screen for one berth, fed incrementally from the daemon's replay buffer.
 pub(crate) struct Preview {
     screen: TerminalState,
-    cursor: u64,
+    pub(crate) cursor: u64,
     geometry: (usize, usize),
     pub lines: Vec<String>,
 }
 
 impl Preview {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let (events, _) = std::sync::mpsc::channel();
         Self {
             screen: TerminalState::new(PREVIEW_COLS, PREVIEW_ROWS, GpuiEventProxy::new(events)),
@@ -156,7 +154,7 @@ impl Preview {
             lines: Vec::new(),
         }
     }
-    fn feed(&mut self, output: &Output) -> bool {
+    pub(crate) fn feed(&mut self, output: &Output) -> bool {
         self.cursor = output.cursor;
         // Keep the last known geometry when talking to an older daemon.
         let geometry = match (output.cols, output.rows) {
@@ -187,7 +185,7 @@ impl Preview {
     }
 }
 
-fn fetch_output(client: &Client, worker: &str, mut cursor: u64) -> Result<Vec<Output>> {
+pub(crate) fn fetch_output(client: &Client, worker: &str, mut cursor: u64) -> Result<Vec<Output>> {
     let mut outputs = Vec::new();
     // Preserve each response's geometry instead of combining differently sized chunks.
     // Catch up without stalling a tick on a full 1 MiB replay.
@@ -283,61 +281,6 @@ impl Workspace {
             .retain(|id, _| self.capacity.live.contains(id));
     }
 
-    pub(crate) fn spawn_preview_loop(&self, cx: &mut Context<Self>) {
-        let client = self.client.clone();
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(PREVIEW_INTERVAL).await;
-                let Ok(targets) = this.update(cx, |this, _| {
-                    this.capacity
-                        .live
-                        .iter()
-                        .map(|id| (id.clone(), this.previews.get(id).map_or(0, |p| p.cursor)))
-                        .collect::<Vec<_>>()
-                }) else {
-                    break;
-                };
-                if targets.is_empty() {
-                    continue;
-                }
-                let client = client.clone();
-                let updates = cx
-                    .background_executor()
-                    .spawn(async move {
-                        targets
-                            .into_iter()
-                            .filter_map(|(id, cursor)| {
-                                fetch_output(&client, &id, cursor).ok().map(|out| (id, out))
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .await;
-                if this
-                    .update(cx, |this, cx| {
-                        let mut changed = false;
-                        for (id, outputs) in updates {
-                            if !this.capacity.live.contains(&id) {
-                                continue;
-                            }
-                            let preview = this.previews.entry(id).or_insert_with(Preview::new);
-                            for output in outputs {
-                                changed |= preview.feed(&output);
-                            }
-                        }
-                        // Skip repaint while the full terminal covers the grid.
-                        if changed && this.terminal.is_none() {
-                            cx.notify();
-                        }
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
-
     pub(crate) fn current_project(&self) -> Option<&Project> {
         self.selected_project
             .as_ref()
@@ -393,6 +336,7 @@ impl Workspace {
     pub(crate) fn close_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.connection
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.output_wake.cancel_wait();
         self.terminal = None;
         self.focused_berth = self.selected.take();
         self.workspace_focus.focus(window);

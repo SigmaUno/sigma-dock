@@ -1,4 +1,6 @@
 //! Shared domain model and versioned local JSON-RPC transport.
+pub mod events;
+
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

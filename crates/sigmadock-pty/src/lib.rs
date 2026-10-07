@@ -171,6 +171,16 @@ impl Session {
         };
         (status, state.exit_code)
     }
+    /// Replay cursor, geometry and completion without copying terminal bytes.
+    pub fn output_key(&self) -> (u64, u16, u16, bool) {
+        let state = self.state.lock().unwrap();
+        (
+            state.cursor,
+            state.rows,
+            state.cols,
+            state.exited && state.eof,
+        )
+    }
     pub fn checkpoint_key(&self) -> (u64, u64, SessionState) {
         let state = self.state.lock().unwrap();
         (

@@ -3,6 +3,7 @@ mod appearance_ui;
 mod berths_ui;
 mod bootstrap;
 mod ci_ui;
+mod events_ui;
 mod icons;
 mod keyboard_ui;
 mod preferences;
@@ -29,8 +30,6 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    thread,
-    time::Duration,
 };
 #[derive(Parser)]
 struct Args {
@@ -63,6 +62,7 @@ struct RemoteReader {
     offset: usize,
     ended: bool,
     connected: Arc<AtomicBool>,
+    wake: Arc<events_ui::OutputWake>,
 }
 impl Read for RemoteReader {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
@@ -82,6 +82,7 @@ impl Read for RemoteReader {
             if self.ended {
                 return Ok(0);
             }
+            let generation = self.wake.generation();
             let output: Output = serde_json::from_value(
                 self.client
                     .call(
@@ -99,7 +100,7 @@ impl Read for RemoteReader {
                 self.pending.splice(0..0, b"\x1bc".iter().copied());
             }
             if self.pending.is_empty() && !self.ended {
-                thread::sleep(Duration::from_millis(25));
+                self.wake.wait(generation);
             }
         }
     }
@@ -137,6 +138,8 @@ struct Workspace {
     repo_picker_open: bool,
     details: String,
     connection: Arc<AtomicBool>,
+    output_wake: Arc<events_ui::OutputWake>,
+    event_shutdown: Arc<AtomicBool>,
     preferences: preferences::Preferences,
     preferences_path: PathBuf,
     settings_open: bool,
@@ -166,30 +169,6 @@ struct Workspace {
 impl Workspace {
     fn new(client: Client, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let initial = berths_ui::Snapshot::load(&client);
-        let poll_client = client.clone();
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_secs(2)).await;
-                let client = poll_client.clone();
-                let snapshot = cx
-                    .background_executor()
-                    .spawn(async move { berths_ui::Snapshot::load(&client) })
-                    .await;
-                if this
-                    .update(cx, |this, cx| {
-                        this.apply_snapshot(snapshot);
-                        if this.preferences.updates.due(updates::now()) {
-                            this.check_updates(false, cx);
-                        }
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
         let preferences_path = sigmadock_core::state_dir().join("preferences.json");
         let loaded = preferences::Preferences::load(&preferences_path);
         let settings_error = loaded
@@ -250,9 +229,11 @@ impl Workspace {
             repo_picker_open: false,
             details: String::new(),
             connection: Arc::new(AtomicBool::new(false)),
+            output_wake: Arc::new(events_ui::OutputWake::default()),
+            event_shutdown: Arc::new(AtomicBool::new(false)),
         };
         workspace.apply_snapshot(initial);
-        workspace.spawn_preview_loop(cx);
+        workspace.spawn_event_loop(cx);
         workspace.workspace_focus.focus(window);
         workspace
     }
@@ -267,6 +248,7 @@ impl Workspace {
         self.ci_error = None;
         self.ci_expanded = None;
         self.connection.store(false, Ordering::Relaxed);
+        self.output_wake.watch(id.clone());
         self.connection = Arc::new(AtomicBool::new(true));
         let reader = RemoteReader {
             client: self.client.clone(),
@@ -276,6 +258,7 @@ impl Workspace {
             offset: 0,
             ended: false,
             connected: self.connection.clone(),
+            wake: self.output_wake.clone(),
         };
         let writer = RemoteWriter {
             client: self.client.clone(),
@@ -521,6 +504,8 @@ impl Workspace {
 impl Drop for Workspace {
     fn drop(&mut self) {
         self.connection.store(false, Ordering::Relaxed);
+        self.event_shutdown.store(true, Ordering::Relaxed);
+        self.output_wake.cancel_wait();
     }
 }
 impl Render for Workspace {

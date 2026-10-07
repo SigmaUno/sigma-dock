@@ -1,3 +1,4 @@
+mod events;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use fs2::FileExt;
@@ -43,6 +44,7 @@ struct Args {
     idle_seconds: u64,
 }
 struct Daemon {
+    events: events::Hub,
     store: Store,
     workers: HashMap<String, Worker>,
     sessions: HashMap<String, Arc<Session>>,
@@ -306,6 +308,7 @@ impl Daemon {
                 self.store.context(&self.worker(&params)?.id)?,
             )?),
             "clear_session_context" => {
+                self.events.publish(sigmadock_core::events::Event::Resync);
                 let id = self.worker(&params)?.id.clone();
                 self.store.clear_context(&id)?;
                 if let Some(session) = self.sessions.get(&id) {
@@ -951,7 +954,11 @@ fn deliver_ci(
     }
     Ok(())
 }
-fn serve(mut stream: UnixStream, state: Arc<Mutex<Daemon>>) -> Result<()> {
+fn serve(
+    mut stream: UnixStream,
+    state: Arc<Mutex<Daemon>>,
+    shutdown: Arc<AtomicBool>,
+) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     let Some(frame) = read_frame(&mut BufReader::new(stream.try_clone()?))? else {
@@ -969,6 +976,10 @@ fn serve(mut stream: UnixStream, state: Arc<Mutex<Daemon>>) -> Result<()> {
         }
     };
     let valid = request["jsonrpc"] == "2.0" && request["method"].is_string();
+    if valid && request["method"] == "subscribe" && request.get("id").is_some() {
+        let receiver = state.lock().unwrap().events.subscribe();
+        return events::serve(stream, receiver, &shutdown, request["id"].clone());
+    }
     let result = if !valid {
         Err(anyhow::anyhow!("invalid JSON-RPC request"))
     } else if matches!(
@@ -1066,6 +1077,7 @@ fn main() -> Result<()> {
         ports.reserve(worker.port);
     }
     let state = Arc::new(Mutex::new(Daemon {
+        events: events::Hub::default(),
         store,
         workers,
         sessions: HashMap::new(),
@@ -1100,7 +1112,11 @@ fn main() -> Result<()> {
             if local_shutdown.load(Ordering::Relaxed) {
                 break;
             }
-            if let Err(error) = daemon.sync().and_then(|_| daemon.drain_queue()) {
+            if let Err(error) = daemon
+                .sync()
+                .and_then(|_| daemon.drain_queue())
+                .and_then(|_| events::observe(&mut daemon))
+            {
                 eprintln!("local supervision error: {error}");
             }
         }
@@ -1222,8 +1238,9 @@ fn main() -> Result<()> {
         connections.fetch_add(1, Ordering::SeqCst);
         let state = state.clone();
         let connections = connections.clone();
+        let connection_shutdown = shutdown.clone();
         thread::spawn(move || {
-            if let Err(error) = serve(stream, state) {
+            if let Err(error) = serve(stream, state, connection_shutdown) {
                 eprintln!("IPC: {error}");
             }
             connections.fetch_sub(1, Ordering::SeqCst);

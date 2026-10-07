@@ -67,3 +67,15 @@ Tasks retain their title, harness, prompt, base ref, forge configuration (enviro
 A durable starting marker is committed before launch. Worker publication and queue consumption occur in one SQLite transaction; interrupted starts become visible queue errors on restart and are not relaunched automatically. The queue is limited to 1,000 tasks, titles to 4 KiB and prompts to 32 KiB. Queued prompts are local task data in the private state database. They are not sent to an agent until launch. Reordering is not implemented.
 
 `remove_project` refuses projects with unarchived workers or waiting tasks. It hides an otherwise inactive project, retaining its repository, notes and archived history. Adding the repository again restores the same project ID. There is no force-delete mode. Native waiting-list and queued-count presentation remain tracked in #21.
+
+## Local push events
+
+`subscribe` opens a long-lived local JSON-RPC connection. The acknowledgement includes the current API version; subsequent notifications use `method: "event"` and a `params.type` discriminator: `resync`, `worker_changed`, `projects_changed`, `capacity_changed`, `queue_changed`, `output_available`, or `heartbeat`. Output notifications carry a worker ID, replay cursor, rows, columns and completion flag, never terminal bytes. Initial connection and reconnect require a full snapshot and replay catch-up; snapshots and `output` remain authoritative. Existing CLI/MCP RPCs are unchanged.
+
+The daemon detects changes during its 200 ms supervision tick. Each subscriber has a bounded 64-event queue; overflow disconnects that subscriber so it reconnects and resyncs. Socket writes happen outside the daemon lock, time out after two seconds, and idle streams receive a heartbeat every two seconds. Subscriptions share the existing 32-connection cap.
+
+The UI coalesces invalidations and preview reads at 750 ms intervals, fetching output only for notified workers, newly discovered berths, or a full resync. A 30-second fallback refresh catches missed recovery-context changes. The full terminal waits for notifications for its selected worker, with a 30-second catch-up timeout; disconnected subscriptions fall back to 750 ms reads while reconnecting. Lost wakeups are prevented by recording the notification generation before each output request. Resize and final PTY EOF also invalidate output even when the cursor does not advance.
+
+Run `python3 scripts/events_smoke.py` after `cargo build` to verify subscriptions, geometry, restart resync and a six-shell-worker idle RPC schedule comparison. The benchmark reproduces the old/new client schedules without launching GPUI; heartbeat frames are reported separately from RPC calls, and the slow resync has an amortized cost.
+
+Observed schedule benchmark on macOS with six idle shell workers and one open terminal: 46 RPC/s before, 0 RPC/s during a three-second subscription sample. The 30-second snapshot, preview and terminal catch-up adds approximately 0.4 RPC/s amortized; idle heartbeat notifications are about 0.5 frames/s on one persistent connection. These numbers describe the headless schedule reproduction, not a native UI profile.
