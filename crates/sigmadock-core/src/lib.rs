@@ -270,6 +270,11 @@ pub struct Session {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Output {
+    /// Current PTY geometry. Older daemons omit these additive fields.
+    #[serde(default)]
+    pub cols: Option<u16>,
+    #[serde(default)]
+    pub rows: Option<u16>,
     pub bytes: Vec<u8>,
     pub cursor: u64,
     pub truncated: bool,

@@ -80,8 +80,12 @@ with tempfile.TemporaryDirectory(prefix='sigma-smoke-', dir='/tmp') as temp:
         assert all(Path(w['worktree']).exists() for w in workers)
         rpc('spawn_worker', {'project_id': project['id'], 'title': 'overflow', 'agent': 'shell'}, error=True)
         w = workers[0]
+        initial_output = rpc('output', {'worker_id': w['id'], 'cursor': 0})
+        assert (initial_output['cols'], initial_output['rows']) == (120, 30)
         rpc('resize', {'worker_id': w['id'], 'rows': 40, 'cols': 100})
         rpc('resize', {'worker_id': w['id'], 'rows': 0, 'cols': 100}, error=True)
+        resized_output = rpc('output', {'worker_id': w['id'], 'cursor': 0})
+        assert (resized_output['cols'], resized_output['rows']) == (100, 40)
         rpc('input', {'worker_id': w['id'], 'bytes': list(b"printf 'SIGMA_PTY_OK\\n'\n")})
         wait_for(lambda: b'SIGMA_PTY_OK' in bytes(rpc('output', {'worker_id': w['id'], 'cursor': 0})['bytes']))
         assert 'one' in run(str(BIN / 'sdk'), '--socket', sock, 'ls')
