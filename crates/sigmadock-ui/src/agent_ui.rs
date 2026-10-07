@@ -15,8 +15,8 @@ use sigmadock_core::{SessionState, Worker};
 
 const MONO: &str = "Menlo";
 
-/// Narrowest the agent title shrinks before the branch chip must give way.
-const TITLE_MIN_WIDTH: f32 = 120.;
+/// How much faster the branch chip shrinks than the title when the header runs out of room.
+const BRANCH_SHRINK: f32 = 8.;
 
 impl Workspace {
     pub(crate) fn header_button(&self, id: impl Into<gpui::ElementId>) -> Stateful<Div> {
@@ -249,10 +249,10 @@ impl Workspace {
                 )
             })
             .child(
-                // The branch chip gives way before the title does.
+                // Short titles keep their natural width; the branch chip gives way first.
                 div()
                     .id("agent-title")
-                    .min_w(px(TITLE_MIN_WIDTH))
+                    .min_w(px(0.))
                     .flex_shrink()
                     .ellipsis()
                     .text_lg()
@@ -285,7 +285,10 @@ impl Workspace {
                         .flex()
                         .min_w(px(0.))
                         .max_w(px(160.))
-                        .flex_shrink()
+                        .map(|mut chip| {
+                            chip.style().flex_shrink = Some(BRANCH_SHRINK);
+                            chip
+                        })
                         .items_center()
                         .gap_1()
                         .px_2()
