@@ -77,3 +77,7 @@ The UI shares one subscription across its workspace, previews and open terminal.
 Subscriber queues are bounded to 64 events, with at most 16 subscriptions within the existing 32-connection limit. Fanout never blocks on client I/O under the daemon lock. A lagging subscriber is disconnected and reconnects/resyncs; writes have deadlines. Five-second heartbeats detect idle peer disconnects. UI disposal shuts down its socket to interrupt a blocked reader.
 
 `scripts/events_smoke.py` runs a real daemon with six shell workers and compares a headless RPC workload following the previous snapshot/preview/open-terminal intervals against event-driven selective fetching. On the development Mac, the two approximately six-second windows measured about 35.8 RPC/s (215 requests) versus 0 RPC/s (0 requests). The 30-second five-request resync contributes approximately 0.17 RPC/s outside the measured idle window. This measures the observer workload, not a rendered GUI or CPU usage; interactive terminal latency still requires visual qualification.
+
+## Proposed macOS menu bar supervision
+
+The pre-implementation [menu bar investigation](MENU_BAR.md) for #36 compares native adapters, recommends application-owned supervision, and defines attention/notification qualification. It does not describe an implemented capability.
