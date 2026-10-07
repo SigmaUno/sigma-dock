@@ -177,7 +177,8 @@ with open('received.txt','w') as out:
         notes_reply = mcp(p['id'], 'read_planning_notes', {})
         assert json.loads(notes_reply['content'][0]['text'])['text'] == 'Plan: repair failing tests'
         # Spawn remains explicitly enabled, and queues respect project scope.
-        rpc('set_max_workers', {'max_workers': 2})
+        # Berths are per project: one each fills both projects so new tasks wait.
+        rpc('set_max_workers', {'max_workers': 1})
         assert rpc('capacity')['in_use'] == 2
         denied = mcp(p['id'], 'spawn_worker', {'title': 'denied', 'agent': 'claude', 'queue': True})
         assert denied.get('isError') is True

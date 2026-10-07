@@ -352,11 +352,12 @@ pub fn parse_rfc3339(text: &str) -> Option<u64> {
     let seconds = days * 86_400 + hour * 3600 + minute * 60 + second - offset * 60;
     u64::try_from(seconds).ok()
 }
-/// Global berth usage: the same live-session count `check_capacity` enforces.
+/// Berth usage. Each project has its own `max_workers` berths, which the daemon enforces.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Capacity {
+    /// Berths per project, not a global limit.
     pub max_workers: usize,
-    /// Workers holding a berth, oldest first.
+    /// Workers holding a berth across all projects, in berth order.
     pub live: Vec<String>,
     #[serde(default)]
     pub in_use: usize,

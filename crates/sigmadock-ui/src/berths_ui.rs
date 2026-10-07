@@ -294,7 +294,7 @@ impl Workspace {
                     .map(|worker| worker.id.clone())
                     .collect();
                 Capacity {
-                    max_workers: live.len().max(5),
+                    max_workers: live.len().max(6),
                     live,
                     ..Default::default()
                 }
@@ -409,8 +409,16 @@ impl Workspace {
             .collect()
     }
 
-    pub(crate) fn global_full(&self) -> bool {
-        self.capacity.live.len() >= self.capacity.max_workers
+    /// Whether the project's own berths are all taken; projects do not share berths.
+    pub(crate) fn project_full(&self, project: &str) -> bool {
+        self.berths(Some(project)).len() >= self.capacity.max_workers
+    }
+
+    fn project_name(&self, id: &str) -> Option<&str> {
+        self.projects
+            .iter()
+            .find(|project| project.id == id)
+            .map(|project| project.name.as_str())
     }
 
     pub(crate) fn tone_color(&self, tone: Tone) -> u32 {
@@ -664,8 +672,7 @@ impl Workspace {
                         .text_color(rgb(theme.muted))
                         .child(match live {
                             0 => "idle".to_owned(),
-                            1 => "1 agent".to_owned(),
-                            n => format!("{n} agents"),
+                            n => format!("{n}/{}", self.capacity.max_workers),
                         }),
                 )
                 .tooltip({
@@ -707,6 +714,7 @@ impl Workspace {
         let theme = self.theme;
         let in_use = self.capacity.live.len();
         let max = self.capacity.max_workers;
+        let scope = self.selected_project.as_deref();
         let inbox_active = self.terminal.is_none() && self.view == crate::View::Inbox;
         let inbox_count = self.inbox_count();
         let mut projects = div().flex().flex_col().gap_0p5();
@@ -722,14 +730,10 @@ impl Workspace {
                     .child("Add a repository to dock agents"),
             );
         }
+        // Berths are per project: show the selected project's slots, or nothing for All berths.
         let mut capacity = div().flex().gap_1();
-        for slot in 0..max {
-            let color = self
-                .capacity
-                .live
-                .get(slot)
-                .and_then(|id| self.worker(id))
-                .map_or(theme.border, |worker| self.tone_color(status(worker).tone));
+        for (_, worker) in scope.map(|id| self.slots(Some(id))).unwrap_or_default() {
+            let color = worker.map_or(theme.border, |worker| self.tone_color(status(worker).tone));
             capacity = capacity.child(
                 div()
                     .h(px(6.))
@@ -776,7 +780,7 @@ impl Workspace {
                             .bg(rgb(theme.chip))
                             .text_xs()
                             .text_color(rgb(theme.muted))
-                            .child(format!("{in_use} / {max} berths")),
+                            .child(format!("{in_use} live")),
                     )
                     .tooltip(|_, cx| crate::keyboard_ui::tooltip("All berths · ⌘1".into(), cx))
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -921,7 +925,12 @@ impl Workspace {
                             .gap_1()
                             .text_xs()
                             .text_color(rgb(theme.muted))
-                            .child("Workers")
+                            .child(match scope {
+                                Some(id) => {
+                                    format!("Berths · {} of {max}", self.berths(Some(id)).len())
+                                }
+                                None => format!("{max} berths per project"),
+                            })
                             .child(capacity),
                     )
                     .child(
@@ -979,14 +988,17 @@ impl Workspace {
         let project = self.current_project();
         let name = project.map_or_else(|| "All berths".to_owned(), |p| p.name.clone());
         let here = self.berths(project.map(|p| p.id.as_str())).len();
-        let in_use = self.capacity.live.len();
         let max = self.capacity.max_workers;
+        let summary = match project {
+            Some(_) => format!("{here} of {max} berths in use"),
+            None => format!(
+                "{here} berth{} live across projects · {max} per project",
+                if here == 1 { "" } else { "s" }
+            ),
+        };
         let mut pips = div().flex().items_center().gap_1();
-        for slot in 1..=max {
-            let worker = self
-                .berths(None)
-                .into_iter()
-                .find(|worker| worker.berth == Some(slot as u8));
+        let slots = project.map(|p| self.slots(Some(&p.id))).unwrap_or_default();
+        for (_, worker) in slots {
             pips = pips.child(match worker {
                 Some(worker) => self.dot(self.tone_color(status(worker).tone), 9.),
                 None => div()
@@ -1018,10 +1030,7 @@ impl Workspace {
                             .gap_3()
                             .text_sm()
                             .text_color(rgb(theme.muted))
-                            .child(format!(
-                                "{here} berth{} here · {in_use} of {max} in use overall",
-                                if here == 1 { "" } else { "s" }
-                            ))
+                            .child(summary)
                             .child(pips),
                     ),
             )
@@ -1130,7 +1139,14 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn berth(&self, number: usize, worker: &Worker, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// `index` is the grid position for keyboard moves; `number` is the berth shown.
+    fn berth(
+        &self,
+        index: usize,
+        number: usize,
+        worker: &Worker,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let theme = self.theme;
         let status = status(worker);
         let color = self.tone_color(status.tone);
@@ -1218,9 +1234,11 @@ impl Workspace {
             .track_focus(&self.berth_focus[&focus_key])
             .focus(|style| style.border_color(rgb(theme.focus)))
             .tooltip(move |_, cx| crate::keyboard_ui::tooltip(hint.clone(), cx))
-            .on_key_down(cx.listener(move |this, event, window, cx| {
-                this.berth_key(number - 1, event, window, cx)
-            }))
+            .on_key_down(
+                cx.listener(move |this, event, window, cx| {
+                    this.berth_key(index, event, window, cx)
+                }),
+            )
             .cursor_pointer()
             .flex()
             .flex_col()
@@ -1296,6 +1314,21 @@ impl Workspace {
                             .text_color(rgb(theme.muted))
                             .child(agent_label(&worker.agent).to_owned()),
                     )
+                    .when_some(
+                        self.selected_project
+                            .is_none()
+                            .then(|| self.project_name(&worker.project_id))
+                            .flatten(),
+                        |row, name| {
+                            row.child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(name.to_owned()),
+                            )
+                        },
+                    )
                     .child(icon(Icon::GitBranch, px(14.), rgb(theme.muted)))
                     .child(
                         div()
@@ -1363,11 +1396,10 @@ impl Workspace {
 
     fn empty_berth(&self, number: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
-        let occupied = self
-            .berths(None)
-            .iter()
-            .any(|worker| worker.berth == Some(number as u8));
-        let full = self.global_full() || occupied || number > self.capacity.max_workers;
+        let project = self.selected_project.as_deref();
+        let in_use = project.map_or(0, |id| self.berths(Some(id)).len());
+        let full =
+            project.is_none_or(|id| self.project_full(id)) || number > self.capacity.max_workers;
         div()
             .id(SharedString::from(format!("empty-berth-{number}")))
             .tab_index(0)
@@ -1409,16 +1441,13 @@ impl Workspace {
             .when(full, |berth| {
                 berth
                     .opacity(0.55)
-                    .child(if occupied {
-                        "Occupied in another project"
-                    } else if number > self.capacity.max_workers {
+                    .child(if number > self.capacity.max_workers {
                         "Outside current capacity"
                     } else {
                         "No free berth"
                     })
                     .child(div().text_xs().child(format!(
-                        "{} of {} in use across projects",
-                        self.capacity.live.len(),
+                        "{in_use} of {} in use in this project",
                         self.capacity.max_workers
                     )))
             })
@@ -1444,16 +1473,31 @@ impl Workspace {
 
     /// Grid slots in berth-number order: the worker docked at each number, if any.
     /// Workers keep stable berth numbers, so occupied slots can have gaps between them.
+    /// Numbers are per project, so All berths lists live berths without free slots.
     pub(crate) fn slots(&self, project: Option<&str>) -> Vec<(usize, Option<&Worker>)> {
-        slot_layout(self.berths(project), self.capacity.max_workers)
+        match project {
+            Some(_) => slot_layout(self.berths(project), self.capacity.max_workers),
+            None => self
+                .berths(None)
+                .into_iter()
+                .map(|worker| (worker.berth.map_or(0, usize::from), Some(worker)))
+                .collect(),
+        }
     }
 
     pub(crate) fn grid(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let project = self.current_project().map(|p| p.id.clone());
         let mut grid = div().grid().grid_cols(3).gap_4();
-        for (number, worker) in self.slots(project.as_deref()) {
+        if project.is_none() && self.capacity.live.is_empty() {
+            return div()
+                .text_sm()
+                .text_color(rgb(self.theme.muted))
+                .child("No live berths. Pick a project to dock a task.")
+                .into_any_element();
+        }
+        for (index, (number, worker)) in self.slots(project.as_deref()).into_iter().enumerate() {
             grid = grid.child(match worker {
-                Some(worker) => self.berth(number, worker, cx),
+                Some(worker) => self.berth(index, number, worker, cx),
                 None => self.empty_berth(number, cx),
             });
         }

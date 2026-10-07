@@ -36,7 +36,8 @@ struct Args {
     state_dir: PathBuf,
     #[arg(long, env = "SIGMA_DOCK_SOCKET")]
     socket: Option<PathBuf>,
-    #[arg(long)]
+    /// Berths each project may hold at once; overrides the persisted setting for this run.
+    #[arg(long, alias = "berths-per-project")]
     max_workers: Option<usize>,
     #[arg(long)]
     mcp_binary: Option<PathBuf>,
@@ -459,10 +460,14 @@ impl Daemon {
                 // Validate typed task data before persisting anything or checking capacity.
                 let task = self.task(&params)?;
                 params["base"] = json!(task.base);
-                if self.free_berth(None).is_err() || self.store.queued_count()? > 0 {
+                if self.free_berth(&task.project_id, None).is_err()
+                    || self.project_waiting(&task.project_id)?
+                {
                     if params["queue"] != true {
-                        self.check_capacity()?;
-                        bail!("waiting tasks take priority; use queue: true to wait for a berth");
+                        self.free_berth(&task.project_id, None)?;
+                        bail!(
+                            "waiting tasks in this project take priority; use queue: true to wait for a berth"
+                        );
                     }
                     let position = self.store.queued_count()? + 1;
                     if position > 1000 {
@@ -580,10 +585,12 @@ impl Daemon {
                     );
                 }
                 if worker.role == WorkerRole::Worker {
-                    if self.store.queued_count()? > 0 {
-                        bail!("waiting tasks take priority; resume after the queue clears");
+                    if self.project_waiting(&worker.project_id)? {
+                        bail!(
+                            "waiting tasks in this project take priority; resume after they start"
+                        );
                     }
-                    worker.berth = Some(self.free_berth(worker.berth)?);
+                    worker.berth = Some(self.free_berth(&worker.project_id, worker.berth)?);
                 } else {
                     worker.berth = None;
                 }
@@ -759,7 +766,7 @@ impl Daemon {
         let prompt = params["prompt"].as_str();
         Harness(agent.clone()).command(prompt, false)?;
         let berth = if role == WorkerRole::Worker {
-            Some(self.free_berth(None)?)
+            Some(self.free_berth(&project.id, None)?)
         } else {
             None
         };
@@ -902,13 +909,23 @@ impl Daemon {
             starting: false,
         })
     }
+    /// Starts waiting tasks in FIFO order. Berths are per project, so a full or
+    /// failed project only holds back its own later tasks.
     fn drain_queue(&mut self) -> Result<()> {
-        while self.free_berth(None).is_ok() {
-            let Some(mut task) = self.store.next_queued()? else {
-                break;
-            };
-            if task.last_error.is_some() || task.starting {
-                break;
+        if self.store.queued_count()? == 0 {
+            return Ok(());
+        }
+        let mut blocked = std::collections::HashSet::new();
+        for mut task in self.store.queue()? {
+            if blocked.contains(&task.project_id) {
+                continue;
+            }
+            if task.last_error.is_some()
+                || task.starting
+                || self.free_berth(&task.project_id, None).is_err()
+            {
+                blocked.insert(task.project_id.clone());
+                continue;
             }
             task.starting = true;
             self.store.save_queued(&task)?;
@@ -918,7 +935,7 @@ impl Daemon {
                 task.starting = false;
                 task.last_error = Some(task_text(&error.to_string(), 4096));
                 self.store.save_queued(&task)?;
-                break;
+                blocked.insert(task.project_id);
             }
         }
         Ok(())
@@ -959,24 +976,29 @@ impl Daemon {
             live: live.into_iter().map(|worker| worker.id.clone()).collect(),
         })
     }
-    fn free_berth(&self, previous: Option<u8>) -> Result<u8> {
+    /// A free slot among the project's own berths; `max_workers` is a per-project limit.
+    fn free_berth(&self, project_id: &str, previous: Option<u8>) -> Result<u8> {
         let occupied: Vec<_> = self
             .sessions
             .iter()
             .filter(|(_, session)| session.facts().0 != SessionState::Exited)
             .filter_map(|(id, _)| self.workers.get(id))
-            .filter(|worker| worker.role == WorkerRole::Worker)
+            .filter(|worker| worker.role == WorkerRole::Worker && worker.project_id == project_id)
             .filter_map(|worker| worker.berth)
             .collect();
         choose_berth(self.max_workers, &occupied, previous)
     }
-    fn check_capacity(&self) -> Result<()> {
-        self.free_berth(None).map(|_| ())
+    fn project_waiting(&self, project_id: &str) -> Result<bool> {
+        Ok(self
+            .store
+            .queue()?
+            .iter()
+            .any(|task| task.project_id == project_id))
     }
 }
 fn choose_berth(max: usize, occupied: &[u8], previous: Option<u8>) -> Result<u8> {
     if occupied.len() >= max {
-        bail!("maximum concurrent workers reached");
+        bail!("no free berth in this project");
     }
     if let Some(slot) = previous
         && usize::from(slot) <= max
@@ -987,7 +1009,7 @@ fn choose_berth(max: usize, occupied: &[u8], previous: Option<u8>) -> Result<u8>
     }
     (1..=max as u8)
         .find(|slot| !occupied.contains(slot))
-        .context("maximum concurrent workers reached")
+        .context("no free berth in this project")
 }
 fn string<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
     value[field]
@@ -1503,7 +1525,7 @@ fn main() -> Result<()> {
     fs::set_permissions(&db, fs::Permissions::from_mode(0o600))?;
     store.mark_disconnected()?;
     store.recover_queue()?;
-    let max_workers = args.max_workers.or(store.max_workers()?).unwrap_or(5);
+    let max_workers = args.max_workers.or(store.max_workers()?).unwrap_or(6);
     if !(1..=255).contains(&max_workers) {
         bail!("max-workers must be 1..255");
     }
@@ -1719,13 +1741,13 @@ mod berth_tests {
         assert_eq!(choose_berth(5, &[1, 2, 3], Some(2)).unwrap(), 4);
         assert_eq!(
             choose_berth(2, &[1, 4], None).unwrap_err().to_string(),
-            "maximum concurrent workers reached"
+            "no free berth in this project"
         );
         // An above-limit session stays put; its old slot cannot be reassigned.
         assert_eq!(choose_berth(2, &[4], Some(4)).unwrap(), 1);
         assert_eq!(
             choose_berth(2, &[1, 2], None).unwrap_err().to_string(),
-            "maximum concurrent workers reached"
+            "no free berth in this project"
         );
     }
 }
