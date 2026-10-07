@@ -22,3 +22,14 @@ clap = { version = "4", features = ["derive", "env"] }
 crossterm = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
+
+# Rust 1.96 can strip proc-macro dylibs into a LINKEDIT layout rejected by
+# macOS 27. Keep compile-time debug info; final application profiles stay unchanged.
+# https://github.com/rust-lang/rust/issues/157750
+[profile.dev.build-override]
+debug = 2
+strip = "none"
+
+[profile.release.build-override]
+debug = 2
+strip = "none"

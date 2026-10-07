@@ -618,6 +618,9 @@ mod tests {
                         result => panic!("mock accept: {result:?}"),
                     }
                 };
+                // Darwin may inherit the listener's nonblocking flag. Only accept is
+                // polled; request-body reads must wait for the client to send bytes.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
