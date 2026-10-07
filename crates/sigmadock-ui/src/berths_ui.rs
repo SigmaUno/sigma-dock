@@ -344,7 +344,7 @@ impl Workspace {
     }
 
     /// Live workers in berth order, optionally limited to one project.
-    fn berths(&self, project: Option<&str>) -> Vec<&Worker> {
+    pub(crate) fn berths(&self, project: Option<&str>) -> Vec<&Worker> {
         self.capacity
             .live
             .iter()
@@ -353,7 +353,7 @@ impl Workspace {
             .collect()
     }
 
-    fn global_full(&self) -> bool {
+    pub(crate) fn global_full(&self) -> bool {
         self.capacity.live.len() >= self.capacity.max_workers
     }
 
@@ -380,18 +380,24 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(crate) fn close_terminal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.connection
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.terminal = None;
         self.focused_berth = self.selected.take();
+        self.workspace_focus.focus(window);
+        if let Some(id) = &self.focused_berth
+            && let Some(handle) = self.berth_focus.get(&format!("berth-{id}"))
+        {
+            handle.focus(window);
+        }
         self.details.clear();
         self.usage_open = false;
         self.ci_open = false;
         cx.notify();
     }
 
-    fn run_berth_action(
+    pub(crate) fn run_berth_action(
         &mut self,
         action: &Action,
         id: String,
@@ -469,6 +475,8 @@ impl Workspace {
     ) -> gpui::AnyElement {
         let theme = self.theme;
         let active = self.selected_project == project;
+        let hint = format!("{title} · Enter to select · ⌘1 All berths, ⌘2–⌘9 projects");
+        let key_project = project.clone();
         let berths = self.berths(project.as_deref());
         let needs = self
             .workers
@@ -485,6 +493,19 @@ impl Workspace {
         }
         div()
             .id(SharedString::from(key))
+            .tab_index(0)
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .focus(|style| style.border_color(rgb(theme.focus)))
+            .tooltip(move |_, cx| crate::keyboard_ui::tooltip(hint.clone(), cx))
+            .on_key_down(
+                cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.select_project(key_project.clone(), window, cx);
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .flex()
             .flex_col()
             .gap_1()
@@ -539,10 +560,8 @@ impl Workspace {
                     ),
             )
             .child(dots)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.selected_project = project.clone();
-                this.focused_berth = None;
-                cx.notify();
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.select_project(project.clone(), window, cx);
             }))
             .into_any_element()
     }
@@ -578,6 +597,10 @@ impl Workspace {
         let link = |id: &'static str, glyph: Icon, label: String| {
             div()
                 .id(id)
+                .tab_index(0)
+                .border_1()
+                .border_color(gpui::transparent_black())
+                .focus(|style| style.border_color(rgb(theme.focus)))
                 .flex()
                 .items_center()
                 .gap_2()
@@ -618,6 +641,12 @@ impl Workspace {
             )
             .child(
                 link("add-repository", Icon::Plus, "Add repository…".into())
+                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.add_repository(cx);
+                            cx.stop_propagation();
+                        }
+                    }))
                     .on_click(cx.listener(|this, _, _, cx| this.add_repository(cx))),
             )
             .child(div().h(px(1.)).bg(rgb(theme.border)))
@@ -627,6 +656,13 @@ impl Workspace {
                     Icon::Terminal,
                     format!("Unfinished sessions  {}", self.recovery_entries.len()),
                 )
+                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.recovery_open = !this.recovery_open;
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
+                }))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.recovery_open = !this.recovery_open;
                     cx.notify();
@@ -709,6 +745,17 @@ impl Workspace {
                     .text_color(rgb(theme.base))
                     .font_weight(FontWeight::MEDIUM)
                     .child("+  New task")
+                    .tab_index(0)
+                    .border_1()
+                    .border_color(gpui::transparent_black())
+                    .focus(|style| style.border_color(rgb(theme.focus)))
+                    .tooltip(|_, cx| crate::keyboard_ui::tooltip("New task · ⌘N".into(), cx))
+                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.open_new_task(window, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
                     .on_click(cx.listener(|this, _, window, cx| this.open_new_task(window, cx))),
             )
             .into_any_element()
@@ -739,9 +786,22 @@ impl Workspace {
             let status = status(worker);
             let color = self.tone_color(status.tone);
             let id = worker.id.clone();
+            let key_id = id.clone();
+            let hint = format!("{} · {} · Enter to focus berth", worker.title, status.pill);
             items = items.child(
                 div()
                     .id(SharedString::from(format!("needs-{id}")))
+                    .tab_index(0)
+                    .focus(|style| style.border_color(rgb(theme.focus)))
+                    .tooltip(move |_, cx| crate::keyboard_ui::tooltip(hint.clone(), cx))
+                    .on_key_down(cx.listener(
+                        move |this, event: &gpui::KeyDownEvent, window, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                this.focus_worker_berth(&key_id, window, cx);
+                                cx.stop_propagation();
+                            }
+                        },
+                    ))
                     .flex()
                     .items_center()
                     .gap_2()
@@ -756,9 +816,8 @@ impl Workspace {
                     .child(self.dot(color, 7.))
                     .child(worker.title.clone())
                     .child(div().text_color(rgb(color)).child(status.pill))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.focused_berth = Some(id.clone());
-                        cx.notify();
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.focus_worker_berth(&id, window, cx);
                     })),
             );
         }
@@ -787,6 +846,11 @@ impl Workspace {
         let glow = matches!(status.tone, Tone::Input | Tone::Blocked);
         let focused = self.focused_berth.as_deref() == Some(&worker.id);
         let id = worker.id.clone();
+        let focus_key = format!("berth-{id}");
+        let hint = format!(
+            "Berth {number}: {} · {} · Enter: terminal · ⌘Enter: action · Arrow keys: move",
+            worker.title, status.pill
+        );
         let mut preview = div()
             .h(px(PREVIEW_LINES as f32 * 16. + 16.))
             .p_2()
@@ -815,8 +879,28 @@ impl Workspace {
             };
             let pr = matches!(action, Action::OpenPr(_));
             let id = id.clone();
+            let key_id = id.clone();
+            let key_action = action.clone();
             div()
                 .id(SharedString::from(format!("berth-action-{id}")))
+                .tab_index(0)
+                .border_2()
+                .border_color(gpui::transparent_black())
+                .focus(|style| style.border_color(rgb(theme.focus)))
+                .tooltip(move |_, cx| {
+                    crate::keyboard_ui::tooltip(
+                        format!("{label} · ⌘Enter from berth, Enter on action"),
+                        cx,
+                    )
+                })
+                .on_key_down(
+                    cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.run_berth_action(&key_action, key_id.clone(), window, cx);
+                            cx.stop_propagation();
+                        }
+                    }),
+                )
                 .flex()
                 .items_center()
                 .gap_1p5()
@@ -838,7 +922,14 @@ impl Workspace {
                 }))
         });
         div()
-            .id(SharedString::from(format!("berth-{}", worker.id)))
+            .id(SharedString::from(focus_key.clone()))
+            .tab_index(0)
+            .track_focus(&self.berth_focus[&focus_key])
+            .focus(|style| style.border_color(rgb(theme.focus)))
+            .tooltip(move |_, cx| crate::keyboard_ui::tooltip(hint.clone(), cx))
+            .on_key_down(cx.listener(move |this, event, window, cx| {
+                this.berth_key(number - 1, event, window, cx)
+            }))
             .cursor_pointer()
             .flex()
             .flex_col()
@@ -948,6 +1039,25 @@ impl Workspace {
         let full = self.global_full();
         div()
             .id(SharedString::from(format!("empty-berth-{number}")))
+            .tab_index(0)
+            .track_focus(&self.berth_focus[&format!("empty-berth-{number}")])
+            .focus(|style| style.border_color(rgb(theme.focus)))
+            .tooltip(move |_, cx| {
+                crate::keyboard_ui::tooltip(
+                    format!(
+                        "Berth {number}: {} · Arrow keys: move",
+                        if full {
+                            "No free berth"
+                        } else {
+                            "Enter: dock a task · ⌘N: new task"
+                        }
+                    ),
+                    cx,
+                )
+            })
+            .on_key_down(cx.listener(move |this, event, window, cx| {
+                this.berth_key(number - 1, event, window, cx)
+            }))
             .min_h(px(250.))
             .flex()
             .flex_col()

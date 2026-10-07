@@ -88,6 +88,23 @@ Automatic feedback is off by default and waits for an idle coding worker with fa
 
 The native window shows **berths**: one slot per live session, up to the daemon's `--max-workers` limit. A berth shows the task, harness, branch, port, a low-rate terminal preview and one contextual action (**Reply**, **Send CI to agent** or **Open PR**); click it for the full terminal. The project sidebar filters berths by repository, a needs-you strip lists blocked workers, and a side panel lists moored workers (session ended, not archived) and today's departures. Capacity is global: a project can show free berths while the overall limit is reached, in which case empty berths are disabled.
 
+Keyboard navigation on macOS:
+
+| Shortcut | Action |
+|---|---|
+| Tab / Shift+Tab | Move focus between projects, needs-you items, berths and their actions |
+| Arrow keys on a berth | Move through the three-slot grid, including empty slots |
+| Enter on a berth | Open its terminal; on a free empty berth, open the task form |
+| ⌘Enter on a berth | Run its contextual action (Reply, Send CI to agent, or Open PR) |
+| ⌘[ | Return from the full terminal to the previous berth |
+| ⌘1 | Show All berths |
+| ⌘2–⌘9 | Select the first eight projects in sidebar order |
+| ⌘N / ⌘, | New task / Settings |
+
+Focused controls use the theme's focus ring. Tooltips include berth number, task title, status and shortcuts. In the full terminal, plain Escape, Tab, Enter and arrow keys continue to go to the agent. The task form and settings keep their own input handling.
+
+GPUI 0.2.2 does not expose accessibility labels for these custom controls. Tooltips and visible labels do not establish VoiceOver support; native screen-reader qualification remains pending.
+
 Each worker's status is computed, never set manually:
 
 - **Working:** active or idle without a PR or blocker.
