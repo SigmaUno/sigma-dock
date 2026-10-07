@@ -1,5 +1,7 @@
 //! Native board and reconnectable terminal, backed by the daemon's PTYs.
+mod appearance_ui;
 mod bootstrap;
+mod preferences;
 
 use anyhow::Result;
 use clap::Parser;
@@ -7,9 +9,9 @@ use gpui::{
     App, Application, Bounds, Context, Entity, SharedString, Window, WindowBounds, WindowOptions,
     div, prelude::*, px, rgb, size,
 };
-use gpui_terminal::{TerminalConfig, TerminalView};
 use serde_json::json;
 use sigma_dock_core::{Client, Column, Output, Worker, column, socket_path};
+use sigma_dock_terminal::{TerminalConfig, TerminalView};
 use std::{
     io::{self, Read, Write},
     path::PathBuf,
@@ -107,6 +109,12 @@ struct Workspace {
     repo_picker_open: bool,
     details: String,
     connection: Arc<AtomicBool>,
+    preferences: preferences::Preferences,
+    preferences_path: PathBuf,
+    settings_open: bool,
+    settings_focus: gpui::FocusHandle,
+    settings_editor: Option<(usize, String)>,
+    settings_error: Option<String>,
 }
 impl Workspace {
     fn new(client: Client, cx: &mut Context<Self>) -> Self {
@@ -144,7 +152,19 @@ impl Workspace {
             }
         })
         .detach();
+        let preferences_path = sigma_dock_core::state_dir().join("preferences.json");
+        let loaded = preferences::Preferences::load(&preferences_path);
+        let settings_error = loaded
+            .as_ref()
+            .err()
+            .map(|error| format!("Preferences could not be loaded: {error}"));
         Self {
+            preferences: loaded.unwrap_or_default(),
+            preferences_path,
+            settings_open: false,
+            settings_focus: cx.focus_handle(),
+            settings_editor: None,
+            settings_error,
             client,
             workers,
             error,
@@ -180,14 +200,18 @@ impl Workspace {
         let resize_client = self.client.clone();
         let resize_worker = id.clone();
         let terminal = cx.new(|cx| {
-            TerminalView::new(writer, reader, TerminalConfig::default(), cx).with_resize_callback(
-                move |cols, rows| {
-                    let _ = resize_client.call(
-                        "resize",
-                        json!({"worker_id":resize_worker,"cols":cols,"rows":rows}),
-                    );
-                },
+            TerminalView::new(
+                writer,
+                reader,
+                self.preferences.appearance.apply(TerminalConfig::default()),
+                cx,
             )
+            .with_resize_callback(move |cols, rows| {
+                let _ = resize_client.call(
+                    "resize",
+                    json!({"worker_id":resize_worker,"cols":cols,"rows":rows}),
+                );
+            })
         });
         terminal.read(cx).focus_handle().focus(window);
         self.terminal = Some(terminal);
@@ -613,12 +637,45 @@ impl Render for Workspace {
         }
         div()
             .size_full()
+            .relative()
+            .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if event.keystroke.key == ","
+                    && (event.keystroke.modifiers.platform || event.keystroke.modifiers.control)
+                {
+                    this.toggle_settings(window, cx);
+                    cx.stop_propagation();
+                }
+            }))
             .flex()
             .bg(rgb(0x0d1420))
             .text_color(rgb(0xe1e8f2))
             .font_family(".SystemUIFont")
             .child(sidebar)
             .child(content)
+            .child(
+                div()
+                    .id("terminal-settings")
+                    .tab_index(0)
+                    .absolute()
+                    .right(px(16.))
+                    .bottom(px(12.))
+                    .p_2()
+                    .rounded_md()
+                    .bg(rgb(0x243248))
+                    .cursor_pointer()
+                    .child("⚙ Settings")
+                    .tooltip(|_, cx| cx.new(|_| appearance_ui::SettingsTooltip).into())
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_settings(window, cx)))
+                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.toggle_settings(window, cx);
+                            cx.stop_propagation();
+                        }
+                    })),
+            )
+            .when(self.settings_open, |root| {
+                root.child(self.settings_panel(cx))
+            })
     }
 }
 fn main() -> Result<()> {

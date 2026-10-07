@@ -19,3 +19,5 @@ Application code instantiates a separate forge-only HTTP client; it does not ins
 GPUI's macOS renderer uses its supported `runtime_shaders` feature so development works with Command Line Tools without a separately installed Metal compiler. Shaders compile locally when the native app runs. Terminal feature support still needs qualification against real installed harnesses.
 
 The Linux UI pins `libc` to 0.2.189 because GPUI's `gpui_http_client` pulls `zed-async-tar` with `xattr` 0.2.3, which references `ENOATTR` removed in libc 0.2.190. The pin is present in the published manifest, so fresh downstream Linux builds also receive the compatible version. Remove it when the pinned GPUI stack updates its xattr dependency. All advisory checks still apply to the pinned version.
+
+The `sigma-dock-terminal` crate derives from Leonard Seibold’s `gpui-terminal` 0.1.0 (MIT OR Apache-2.0). The source is kept locally to expose cursor shape/blinking alongside runtime font and palette changes. Its NOTICE and both upstream licenses are included in crate packages and macOS app resources. Changes do not replace the terminal parser or PTY ownership.

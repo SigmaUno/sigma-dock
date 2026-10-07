@@ -1,0 +1,4 @@
+Derived from gpui-terminal 0.1.0 by Leonard Seibold
+https://github.com/zortax/gpui-terminal
+Licensed MIT OR Apache-2.0; original license texts are included.
+SigmaDock changes: configurable cursor rendering and blink lifecycle.

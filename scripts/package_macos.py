@@ -72,6 +72,8 @@ def main():
     with (app / 'Contents' / 'Info.plist').open('wb') as file:
         plistlib.dump(info, file)
     shutil.copy2(ROOT / 'LICENSE', resources / 'LICENSE')
+    for name in ('NOTICE', 'LICENSE-MIT', 'LICENSE-APACHE'):
+        shutil.copy2(ROOT / 'crates/sigma-dock-terminal' / name, resources / ('terminal-' + name))
     shutil.copy2(ROOT / 'packaging/macos/INSTALL.txt', resources / 'INSTALL.txt')
     # Sign nested helpers first. Signing the main executable inside an app
     # also discovers the enclosing bundle and requires its helpers to be signed.

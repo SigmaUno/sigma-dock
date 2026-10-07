@@ -119,3 +119,5 @@ python3 scripts/feedback_smoke.py
 `cargo build` defaults to the headless binaries. `cargo build -p sigma-dock-ui` builds the native UI. Both `.forgejo/workflows/ci.yml` and `.github/workflows/ci.yml` run the same checks. Mirror setup is an administrator operation and is not performed by the repository.
 
 [Releasing crates](docs/RELEASING.md) · [Architecture](docs/ARCHITECTURE.md) · [Roadmap](docs/ROADMAP.md) · [Privacy verification](docs/PRIVACY.md)
+
+Terminal appearance is available from **⚙ Settings** in the bottom-right corner (Cmd/Ctrl+,). Change fonts, size, dark/light themes, individual RGB/ANSI colors, cursor shape/blinking, line spacing and padding without restarting workers. Preferences stay in the local state directory’s `preferences.json`; **Restore appearance defaults** resets this section.

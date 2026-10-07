@@ -24,7 +24,8 @@ flowchart LR
 | `sigma-dock-ports` | Worker port leases |
 | `sigma-dock-mcp` | Local orchestrator tools via stdio MCP |
 | `sigma-dockerd` | Session supervision, persistence, facts polling and socket API |
-| `sigma-dock-ui` | GPUI sidebar, derived board and `gpui-terminal` backed by Alacritty |
+| `sigma-dock-terminal` | Alacritty-backed GPUI terminal with live appearance and cursor controls |
+| `sigma-dock-ui` | GPUI sidebar, derived board and `sigma-dock-terminal` backed by Alacritty |
 | `sigma-dock-cli` | `sdk` CLI with raw-terminal attach |
 
 ## IPC version 1
@@ -47,4 +48,4 @@ The terminal component receives a reader and writer connected to RPC, rather tha
 
 ## Decisions
 
-SigmaDock name; Apache-2.0; daemon/UI split; GPUI pinned at 0.2.2; `gpui-terminal` pinned at 0.1.0; synchronous `rusqlite`; local newline JSON-RPC; GitHub.com plus Forgejo; Linux/macOS targets. The project uses sigmauno.com. Crates are published by the release workflow; distribution packaging is pending.
+SigmaDock name; Apache-2.0; daemon/UI split; GPUI pinned at 0.2.2; a local terminal component derived from `gpui-terminal` 0.1.0; synchronous `rusqlite`; local newline JSON-RPC; GitHub.com plus Forgejo; Linux/macOS targets. The project uses sigmauno.com. Crates are published by the release workflow; distribution packaging is pending.
