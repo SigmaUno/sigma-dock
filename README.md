@@ -36,7 +36,7 @@ cargo run -p sigmadock-ui
 
 Build/install binaries with `cargo install --path crates/sigmadock-cli`, `cargo install --path crates/sigmadockd`, and `cargo install --path crates/sigmadock-ui`. Binaries are `sdk`, `sigmadockd`, and `sigma-dock`. Start the daemon separately before the UI. Use `--agent shell` to test without an agent subscription. Adapters also exist for `codex`, `gemini`, `opencode`, and `aider`; their current flags must be tested against your installed versions.
 
-Each worker gets a unique `sigma/UUID` branch, a worktree outside the source checkout, a PTY, and `PORT` and `SIGMA_DOCK_WORKER_ID` environment variables. At most five sessions run concurrently by default (`sigmadockd --max-workers N`). Ports 4200–4999 are assigned uniquely among active workers and checked for availability; they are best-effort leases, not OS reservations.
+Each worker gets a unique `sigma/UUID` branch, a worktree outside the source checkout, a PTY, and `PORT` and `SIGMA_DOCK_WORKER_ID` environment variables. At most five worker sessions run concurrently by default (`sigmadockd --max-workers N`). Orchestrators have a separate allowance of one per project. `sdk capacity` shows global and project counts; `sdk max-workers N` changes and persists the worker limit. Ports 4200–4999 are assigned uniquely among active workers and checked for availability; they are best-effort leases, not OS reservations.
 
 `SIGMA_DOCK_STATE_DIR` overrides local state. Defaults: `~/Library/Application Support/SigmaDock` on macOS, `$XDG_STATE_HOME/sigma-dock` or `~/.local/state/sigma-dock` on Linux. `SIGMA_DOCK_SOCKET` overrides the socket for all binaries. Keep the daemon socket and database on a local filesystem. The state directory is mode 0700 and the socket and database are mode 0600.
 
@@ -51,9 +51,14 @@ sdk resume WORKER_ID --continue
 sdk archive WORKER_ID             # preserves files and branch
 sdk archive WORKER_ID --cleanup   # removes a clean worktree, preserves branch
 sdk prune PROJECT_ID              # prunes stale git worktree registrations
+sdk spawn PROJECT_ID --title "Next task" --agent codex --queue
+sdk queue                         # waiting tasks in global FIFO order
+sdk queue cancel TASK_ID
+sdk queue retry TASK_ID --acknowledge-unknown  # after inspecting an interrupted/failed start
+sdk remove-project PROJECT_ID     # requires no unarchived workers or waiting tasks
 ```
 
-The native UI includes a task-creation form, harness picker, worker controls, a diff summary, and PR links. When all berths are occupied, the form explains the global capacity limit and disables creation until a session ends. It keeps your task details; automatic queuing is pending daemon queue support. Click **Choose repository…** in the task form to open the native folder picker. Form input currently supports typing at the end, backspace, tab and clipboard paste; full text editing and IME support are pending.
+The native UI includes a task-creation form, harness picker, worker controls, a diff summary, and PR links. When all berths are occupied, the form explains the global capacity limit and disables creation until a session ends. It keeps your task details; the native waiting-list flow remains pending. The CLI and opt-in MCP spawning support persistent queuing with `--queue` / `queue: true`. Click **Choose repository…** in the task form to open the native folder picker. Form input currently supports typing at the end, backspace, tab and clipboard paste; full text editing and IME support are pending.
 
 Closing the UI does not stop workers. Normal daemon shutdown stops its sessions and saves their final observed state. Crashing the **daemon** loses its PTY handles: persisted active sessions become `lost`, never silently healthy. `sdk resume` starts a fresh process in the existing worktree; `--continue` asks a supported harness to resume its own conversation. Inspect and stop any surviving process before resuming after a daemon crash; `--acknowledge-unknown` is required for an interrupted worker. Codex continuation requires `sdk resume WORKER_ID --continue` without `--prompt`; send the next instruction with `sdk message` after startup. This prototype does not recover a live PTY across daemon restarts.
 

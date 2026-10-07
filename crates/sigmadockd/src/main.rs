@@ -4,8 +4,8 @@ use fs2::FileExt;
 use serde_json::{Value, json};
 use sigmadock_agents::{Executor, Harness, McpLaunch, orchestrator_command};
 use sigmadock_core::{
-    API_VERSION, Checks, Facts, ForgeConfig, Project, SessionState, Worker, WorkerRole, read_frame,
-    state_dir, status, task_text,
+    API_VERSION, Checks, Facts, ForgeConfig, Project, QueuedTask, SessionState, Worker, WorkerRole,
+    read_frame, state_dir, status, task_text,
 };
 use sigmadock_forge::{Forge, RestForge};
 use sigmadock_ports::PortPool;
@@ -35,8 +35,8 @@ struct Args {
     state_dir: PathBuf,
     #[arg(long, env = "SIGMA_DOCK_SOCKET")]
     socket: Option<PathBuf>,
-    #[arg(long, default_value_t = 5)]
-    max_workers: usize,
+    #[arg(long)]
+    max_workers: Option<usize>,
     #[arg(long)]
     mcp_binary: Option<PathBuf>,
     #[arg(long, default_value_t = 60)]
@@ -207,7 +207,8 @@ impl Daemon {
             }
             "add_project" => {
                 let path = sigmadock_git::root(&PathBuf::from(string(&params, "path")?))?;
-                if let Some(project) = self.store.projects()?.into_iter().find(|p| p.path == path) {
+                if let Some(project) = self.store.project_at(&path)? {
+                    self.store.save_project(&project)?;
                     return Ok(serde_json::to_value(project)?);
                 }
                 let project = Project {
@@ -223,7 +224,7 @@ impl Daemon {
                 Ok(serde_json::to_value(project)?)
             }
             "list_projects" => Ok(serde_json::to_value(self.store.projects()?)?),
-            "capacity" => Ok(serde_json::to_value(self.capacity())?),
+            "capacity" => Ok(serde_json::to_value(self.capacity()?)?),
             "list_workers" => {
                 let mut workers: Vec<_> = self
                     .workers
@@ -321,90 +322,117 @@ impl Daemon {
                 let derived_status = status(&worker.facts);
                 Ok(json!({
                     "worker": worker,
+                    "berth": worker.berth,
                     "status": derived_status,
                     "column": derived_status,
                     "pid": self.sessions.get(&worker.id).and_then(|s| s.pid),
                 }))
             }
-            "spawn_worker" | "start_orchestrator" => {
-                self.check_capacity()?;
-                let project = self.project(string(&params, "project_id")?)?;
-                let role = if method == "start_orchestrator" {
-                    WorkerRole::Orchestrator
-                } else {
-                    WorkerRole::Worker
-                };
-                if role == WorkerRole::Orchestrator
-                    && self.workers.values().any(|w| {
-                        w.project_id == project.id
-                            && w.role == WorkerRole::Orchestrator
-                            && !w.archived
-                    })
-                {
-                    bail!("project already has an orchestrator; resume or archive it first");
-                }
-                let agent = params["agent"].as_str().unwrap_or("claude").to_owned();
-                if role == WorkerRole::Orchestrator
-                    && !["claude", "codex"].contains(&agent.as_str())
-                {
-                    bail!("managed orchestrators support claude or codex");
-                }
-                let prompt = params["prompt"].as_str();
-                Harness(agent.clone()).command(prompt, false)?;
-                let id = Uuid::new_v4().to_string();
-                let branch = format!("sigma/{id}");
-                let worktree = self.state_dir.join("worktrees").join(&id);
-                let title = if role == WorkerRole::Orchestrator {
-                    "Project orchestrator".into()
-                } else {
-                    string(&params, "title")?.to_owned()
-                };
-                let port = self.ports.allocate()?;
-                let worker = Worker {
-                    id: id.clone(),
-                    project_id: project.id,
-                    title,
-                    agent,
-                    branch,
-                    worktree,
-                    port,
-                    created_at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
-                    archived: false,
-                    facts: Facts::default(),
-                    forge: None,
-                    role,
-                    feedback: Default::default(),
-                    usage_reporting: params["usage_reporting"] == true,
-                    orchestrator_spawn: method == "start_orchestrator"
-                        && params["allow_spawn"] == true,
-                    archived_at: None,
-                };
-                if let Err(error) = sigmadock_git::create(
-                    &project.path,
-                    &worker.worktree,
-                    &worker.branch,
-                    params["base"].as_str().unwrap_or("HEAD"),
-                ) {
-                    self.ports.release(port);
-                    return Err(error);
-                }
-                let session = match self.start_session(&worker, prompt, false) {
-                    Ok(session) => session,
-                    Err(error) => {
-                        sigmadock_git::rollback(&project.path, &worker.worktree, &worker.branch);
-                        self.ports.release(port);
-                        return Err(error);
+            "spawn_worker" => {
+                let mut params = params;
+                // Validate typed task data before persisting anything or checking capacity.
+                let task = self.task(&params)?;
+                params["base"] = json!(task.base);
+                if self.free_berth(None).is_err() || self.store.queued_count()? > 0 {
+                    if params["queue"] != true {
+                        self.check_capacity()?;
+                        bail!("waiting tasks take priority; use queue: true to wait for a berth");
                     }
-                };
-                if let Err(error) = self.store.save_worker(&worker) {
-                    let _ = session.stop();
-                    sigmadock_git::rollback(&project.path, &worker.worktree, &worker.branch);
-                    self.ports.release(port);
-                    return Err(error);
+                    let position = self.store.queued_count()? + 1;
+                    if position > 1000 {
+                        bail!("waiting queue is full");
+                    }
+                    self.store.save_queued(&task)?;
+                    Ok(json!({"queued": true, "id": task.id, "position": position}))
+                } else {
+                    self.spawn("spawn_worker", &params, None)
                 }
-                self.sessions.insert(id.clone(), session);
-                self.workers.insert(id, worker.clone());
-                Ok(serde_json::to_value(worker)?)
+            }
+            "start_orchestrator" => self.spawn(method, &params, None),
+            "list_queue" => {
+                let limit = params["limit"].as_u64().unwrap_or(100);
+                let offset = params["offset"].as_u64().unwrap_or(0);
+                if !(1..=100).contains(&limit) {
+                    bail!("queue page limit must be 1..100");
+                }
+                let tasks = self.store.queue()?;
+                let values: Vec<_> = tasks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, task)| {
+                        params["project_id"]
+                            .as_str()
+                            .is_none_or(|id| task.project_id == id)
+                    })
+                    .skip(usize::try_from(offset)?)
+                    .take(limit as usize)
+                    .map(|(index, task)| -> Result<Value> {
+                        let mut value = serde_json::to_value(task)?;
+                        let object = value.as_object_mut().context("invalid queued task")?;
+                        object.remove("prompt");
+                        object.remove("forge");
+                        object.insert("position".into(), json!(index + 1));
+                        Ok(value)
+                    })
+                    .collect::<Result<_>>()?;
+                Ok(json!(values))
+            }
+            "cancel_queued" | "retry_queued" => {
+                let id = string(&params, "id")?;
+                let mut task = self
+                    .store
+                    .queue()?
+                    .into_iter()
+                    .find(|task| task.id == id)
+                    .context("queued task not found")?;
+                if let Some(project) = params["project_id"].as_str()
+                    && task.project_id != project
+                {
+                    bail!("queued task is outside this project");
+                }
+                if method == "cancel_queued" {
+                    self.store.cancel_queued(id)?;
+                } else {
+                    if params["acknowledge_unknown"] != true {
+                        bail!(
+                            "inspect any surviving task process and worktree, then explicitly acknowledge_unknown before retrying"
+                        );
+                    }
+                    task.last_error = None;
+                    task.starting = false;
+                    self.store.save_queued(&task)?;
+                }
+                Ok(json!(true))
+            }
+            "set_max_workers" => {
+                let value = params["max_workers"]
+                    .as_u64()
+                    .context("missing max_workers")?;
+                if !(1..=255).contains(&value) {
+                    bail!("max_workers must be 1..255");
+                }
+                self.store.set_max_workers(value as usize)?;
+                self.max_workers = value as usize;
+                Ok(serde_json::to_value(self.capacity()?)?)
+            }
+            "remove_project" => {
+                let project = self.project(string(&params, "project_id")?)?;
+                if self
+                    .workers
+                    .values()
+                    .any(|worker| worker.project_id == project.id && !worker.archived)
+                    || self
+                        .store
+                        .queue()?
+                        .iter()
+                        .any(|task| task.project_id == project.id)
+                {
+                    bail!(
+                        "archive the project's workers and cancel its queued tasks before removing it"
+                    );
+                }
+                self.store.remove_project(&project.id)?;
+                Ok(json!(true))
             }
             "resume_worker" => {
                 let mut worker = self.worker(&params)?.clone();
@@ -425,7 +453,14 @@ impl Daemon {
                         "previous process state is unknown; verify it stopped, then explicitly acknowledge_unknown before resuming"
                     );
                 }
-                self.check_capacity()?;
+                if worker.role == WorkerRole::Worker {
+                    if self.store.queued_count()? > 0 {
+                        bail!("waiting tasks take priority; resume after the queue clears");
+                    }
+                    worker.berth = Some(self.free_berth(worker.berth)?);
+                } else {
+                    worker.berth = None;
+                }
                 let session = self.start_session(
                     &worker,
                     params["prompt"].as_str(),
@@ -559,31 +594,230 @@ impl Daemon {
             _ => bail!("unknown method {method}"),
         }
     }
-    fn capacity(&self) -> sigmadock_core::Capacity {
+    fn spawn(&mut self, method: &str, params: &Value, queued_id: Option<&str>) -> Result<Value> {
+        let project = self.project(string(params, "project_id")?)?;
+        let role = if method == "start_orchestrator" {
+            WorkerRole::Orchestrator
+        } else {
+            WorkerRole::Worker
+        };
+        if role == WorkerRole::Orchestrator
+            && self.workers.values().any(|w| {
+                w.project_id == project.id && w.role == WorkerRole::Orchestrator && !w.archived
+            })
+        {
+            bail!("project already has an orchestrator; resume or archive it first");
+        }
+        let agent = params["agent"].as_str().unwrap_or("claude").to_owned();
+        if role == WorkerRole::Orchestrator && !["claude", "codex"].contains(&agent.as_str()) {
+            bail!("managed orchestrators support claude or codex");
+        }
+        let prompt = params["prompt"].as_str();
+        Harness(agent.clone()).command(prompt, false)?;
+        let berth = if role == WorkerRole::Worker {
+            Some(self.free_berth(None)?)
+        } else {
+            None
+        };
+        let id = queued_id.map_or_else(|| Uuid::new_v4().to_string(), str::to_owned);
+        let branch = format!("sigma/{id}");
+        let worktree = self.state_dir.join("worktrees").join(&id);
+        let title = if role == WorkerRole::Orchestrator {
+            "Project orchestrator".into()
+        } else {
+            string(params, "title")?.to_owned()
+        };
+        let forge_config: Option<ForgeConfig> = params
+            .get("forge")
+            .filter(|value| !value.is_null())
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()?;
+        let forge = forge_config
+            .clone()
+            .map(RestForge::new)
+            .transpose()?
+            .map(Arc::new);
+        let port = self.ports.allocate()?;
+        let worker = Worker {
+            berth,
+            id: id.clone(),
+            project_id: project.id,
+            title,
+            agent,
+            branch,
+            worktree,
+            port,
+            created_at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+            archived: false,
+            facts: Facts::default(),
+            forge: forge_config,
+            role,
+            feedback: Default::default(),
+            usage_reporting: params["usage_reporting"] == true,
+            orchestrator_spawn: method == "start_orchestrator" && params["allow_spawn"] == true,
+            archived_at: None,
+        };
+        if let Err(error) = sigmadock_git::create(
+            &project.path,
+            &worker.worktree,
+            &worker.branch,
+            params["base"].as_str().unwrap_or("HEAD"),
+        ) {
+            self.ports.release(port);
+            return Err(error);
+        }
+        let session = match self.start_session(&worker, prompt, false) {
+            Ok(session) => session,
+            Err(error) => {
+                sigmadock_git::rollback(&project.path, &worker.worktree, &worker.branch);
+                self.ports.release(port);
+                return Err(error);
+            }
+        };
+        let saved = if queued_id.is_some() {
+            self.store.finish_queued(&worker)
+        } else {
+            self.store.save_worker(&worker)
+        };
+        if let Err(error) = saved {
+            let _ = session.stop();
+            sigmadock_git::rollback(&project.path, &worker.worktree, &worker.branch);
+            self.ports.release(port);
+            return Err(error);
+        }
+        if let Some(forge) = forge {
+            self.forges.insert(id.clone(), forge);
+        }
+        self.sessions.insert(id.clone(), session);
+        self.workers.insert(id, worker.clone());
+        Ok(serde_json::to_value(worker)?)
+    }
+    fn task(&self, params: &Value) -> Result<QueuedTask> {
+        let project = self.project(string(params, "project_id")?)?;
+        let title = string(params, "title")?.to_owned();
+        if title.trim().is_empty() || title.len() > 4096 {
+            bail!("task title must be 1..4096 bytes");
+        }
+        let agent = params["agent"].as_str().unwrap_or("claude").to_owned();
+        let prompt = params["prompt"].as_str().map(str::to_owned);
+        if prompt.as_ref().is_some_and(|prompt| prompt.len() > 32000) {
+            bail!("task prompt exceeds 32000 bytes");
+        }
+        Harness(agent.clone()).command(prompt.as_deref(), false)?;
+        let forge: Option<ForgeConfig> = params
+            .get("forge")
+            .filter(|value| !value.is_null())
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()?;
+        if let Some(config) = &forge {
+            RestForge::new(config.clone())?;
+        }
+        let base = params["base"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or(sigmadock_git::default_base(&project.path)?);
+        if base.is_empty() || base.len() > 4096 || base.starts_with('-') {
+            bail!("invalid base ref");
+        }
+        Ok(QueuedTask {
+            id: Uuid::new_v4().to_string(),
+            project_id: project.id,
+            title,
+            agent,
+            prompt,
+            base,
+            forge,
+            usage_reporting: params["usage_reporting"] == true,
+            created_at: sigmadock_core::unix_time(),
+            last_error: None,
+            starting: false,
+        })
+    }
+    fn drain_queue(&mut self) -> Result<()> {
+        while self.free_berth(None).is_ok() {
+            let Some(mut task) = self.store.next_queued()? else {
+                break;
+            };
+            if task.last_error.is_some() || task.starting {
+                break;
+            }
+            task.starting = true;
+            self.store.save_queued(&task)?;
+            let params = json!({"project_id": task.project_id, "title": task.title, "agent": task.agent, "prompt": task.prompt, "base": task.base, "forge": task.forge, "usage_reporting": task.usage_reporting});
+            if let Err(error) = self.spawn("spawn_worker", &params, Some(&task.id)) {
+                task.starting = false;
+                task.last_error = Some(task_text(&error.to_string(), 4096));
+                self.store.save_queued(&task)?;
+                break;
+            }
+        }
+        Ok(())
+    }
+    fn capacity(&self) -> Result<sigmadock_core::Capacity> {
         let mut live: Vec<_> = self
             .sessions
             .iter()
             .filter(|(_, session)| session.facts().0 != SessionState::Exited)
             .filter_map(|(id, _)| self.workers.get(id))
+            .filter(|worker| worker.role == WorkerRole::Worker)
             .collect();
-        live.sort_by_key(|worker| worker.created_at);
-        sigmadock_core::Capacity {
-            max_workers: self.max_workers,
-            live: live.into_iter().map(|worker| worker.id.clone()).collect(),
+        live.sort_by_key(|worker| (worker.berth, worker.created_at, &worker.id));
+        let queue = self.store.queue()?;
+        let mut per_project: std::collections::BTreeMap<String, sigmadock_core::ProjectCapacity> =
+            self.store
+                .projects()?
+                .into_iter()
+                .map(|project| (project.id, Default::default()))
+                .collect();
+        for worker in &live {
+            per_project
+                .entry(worker.project_id.clone())
+                .or_default()
+                .in_use += 1;
         }
+        for task in &queue {
+            per_project
+                .entry(task.project_id.clone())
+                .or_default()
+                .queued += 1;
+        }
+        Ok(sigmadock_core::Capacity {
+            max_workers: self.max_workers,
+            in_use: live.len(),
+            queued: queue.len(),
+            per_project,
+            live: live.into_iter().map(|worker| worker.id.clone()).collect(),
+        })
+    }
+    fn free_berth(&self, previous: Option<u8>) -> Result<u8> {
+        let occupied: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.facts().0 != SessionState::Exited)
+            .filter_map(|(id, _)| self.workers.get(id))
+            .filter(|worker| worker.role == WorkerRole::Worker)
+            .filter_map(|worker| worker.berth)
+            .collect();
+        choose_berth(self.max_workers, &occupied, previous)
     }
     fn check_capacity(&self) -> Result<()> {
-        if self
-            .sessions
-            .values()
-            .filter(|s| s.facts().0 != SessionState::Exited)
-            .count()
-            >= self.max_workers
-        {
-            bail!("maximum concurrent workers reached");
-        }
-        Ok(())
+        self.free_berth(None).map(|_| ())
     }
+}
+fn choose_berth(max: usize, occupied: &[u8], previous: Option<u8>) -> Result<u8> {
+    if occupied.len() >= max {
+        bail!("maximum concurrent workers reached");
+    }
+    if let Some(slot) = previous
+        && usize::from(slot) <= max
+        && slot > 0
+        && !occupied.contains(&slot)
+    {
+        return Ok(slot);
+    }
+    (1..=max as u8)
+        .find(|slot| !occupied.contains(slot))
+        .context("maximum concurrent workers reached")
 }
 fn string<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
     value[field]
@@ -778,9 +1012,6 @@ fn main() -> Result<()> {
     if args.idle_seconds == 0 {
         bail!("idle-seconds must be positive");
     }
-    if args.max_workers == 0 {
-        bail!("max-workers must be positive");
-    }
     fs::create_dir_all(&args.state_dir)?;
     args.state_dir = args.state_dir.canonicalize()?;
     fs::set_permissions(&args.state_dir, fs::Permissions::from_mode(0o700))?;
@@ -820,6 +1051,11 @@ fn main() -> Result<()> {
     let store = Store::open(&db)?;
     fs::set_permissions(&db, fs::Permissions::from_mode(0o600))?;
     store.mark_disconnected()?;
+    store.recover_queue()?;
+    let max_workers = args.max_workers.or(store.max_workers()?).unwrap_or(5);
+    if !(1..=255).contains(&max_workers) {
+        bail!("max-workers must be 1..255");
+    }
     let workers: HashMap<_, _> = store
         .workers()?
         .into_iter()
@@ -839,7 +1075,7 @@ fn main() -> Result<()> {
         ports,
         forges: HashMap::new(),
         state_dir: args.state_dir,
-        max_workers: args.max_workers,
+        max_workers,
         mcp_binary: args.mcp_binary.unwrap_or(
             std::env::current_exe()?
                 .parent()
@@ -852,11 +1088,32 @@ fn main() -> Result<()> {
     let listener = UnixListener::bind(&socket)?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
     eprintln!("SigmaDock listening on {}", socket.display());
+    let shutdown = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGINT, shutdown.clone())?;
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, shutdown.clone())?;
+    let local_shutdown = shutdown.clone();
+    let local_state = state.clone();
+    thread::spawn(move || {
+        while !local_shutdown.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(200));
+            let mut daemon = local_state.lock().unwrap();
+            if local_shutdown.load(Ordering::Relaxed) {
+                break;
+            }
+            if let Err(error) = daemon.sync().and_then(|_| daemon.drain_queue()) {
+                eprintln!("local supervision error: {error}");
+            }
+        }
+    });
+    let poll_shutdown = shutdown.clone();
     let poll_state = state.clone();
     thread::spawn(move || {
         let mut deadlines: HashMap<String, (std::time::Instant, u32)> = HashMap::new();
         loop {
             thread::sleep(Duration::from_secs(2));
+            if poll_shutdown.load(Ordering::Relaxed) {
+                break;
+            }
             let workers: Vec<_> = {
                 let mut state = poll_state.lock().unwrap();
                 if let Err(error) = state.sync() {
@@ -946,9 +1203,7 @@ fn main() -> Result<()> {
             }
         }
     });
-    let shutdown = Arc::new(AtomicBool::new(false));
-    signal_hook::flag::register(signal_hook::consts::SIGINT, shutdown.clone())?;
-    signal_hook::flag::register(signal_hook::consts::SIGTERM, shutdown.clone())?;
+
     listener.set_nonblocking(true)?;
     let connections = Arc::new(AtomicUsize::new(0));
     while !shutdown.load(Ordering::Relaxed) {
@@ -990,4 +1245,28 @@ fn main() -> Result<()> {
     drop(listener);
     fs::remove_file(&socket)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod berth_tests {
+    use super::*;
+
+    #[test]
+    fn stable_slots_release_resume_and_lower_capacity() {
+        assert_eq!(choose_berth(5, &[], None).unwrap(), 1);
+        assert_eq!(choose_berth(5, &[1, 3], None).unwrap(), 2);
+        // Stopping slot 2 does not move sessions in slots 1 and 3.
+        assert_eq!(choose_berth(5, &[1, 3], Some(2)).unwrap(), 2);
+        assert_eq!(choose_berth(5, &[1, 2, 3], Some(2)).unwrap(), 4);
+        assert_eq!(
+            choose_berth(2, &[1, 4], None).unwrap_err().to_string(),
+            "maximum concurrent workers reached"
+        );
+        // An above-limit session stays put; its old slot cannot be reassigned.
+        assert_eq!(choose_berth(2, &[4], Some(4)).unwrap(), 1);
+        assert_eq!(
+            choose_berth(2, &[1, 2], None).unwrap_err().to_string(),
+            "maximum concurrent workers reached"
+        );
+    }
 }

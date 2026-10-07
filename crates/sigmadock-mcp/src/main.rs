@@ -48,6 +48,18 @@ fn tools(allow_spawn: bool, scoped: bool) -> Value {
             &["worker_id"],
         ),
     ];
+    tools.push(tool(
+        "list_queue",
+        "List waiting task metadata within the project scope, up to 100 per page; use offset for subsequent pages",
+        json!({"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":100}}),
+        &[],
+    ));
+    tools.push(tool(
+        "cancel_queued",
+        "Cancel a waiting task; preserves any files from an interrupted startup",
+        json!({"id":{"type":"string"}}),
+        &["id"],
+    ));
     let mut project = json!({});
     if !scoped {
         project["project_id"] = json!({"type":"string"});
@@ -78,11 +90,12 @@ fn tools(allow_spawn: bool, scoped: bool) -> Value {
         spawn["title"] = json!({"type":"string"});
         spawn["agent"] = json!({"type":"string"});
         spawn["prompt"] = json!({"type":"string"});
+        spawn["queue"] = json!({"type":"boolean"});
         let mut required = read_required;
         required.push("title");
         tools.push(tool(
             "spawn_worker",
-            "Create an isolated worker within the daemon concurrency cap",
+            "Create an isolated worker; queue: true waits durably for capacity",
             spawn,
             &required,
         ));
@@ -103,6 +116,7 @@ fn validate(schema: &Value, arguments: &Value) -> Result<()> {
         let valid = match spec["type"].as_str() {
             Some("string") => value.is_string(),
             Some("integer") => value.as_u64().is_some(),
+            Some("boolean") => value.is_boolean(),
             _ => false,
         };
         if !valid {
@@ -143,6 +157,7 @@ fn dispatch(client: &Client, request: &Value, args: &Args) -> Result<Value> {
                     arguments = json!({});
                 }
                 validate(&schema["inputSchema"], &arguments)?;
+                client.check_version()?;
                 if let Some(project) = &args.project_id {
                     if let Some(worker) = arguments["worker_id"].as_str() {
                         let status =
@@ -214,6 +229,38 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn queuing_is_explicit_and_spawn_remains_opt_in() {
+        let disabled = tools(false, false);
+        assert!(
+            !disabled["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == "spawn_worker")
+        );
+        let enabled = tools(true, false);
+        let schema = &enabled["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "spawn_worker")
+            .unwrap()["inputSchema"];
+        assert!(
+            validate(
+                schema,
+                &json!({"project_id":"p","title":"task","queue":true})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate(
+                schema,
+                &json!({"project_id":"p","title":"task","queue":"true"})
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn scoped_schemas_cannot_override_projects_or_cleanup() {
         let tools = tools(true, true);

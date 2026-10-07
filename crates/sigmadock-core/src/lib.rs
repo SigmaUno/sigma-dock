@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-pub const API_VERSION: u32 = 1;
+pub const API_VERSION: u32 = 2;
 pub const MAX_FRAME: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -136,6 +136,9 @@ pub struct Project {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Worker {
+    /// Last assigned slot; only a live worker session occupies it.
+    #[serde(default)]
+    pub berth: Option<u8>,
     pub id: String,
     pub project_id: String,
     pub title: String,
@@ -212,6 +215,32 @@ pub struct Capacity {
     pub max_workers: usize,
     /// Workers holding a berth, oldest first.
     pub live: Vec<String>,
+    #[serde(default)]
+    pub in_use: usize,
+    #[serde(default)]
+    pub queued: usize,
+    #[serde(default)]
+    pub per_project: std::collections::BTreeMap<String, ProjectCapacity>,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProjectCapacity {
+    pub in_use: usize,
+    pub queued: usize,
+}
+/// Local durable task data, not a worker until its session starts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuedTask {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub agent: String,
+    pub prompt: Option<String>,
+    pub base: String,
+    pub forge: Option<ForgeConfig>,
+    pub usage_reporting: bool,
+    pub created_at: u64,
+    pub last_error: Option<String>,
+    pub starting: bool,
 }
 pub fn unix_time() -> u64 {
     std::time::SystemTime::now()
@@ -313,6 +342,16 @@ impl Default for Client {
     }
 }
 impl Client {
+    pub fn check_version(&self) -> Result<()> {
+        let reply = self.call("ping", json!({}))?;
+        if reply["version"].as_u64() != Some(u64::from(API_VERSION)) {
+            bail!(
+                "incompatible daemon API {}; expected {API_VERSION}. Finish workers and restart the daemon from this installation",
+                reply["version"]
+            );
+        }
+        Ok(())
+    }
     pub fn call(&self, method: &str, params: Value) -> Result<Value> {
         let mut stream = UnixStream::connect(&self.socket).with_context(|| {
             format!(
@@ -492,4 +531,41 @@ pub struct AgentUsage {
     pub context_input_tokens: Option<u64>,
     pub context_output_tokens: Option<u64>,
     pub warnings: Vec<String>,
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+    #[test]
+    fn handshake_accepts_only_the_matching_api() {
+        for version in [1, API_VERSION] {
+            let path = std::env::temp_dir().join(format!(
+                "sigmadock-version-{}-{version}.sock",
+                std::process::id()
+            ));
+            let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request: Value = serde_json::from_slice(
+                    &read_frame(&mut BufReader::new(stream.try_clone().unwrap()))
+                        .unwrap()
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(request["method"], "ping");
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({"jsonrpc":"2.0","id":request["id"],"result":{"version":version}})
+                )
+                .unwrap();
+            });
+            let client = Client {
+                socket: path.clone(),
+            };
+            assert_eq!(client.check_version().is_ok(), version == API_VERSION);
+            server.join().unwrap();
+            std::fs::remove_file(path).unwrap();
+        }
+    }
 }
