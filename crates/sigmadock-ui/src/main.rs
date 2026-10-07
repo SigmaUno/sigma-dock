@@ -1,8 +1,9 @@
 //! Native board and reconnectable terminal, backed by the daemon's PTYs.
 mod appearance_ui;
-mod board_ui;
+mod berths_ui;
 mod bootstrap;
 mod ci_ui;
+mod icons;
 mod preferences;
 mod recovery_ui;
 mod theme;
@@ -16,8 +17,9 @@ use gpui::{
     App, Application, Bounds, Context, Entity, SharedString, Window, WindowBounds, WindowOptions,
     div, prelude::*, px, rgb, size,
 };
+use icons::{Icon, icon};
 use serde_json::json;
-use sigmadock_core::{Client, Output, Project, Worker, socket_path};
+use sigmadock_core::{Capacity, Client, Output, Project, Worker, socket_path};
 use sigmadock_terminal::{TerminalConfig, TerminalView};
 use std::{
     io::{self, Read, Write},
@@ -104,7 +106,14 @@ impl Read for RemoteReader {
 struct Workspace {
     client: Client,
     workers: Vec<Worker>,
+    /// Archived workers, for the "Departed today" list.
+    departed: Vec<Worker>,
+    capacity: Capacity,
+    previews: std::collections::HashMap<String, berths_ui::Preview>,
+    /// Berth highlighted from the needs-you strip or the last closed terminal.
+    focused_berth: Option<String>,
     projects: Vec<Project>,
+    /// `None` shows all berths.
     selected_project: Option<String>,
     daemon_connected: bool,
     error: Option<String>,
@@ -147,52 +156,19 @@ struct Workspace {
 }
 impl Workspace {
     fn new(client: Client, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let initial = client.workers();
-        let daemon_connected = initial.is_ok();
-        let (workers, error) = match initial {
-            Ok(workers) => (workers, None),
-            Err(error) => (Vec::new(), Some(error.to_string())),
-        };
-        let projects = list_projects(&client).unwrap_or_default();
+        let initial = berths_ui::Snapshot::load(&client);
         let poll_client = client.clone();
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(2)).await;
                 let client = poll_client.clone();
-                let result = cx
+                let snapshot = cx
                     .background_executor()
-                    .spawn(async move {
-                        (
-                            client.workers(),
-                            client.call("list_unfinished", json!({})),
-                            list_projects(&client),
-                        )
-                    })
+                    .spawn(async move { berths_ui::Snapshot::load(&client) })
                     .await;
                 if this
                     .update(cx, |this, cx| {
-                        let (result, recovery, projects) = result;
-                        if let Ok(projects) = projects {
-                            this.projects = projects;
-                        }
-                        this.daemon_connected = result.is_ok();
-                        match recovery {
-                            Ok(value) => {
-                                this.recovery_entries =
-                                    serde_json::from_value(value).unwrap_or_default();
-                                this.recovery_error = None;
-                            }
-                            Err(error) => this.recovery_error = Some(error.to_string()),
-                        }
-                        match result {
-                            Ok(workers) => {
-                                this.workers = workers;
-                                // Preserve action errors until the next explicit action.
-                            }
-                            Err(error) => {
-                                this.error = Some(error.to_string());
-                            }
-                        }
+                        this.apply_snapshot(snapshot);
                         if this.preferences.updates.due(updates::now()) {
                             this.check_updates(false, cx);
                         }
@@ -216,7 +192,7 @@ impl Workspace {
             this.refresh_terminal_appearance(cx);
             cx.notify();
         });
-        Self {
+        let mut workspace = Self {
             usage_open: false,
             usage_report: None,
             usage_loading: false,
@@ -243,11 +219,15 @@ impl Workspace {
             settings_editor: None,
             settings_error,
             client,
-            workers,
-            projects,
+            workers: Vec::new(),
+            departed: Vec::new(),
+            capacity: Capacity::default(),
+            previews: Default::default(),
+            focused_berth: None,
+            projects: Vec::new(),
             selected_project: None,
-            daemon_connected,
-            error,
+            daemon_connected: false,
+            error: None,
             terminal: None,
             selected: None,
             form_open: false,
@@ -259,9 +239,13 @@ impl Workspace {
             repo_picker_open: false,
             details: String::new(),
             connection: Arc::new(AtomicBool::new(false)),
-        }
+        };
+        workspace.apply_snapshot(initial);
+        workspace.spawn_preview_loop(cx);
+        workspace
     }
     fn open_worker(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.focused_berth = Some(id.clone());
         self.details.clear();
         self.usage_open = false;
         self.usage_report = None;
@@ -502,10 +486,49 @@ impl Render for Workspace {
             .h_full()
             .flex()
             .flex_col()
-            .gap_6()
+            .gap_5()
             .px_8()
             .py_6();
-        content = content.child(self.board_header(cx));
+        let selected = self
+            .workers
+            .iter()
+            .find(|w| Some(&w.id) == self.selected.as_ref())
+            .cloned();
+        if self.terminal.is_none() {
+            content = content.child(self.header(cx));
+        } else {
+            content = content.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .id("close-terminal")
+                            .cursor_pointer()
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .bg(rgb(self.theme.button))
+                            .hover(|style| style.bg(rgb(self.theme.selection)))
+                            .child(icon(Icon::ArrowLeft, px(14.), rgb(self.theme.text)))
+                            .child("Berths")
+                            .on_click(cx.listener(|this, _, _, cx| this.close_terminal(cx))),
+                    )
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(selected.as_ref().map_or_else(
+                                || "Session ended".to_owned(),
+                                |worker| worker.title.clone(),
+                            )),
+                    ),
+            );
+        }
         if let Some(error) = &self.error {
             content = content.child(
                 div()
@@ -584,13 +607,7 @@ impl Render for Workspace {
             );
             content = content.child(form);
         }
-        content = content.child(self.board(cx));
         if let Some(terminal) = &self.terminal {
-            let selected = self
-                .workers
-                .iter()
-                .find(|w| Some(&w.id) == self.selected.as_ref())
-                .cloned();
             if let Some(worker) = selected {
                 let id = worker.id.clone();
                 let mut actions = div().flex().gap_2().items_center().child(
@@ -599,9 +616,10 @@ impl Render for Workspace {
                         .text_sm()
                         .text_color(rgb(self.theme.muted))
                         .child(format!(
-                            "{} · {:?} · checks {:?} · review {:?}",
-                            worker.title,
-                            worker.facts.session,
+                            "{} · {} · :{} · checks {:?} · review {:?}",
+                            berths_ui::agent_label(&worker.agent),
+                            worker.branch,
+                            worker.port,
                             worker.facts.checks,
                             worker.facts.review
                         )),
@@ -683,14 +701,13 @@ impl Render for Workspace {
             }
             content = content.child(div().flex_1().min_h(px(200.)).child(terminal.clone()));
         } else {
-            content = content.child(
+            content = content.child(self.needs_strip(cx)).child(
                 div()
-                    .flex_1()
                     .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(rgb(self.theme.muted))
-                    .child("Select a worker to connect to its terminal"),
+                    .items_start()
+                    .gap_6()
+                    .child(div().flex_1().min_w(px(0.)).child(self.grid(cx)))
+                    .child(self.side_panel(cx)),
             );
         }
         content = content.child(self.footer());
@@ -702,6 +719,11 @@ impl Render for Workspace {
                     && (event.keystroke.modifiers.platform || event.keystroke.modifiers.control)
                 {
                     this.toggle_settings(window, cx);
+                    cx.stop_propagation();
+                } else if event.keystroke.key == "n" && event.keystroke.modifiers.platform {
+                    if !this.form_open {
+                        this.open_new_task(window, cx);
+                    }
                     cx.stop_propagation();
                 }
             }))
@@ -716,11 +738,6 @@ impl Render for Workspace {
             })
     }
 }
-fn list_projects(client: &Client) -> Result<Vec<Project>> {
-    Ok(serde_json::from_value(
-        client.call("list_projects", json!({}))?,
-    )?)
-}
 fn main() -> Result<()> {
     let args = Args::parse();
     let client = Client {
@@ -733,7 +750,8 @@ fn main() -> Result<()> {
             .err()
             .map(|error| error.to_string())
     };
-    Application::new().run(move |cx: &mut App| {
+    let app = Application::new().with_assets(icons::Assets);
+    app.run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
         cx.open_window(
             WindowOptions {

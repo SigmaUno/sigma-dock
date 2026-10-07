@@ -4,7 +4,7 @@ SigmaDock uses a native GPUI client and a daemon that owns agent processes. The 
 
 ```mermaid
 flowchart LR
-    UI[GPUI board and terminal] <-->|Unix socket JSON-RPC| D[Daemon]
+    UI[GPUI berths and terminal] <-->|Unix socket JSON-RPC| D[Daemon]
     CLI[sdk CLI] <-->|Unix socket JSON-RPC| D
     MCP[Local stdio MCP bridge] <-->|Unix socket JSON-RPC| D
     D --> DB[(SQLite metadata)]
@@ -25,14 +25,14 @@ flowchart LR
 | `sigmadock-mcp` | Local orchestrator tools via stdio MCP |
 | `sigmadockd` | Session supervision, persistence, facts polling and socket API |
 | `sigmadock-terminal` | Alacritty-backed GPUI terminal with live appearance and cursor controls |
-| `sigmadock-ui` | GPUI sidebar, derived board and `sigmadock-terminal` backed by Alacritty |
+| `sigmadock-ui` | GPUI project sidebar, berths view and `sigmadock-terminal` backed by Alacritty |
 | `sigmadock-cli` | `sdk` CLI with raw-terminal attach |
 
 ## IPC version 1
 
 A request is one UTF-8 JSON-RPC 2.0 object followed by a newline, with a maximum 4 MiB frame. One request per Unix connection. `ping` returns API version 1. Errors contain a code and a local human-readable message; notifications get no response. A future incompatible API must bump the version and add negotiation.
 
-Methods: `add_project`, `list_projects`, `spawn_worker`, `resume_worker`, `list_workers`, `get_worker_status`, `list_unfinished`, `session_context`, `clear_session_context`, `input`, `output`, `resize`, `message_worker`, `stop_worker`, `archive_worker`, `diff`, `prune`, `configure_forge`, `refresh_facts`, `review_feedback`, `ci_preview`, `ci_feedback`, `send_ci_feedback`, `configure_feedback`, `conflict_instruction`, `start_orchestrator`, `read_planning_notes`, `write_planning_notes`. Worker methods use `worker_id`; creation uses `project_id`, `title`, `agent`, optional `prompt` and `base`. See the CLI source for request shapes. Terminal bytes are JSON arrays of integers; `output` uses an absolute byte cursor and returns up to 64 KiB per call. Transport uses read/write deadlines and limits concurrent connections to 32.
+Methods: `add_project`, `list_projects`, `capacity`, `spawn_worker`, `resume_worker`, `list_workers`, `get_worker_status`, `list_unfinished`, `session_context`, `clear_session_context`, `input`, `output`, `resize`, `message_worker`, `stop_worker`, `archive_worker`, `diff`, `prune`, `configure_forge`, `refresh_facts`, `review_feedback`, `ci_preview`, `ci_feedback`, `send_ci_feedback`, `configure_feedback`, `conflict_instruction`, `start_orchestrator`, `read_planning_notes`, `write_planning_notes`. Worker methods use `worker_id`; creation uses `project_id`, `title`, `agent`, optional `prompt` and `base`. See the CLI source for request shapes. `capacity` returns `max_workers` and the `live` worker ids that hold a berth, oldest first; `list_workers` accepts `include_archived`, and archived workers carry `archived_at`. Terminal bytes are JSON arrays of integers; `output` uses an absolute byte cursor and returns up to 64 KiB per call. Transport uses read/write deadlines and limits concurrent connections to 32.
 
 ## Lifecycle and recovery
 

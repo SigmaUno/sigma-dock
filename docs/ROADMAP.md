@@ -37,7 +37,7 @@ This is an implementation roadmap, not a claim that every phase is complete.
 ## Phase 3 — Board
 
 - [x] Pure status derivation with blocker precedence tests.
-- [x] Four native board columns and card-to-terminal navigation.
+- [x] Berths view with project sidebar, needs-you strip, terminal previews and berth-to-terminal navigation.
 - [x] GitHub/Forgejo REST PR/status/review facts with timeout and failure backoff.
 - [x] CLI diff summary, status and PR URL.
 - [x] Conditional ETag requests and backoff respecting numeric Retry-After/rate-reset headers.

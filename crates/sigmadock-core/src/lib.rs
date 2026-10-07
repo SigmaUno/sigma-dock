@@ -155,6 +155,9 @@ pub struct Worker {
     pub orchestrator_spawn: bool,
     #[serde(default)]
     pub usage_reporting: bool,
+    /// Unix seconds when the worker was archived; absent for workers archived before 0.1.3.
+    #[serde(default)]
+    pub archived_at: Option<u64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ForgeConfig {
@@ -202,6 +205,13 @@ pub struct SessionContext {
     pub pid: Option<u32>,
     pub text: String,
     pub truncated: bool,
+}
+/// Global berth usage: the same live-session count `check_capacity` enforces.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Capacity {
+    pub max_workers: usize,
+    /// Workers holding a berth, oldest first.
+    pub live: Vec<String>,
 }
 pub fn unix_time() -> u64 {
     std::time::SystemTime::now()

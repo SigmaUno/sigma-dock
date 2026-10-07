@@ -23,10 +23,12 @@ pub struct Theme {
     pub surface: u32,
     /// Agent badge background.
     pub chip: u32,
-    /// "Needs you" lane.
+    /// "Needs you: input" status; blockers use `error`.
     pub attention: u32,
-    /// "In review" lane.
+    /// "In review" status.
     pub review: u32,
+    /// Dashed outline of an empty berth.
+    pub empty: u32,
     pub ansi: [u32; 16],
 }
 impl Theme {
@@ -51,6 +53,7 @@ impl Theme {
             chip: 0xeceef1,
             attention: 0xc75f00,
             review: 0x7c5cd6,
+            empty: 0xc2c7cf,
             ansi: [
                 0x5c5f77, 0xd20f39, 0x40a02b, 0xdf8e1d, 0x1e66f5, 0xea76cb, 0x179299, 0xacb0be,
                 0x6c6f85, 0xd20f39, 0x40a02b, 0xdf8e1d, 0x1e66f5, 0xea76cb, 0x179299, 0xbcc0cc,
@@ -78,6 +81,7 @@ impl Theme {
             chip: 0x313244,
             attention: 0xfab387,
             review: 0xcba6f7,
+            empty: 0x585b70,
             ansi: [
                 0x45475a, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xa6adc8,
                 0x585b70, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xbac2de,

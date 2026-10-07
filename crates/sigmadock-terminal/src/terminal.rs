@@ -370,12 +370,41 @@ impl TerminalState {
     pub fn term_arc(&self) -> Arc<Mutex<Term<GpuiEventProxy>>> {
         Arc::clone(&self.term)
     }
+
+    /// The visible screen as plain text, one string per row, trailing blanks trimmed.
+    ///
+    /// Used for low-cost previews that do not need colors or a GPUI view.
+    pub fn screen_text(&self) -> Vec<String> {
+        use alacritty_terminal::index::{Column, Line};
+        use alacritty_terminal::term::cell::Flags;
+        let term = self.term.lock();
+        let grid = term.grid();
+        (0..grid.screen_lines())
+            .map(|row| {
+                let line = &grid[Line(row as i32)];
+                let text: String = (0..grid.columns())
+                    .map(|col| &line[Column(col)])
+                    .filter(|cell| !cell.flags.contains(Flags::WIDE_CHAR_SPACER))
+                    .map(|cell| cell.c)
+                    .collect();
+                text.trim_end().to_owned()
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::mpsc::channel;
+
+    #[test]
+    fn screen_text_reflects_cursor_movement() {
+        let (tx, _rx) = channel();
+        let mut terminal = TerminalState::new(20, 3, GpuiEventProxy::new(tx));
+        terminal.process_bytes(b"first\r\nsecond\x1b[1;1Hlast ");
+        assert_eq!(terminal.screen_text(), vec!["last", "second", ""]);
+    }
 
     #[test]
     fn test_terminal_creation() {
