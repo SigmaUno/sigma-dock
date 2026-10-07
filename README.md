@@ -53,7 +53,7 @@ sdk archive WORKER_ID --cleanup   # removes a clean worktree, preserves branch
 sdk prune PROJECT_ID              # prunes stale git worktree registrations
 ```
 
-The native UI includes a task-creation form, harness picker, worker controls, a diff summary, and PR links. Click **Choose repository…** in the task form to open the native folder picker. Form input currently supports typing at the end, backspace, tab and clipboard paste; full text editing and IME support are pending.
+The native UI includes a task-creation form, harness picker, worker controls, a diff summary, and PR links. When all berths are occupied, the form explains the global capacity limit and disables creation until a session ends. It keeps your task details; automatic queuing is pending daemon queue support. Click **Choose repository…** in the task form to open the native folder picker. Form input currently supports typing at the end, backspace, tab and clipboard paste; full text editing and IME support are pending.
 
 Closing the UI does not stop workers. Normal daemon shutdown stops its sessions and saves their final observed state. Crashing the **daemon** loses its PTY handles: persisted active sessions become `lost`, never silently healthy. `sdk resume` starts a fresh process in the existing worktree; `--continue` asks a supported harness to resume its own conversation. Inspect and stop any surviving process before resuming after a daemon crash; `--acknowledge-unknown` is required for an interrupted worker. Codex continuation requires `sdk resume WORKER_ID --continue` without `--prompt`; send the next instruction with `sdk message` after startup. This prototype does not recover a live PTY across daemon restarts.
 

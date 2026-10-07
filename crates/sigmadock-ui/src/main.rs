@@ -103,6 +103,12 @@ impl Read for RemoteReader {
         }
     }
 }
+fn full_capacity_message(max_workers: usize) -> String {
+    format!(
+        "All {max_workers} berths are in use. Wait for a session to finish or stop a worker before creating this task. Automatic queuing is not available yet."
+    )
+}
+
 struct Workspace {
     client: Client,
     workers: Vec<Worker>,
@@ -337,8 +343,22 @@ impl Workspace {
         })
         .detach();
     }
+    fn creation_blocked_reason(&self) -> Option<String> {
+        if !self.daemon_connected {
+            Some("Connect to the daemon before creating a task.".into())
+        } else if self.capacity.live.len() >= self.capacity.max_workers {
+            Some(full_capacity_message(self.capacity.max_workers))
+        } else {
+            None
+        }
+    }
     fn create_worker(&mut self, cx: &mut Context<Self>) {
         if self.busy {
+            return;
+        }
+        if let Some(reason) = self.creation_blocked_reason() {
+            self.error = Some(reason);
+            cx.notify();
             return;
         }
         if self.fields[0].trim().is_empty() || self.fields[1].trim().is_empty() {
@@ -355,8 +375,20 @@ impl Workspace {
         let agent = self.agent.clone();
         cx.spawn(async move |this, cx| {
             let result = cx.background_executor().spawn(async move {
+                // Recheck global capacity: the form snapshot may be up to two seconds old.
+                let capacity: Capacity = serde_json::from_value(client.call("capacity", json!({}))?)?;
+                if capacity.live.len() >= capacity.max_workers {
+                    anyhow::bail!("{}", full_capacity_message(capacity.max_workers));
+                }
                 let project = client.call("add_project", json!({"path":path}))?;
-                let worker = client.call("spawn_worker", json!({"project_id":project["id"],"title":title,"agent":agent,"prompt":if prompt.is_empty() { None } else { Some(prompt) }}))?;
+                let worker = client.call("spawn_worker", json!({"project_id":project["id"],"title":title,"agent":agent,"prompt":if prompt.is_empty() { None } else { Some(prompt) }})).map_err(|error| {
+                    // Another client can take the final berth after the capacity check.
+                    if error.to_string().contains("maximum concurrent workers reached") {
+                        anyhow::anyhow!(full_capacity_message(capacity.max_workers))
+                    } else {
+                        error
+                    }
+                })?;
                 Ok::<_, anyhow::Error>((serde_json::from_value::<Project>(project).ok(), worker))
             }).await;
             let _ = this.update(cx, |this, cx| {
@@ -367,7 +399,10 @@ impl Workspace {
                             this.selected_project = Some(project.id.clone());
                             if !this.projects.iter().any(|known| known.id == project.id) { this.projects.push(project); }
                         }
-                        if let Ok(worker) = serde_json::from_value::<Worker>(value) { this.workers.push(worker); }
+                        if let Ok(worker) = serde_json::from_value::<Worker>(value) {
+                            if !this.capacity.live.contains(&worker.id) { this.capacity.live.push(worker.id.clone()); }
+                            this.workers.push(worker);
+                        }
                         this.form_open = false; this.fields[1].clear(); this.fields[2].clear();
                     }
                     Err(error) => this.error = Some(error.to_string()),
@@ -590,20 +625,35 @@ impl Render for Workspace {
                         })),
                 );
             }
+            let blocked = self.creation_blocked_reason();
+            let disabled = self.busy || blocked.is_some();
+            if let Some(reason) = &blocked {
+                form = form.child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(self.theme.muted))
+                        .child(reason.clone()),
+                );
+            }
             form = form.child(agents).child(
                 div()
                     .id("spawn")
-                    .cursor_pointer()
+                    .when(!disabled, |button| button.cursor_pointer())
+                    .when(disabled, |button| button.opacity(0.5))
                     .p_2()
                     .rounded_md()
                     .bg(rgb(self.theme.accent))
                     .text_color(rgb(self.theme.base))
                     .child(if self.busy {
                         "Creating…"
+                    } else if blocked.is_some() {
+                        "Creation unavailable"
                     } else {
                         "Create isolated worker"
                     })
-                    .on_click(cx.listener(|this, _, _, cx| this.create_worker(cx))),
+                    .when(!disabled, |button| {
+                        button.on_click(cx.listener(|this, _, _, cx| this.create_worker(cx)))
+                    }),
             );
             content = content.child(form);
         }
