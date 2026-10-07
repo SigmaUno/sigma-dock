@@ -3,7 +3,10 @@ mod ci;
 use anyhow::{Context, Result, bail};
 use reqwest::{Url, blocking::Client, redirect::Policy};
 use serde_json::Value;
-use sigmadock_core::{Checks, CiFeedback, Facts, ForgeConfig, PullRequestState, Review, task_text};
+use sigmadock_core::{
+    Checks, CiFeedback, Facts, ForgeConfig, InboxItem, InboxKind, PullRequestState, Review,
+    parse_rfc3339, task_text,
+};
 use std::{
     collections::HashMap,
     io::Read,
@@ -290,6 +293,92 @@ impl RestForge {
             }
         }
         bail!("Forgejo PR pagination limit reached; facts are incomplete")
+    }
+}
+impl RestForge {
+    /// `owner/repo` of the configured repository.
+    pub fn repository(&self) -> String {
+        format!("{}/{}", self.config.owner, self.config.repo)
+    }
+    /// Open issues assigned to the token's user and open pull requests that request
+    /// their review, newest first. Reads one page of each, which bounds API use.
+    pub fn inbox(&self) -> Result<Vec<InboxItem>> {
+        if self.token.is_none() {
+            bail!("set {} to list assigned issues", self.config.token_env);
+        }
+        let login = self.get("user", &[])?["login"]
+            .as_str()
+            .context("forge did not report the signed-in user")?
+            .to_owned();
+        let prefix = self.prefix();
+        let github = self.config.kind == "github";
+        let (page_key, page_size) = if github {
+            ("per_page", "100")
+        } else {
+            ("limit", "50")
+        };
+        let mut query = vec![("state", "open"), (page_key, page_size)];
+        query.push(if github {
+            ("assignee", login.as_str())
+        } else {
+            ("assigned_by", login.as_str())
+        });
+        if github {
+            query.extend([("sort", "updated"), ("direction", "desc")]);
+        }
+        let issues = self.get(&format!("{prefix}/issues"), &query)?;
+        let mut items: Vec<_> = issues
+            .as_array()
+            .context("invalid issue response")?
+            .iter()
+            .filter_map(|issue| self.inbox_item(InboxKind::Assigned, issue))
+            .collect();
+        let mut query = vec![("state", "open"), (page_key, page_size)];
+        if github {
+            query.extend([("sort", "updated"), ("direction", "desc")]);
+        }
+        let pulls = self.get(&format!("{prefix}/pulls"), &query)?;
+        items.extend(
+            pulls
+                .as_array()
+                .context("invalid pull response")?
+                .iter()
+                .filter(|pull| {
+                    pull["requested_reviewers"].as_array().is_some_and(|users| {
+                        users
+                            .iter()
+                            .any(|user| user["login"].as_str() == Some(&login))
+                    })
+                })
+                .filter_map(|pull| self.inbox_item(InboxKind::ReviewRequested, pull)),
+        );
+        items.sort_by_key(|item| std::cmp::Reverse(item.updated_at));
+        Ok(items)
+    }
+    fn inbox_item(&self, kind: InboxKind, value: &Value) -> Option<InboxItem> {
+        Some(InboxItem {
+            kind,
+            repo: self.repository(),
+            number: value["number"].as_u64()?,
+            title: task_text(value["title"].as_str()?, 300),
+            url: value["html_url"].as_str()?.to_owned(),
+            pull_request: kind == InboxKind::ReviewRequested || !value["pull_request"].is_null(),
+            labels: value["labels"]
+                .as_array()
+                .map(|labels| {
+                    labels
+                        .iter()
+                        .filter_map(|label| label["name"].as_str())
+                        .take(6)
+                        .map(|name| task_text(name, 40))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            updated_at: value["updated_at"]
+                .as_str()
+                .and_then(parse_rfc3339)
+                .unwrap_or(0),
+        })
     }
 }
 fn review_state(reviews: &[Value]) -> Review {
@@ -649,6 +738,41 @@ mod tests {
             actions: false,
         })
         .unwrap()
+    }
+    #[test]
+    fn inbox_lists_assigned_issues_and_requested_reviews_for_the_token_user() {
+        let (url, server) = mock(vec![
+            ("200 OK", "", r#"{"login":"me"}"#),
+            (
+                "200 OK",
+                "",
+                r#"[{"number":7,"title":"Fix it","html_url":"https://forge.invalid/i/7","labels":[{"name":"bug"}],"updated_at":"2026-10-07T10:00:00Z"}]"#,
+            ),
+            (
+                "200 OK",
+                "",
+                r#"[{"number":9,"title":"Mine","html_url":"https://forge.invalid/p/9","requested_reviewers":[{"login":"me"}],"updated_at":"2026-10-07T12:00:00Z"},{"number":10,"title":"Other","html_url":"https://forge.invalid/p/10","requested_reviewers":[{"login":"them"}]}]"#,
+            ),
+        ]);
+        let mut forge = local_forge(url);
+        forge.token = Some("token".into());
+        let items = forge.inbox().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            (items[0].kind, items[0].number),
+            (InboxKind::ReviewRequested, 9)
+        );
+        assert!(items[0].pull_request);
+        assert_eq!((items[1].kind, items[1].number), (InboxKind::Assigned, 7));
+        assert_eq!(items[1].labels, vec!["bug".to_owned()]);
+        assert_eq!(items[1].repo, "owner/repo");
+        let requests = server.join().unwrap();
+        assert!(requests[1].contains("assigned_by=me"), "{}", requests[1]);
+        assert!(
+            local_forge("http://127.0.0.1:1/api".into())
+                .inbox()
+                .is_err()
+        );
     }
     #[test]
     fn conditional_requests_use_cached_facts() {

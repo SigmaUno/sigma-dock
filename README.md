@@ -106,6 +106,8 @@ Automatic feedback is off by default and waits for an idle coding worker with fa
 
 The native window shows **berths**: one slot per live session, up to the daemon's `--max-workers` limit. A berth shows the task, harness, branch, port, a low-rate terminal preview and one contextual action (**Reply**, **Send CI to agent** or **Open PR**); click it for the full terminal. The project sidebar filters berths by repository, a needs-you strip lists blocked workers, and a side panel lists moored workers (session ended, not archived) and today's departures. Capacity is global: a project can show free berths while the overall limit is reached, in which case empty berths are disabled.
 
+The sidebar lists each project with its agents underneath, plus an **Inbox**. Opening an agent splits the window into the sidebar, the agent's terminal session and its **Changes**: the patch since the worker started, including uncommitted and new files. Changes, files and individual lines open in your own editor (Zed, Cursor, VS Code, Sublime Text, Xcode, the default app or a custom command, chosen in Settings); SigmaDock has no built-in editor. The Inbox pairs a chat with your default agent, the project orchestrator started with a briefing of the inbox, with the agents that need you and, for repositories with a configured forge token, open issues assigned to you and pull requests requesting your review.
+
 Keyboard navigation on macOS:
 
 | Shortcut | Action |
@@ -115,6 +117,8 @@ Keyboard navigation on macOS:
 | Enter on a berth | Open its terminal; on a free empty berth, open the task form |
 | ⌘Enter on a berth | Run its contextual action (Reply, Send CI to agent, or Open PR) |
 | ⌘[ | Return from the full terminal to the previous berth |
+| ⌘I | Open the Inbox |
+| ⌘⇧O | Open the agent's worktree in your editor |
 | ⌘1 | Show All berths |
 | ⌘2–⌘9 | Select the first eight projects in sidebar order |
 | ⌘N / ⌘, | New task / Settings |

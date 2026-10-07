@@ -7,16 +7,7 @@ use std::{
 };
 
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .context("run git")?;
-    if !output.status.success() {
-        bail!("git: {}", String::from_utf8_lossy(&output.stderr).trim());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().into())
+    Ok(git_raw(repo, args)?.trim().into())
 }
 pub fn root(path: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(git(path, &["rev-parse", "--show-toplevel"])?).canonicalize()?)
@@ -152,6 +143,69 @@ pub fn prune(repo: &Path) -> Result<String> {
 }
 pub fn diff(path: &Path) -> Result<String> {
     git(path, &["diff", "--stat", "HEAD"])
+}
+/// Largest patch returned to clients, leaving room for JSON escaping in a 4 MiB frame.
+/// The rest is cut at a line boundary.
+pub const PATCH_LIMIT: usize = 1024 * 1024;
+/// Commit the worktree branch started from, read from the branch's creation reflog entry.
+/// Falls back to `HEAD` when the reflog has expired, so only uncommitted work is shown.
+pub fn fork_point(path: &Path) -> String {
+    git(path, &["symbolic-ref", "-q", "HEAD"])
+        .and_then(|branch| git(path, &["reflog", "show", "--format=%H", &branch, "--"]))
+        .ok()
+        .and_then(|log| log.lines().last().map(str::to_owned))
+        .filter(|sha| !sha.is_empty())
+        .unwrap_or_else(|| "HEAD".into())
+}
+/// Unified patch of everything the worker changed since it forked, including
+/// uncommitted and untracked files, without touching the index.
+pub fn patch(path: &Path) -> Result<(String, bool)> {
+    let base = fork_point(path);
+    let mut text = git_raw(
+        path,
+        &[
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--find-renames",
+            &base,
+        ],
+    )?;
+    let untracked = git(path, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    for file in untracked.split('\0').filter(|file| !file.is_empty()) {
+        if text.len() > PATCH_LIMIT {
+            break;
+        }
+        // `--no-index` exits 1 when files differ, which is the expected case here.
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(["diff", "--no-color", "--no-index", "--", "/dev/null", file])
+            .output()
+            .context("run git")?;
+        text.push_str(&String::from_utf8_lossy(&output.stdout));
+    }
+    let truncated = text.len() > PATCH_LIMIT;
+    if truncated {
+        let cut = text.as_bytes()[..PATCH_LIMIT]
+            .iter()
+            .rposition(|&byte| byte == b'\n')
+            .map_or(0, |at| at + 1);
+        text.truncate(cut);
+    }
+    Ok((text, truncated))
+}
+fn git_raw(repo: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .context("run git")?;
+    if !output.status.success() {
+        bail!("git: {}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 pub fn clean(path: &Path) -> Result<bool> {
     Ok(git(path, &["status", "--porcelain"])?.is_empty())
@@ -428,5 +482,43 @@ mod tests {
 
         let gone = changes(&repo, &worktree, "sigma/missing");
         assert!(gone.commits.is_empty() && gone.note.is_some());
+    }
+
+    fn run(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+    #[test]
+    fn patch_covers_commits_edits_and_untracked_files_since_the_fork() {
+        let root = std::env::temp_dir().join(format!("sigmadock-patch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run(&repo, &["init", "-q", "-b", "main"]);
+        run(&repo, &["config", "user.email", "t@example.com"]);
+        run(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        run(&repo, &["add", "."]);
+        run(&repo, &["commit", "-qm", "base"]);
+        let worktree = root.join("wt");
+        create(&repo, &worktree, "sigma/test", "HEAD").unwrap();
+        std::fs::write(worktree.join("a.txt"), "one\ntwo\n").unwrap();
+        run(&worktree, &["commit", "-qam", "agent work"]);
+        std::fs::write(worktree.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(worktree.join("new.txt"), "fresh\n").unwrap();
+        let (text, truncated) = patch(&worktree).unwrap();
+        assert!(!truncated);
+        assert!(text.contains("+two") && text.contains("+three"), "{text}");
+        assert!(
+            text.contains("+++ b/new.txt") && text.contains("+fresh"),
+            "{text}"
+        );
+        assert!(clean(&repo).unwrap());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
