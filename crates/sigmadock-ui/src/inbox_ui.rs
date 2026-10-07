@@ -430,7 +430,7 @@ impl Workspace {
                                 .child(
                                     "It reads your inbox and agents, so you can ask what needs \
                                      doing today and have it start agents for you. It runs as the \
-                                     project orchestrator, which does not use a berth.",
+                                     project orchestrator, which does not count toward the agent limit.",
                                 ),
                         ),
                 )

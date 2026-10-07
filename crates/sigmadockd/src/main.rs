@@ -1555,7 +1555,7 @@ fn main() -> Result<()> {
     fs::set_permissions(&db, fs::Permissions::from_mode(0o600))?;
     store.mark_disconnected()?;
     store.recover_queue()?;
-    let max_workers = args.max_workers.or(store.max_workers()?).unwrap_or(6);
+    let max_workers = args.max_workers.or(store.max_workers()?).unwrap_or(10);
     if !(1..=255).contains(&max_workers) {
         bail!("max-workers must be 1..255");
     }

@@ -2,9 +2,7 @@
 use crate::Workspace;
 use crate::icons::{Icon, icon};
 use anyhow::Result;
-use gpui::{
-    BoxShadow, Context, FontWeight, SharedString, Window, div, point, prelude::*, px, rgb, rgba,
-};
+use gpui::{Context, FontWeight, SharedString, Window, div, prelude::*, px, rgb};
 use serde_json::json;
 use sigmadock_core::{
     Capacity, Checks, Client, Output, Project, PullRequestState, Review, SessionState,
@@ -55,24 +53,45 @@ pub(crate) fn local_midnight(now: u64) -> u64 {
     now.saturating_sub((tm.tm_hour * 3600 + tm.tm_min * 60 + tm.tm_sec) as u64)
 }
 
-/// Numbered berth slots up to the larger of capacity and the highest docked berth.
-fn slot_layout(berths: Vec<&Worker>, max_workers: usize) -> Vec<(usize, Option<&Worker>)> {
-    let max_slot = berths
-        .iter()
-        .filter_map(|worker| worker.berth)
-        .map(usize::from)
-        .max()
-        .unwrap_or(0)
-        .max(max_workers);
-    (1..=max_slot)
-        .map(|number| {
-            let worker = berths
-                .iter()
-                .find(|worker| worker.berth == Some(number as u8))
-                .copied();
-            (number, worker)
-        })
-        .collect()
+/// Sections of the agent list, in display order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Group {
+    NeedsYou,
+    Running,
+    Stopped,
+}
+
+impl Group {
+    fn title(self) -> &'static str {
+        match self {
+            Self::NeedsYou => "Needs you",
+            Self::Running => "Running",
+            Self::Stopped => "Stopped",
+        }
+    }
+}
+
+pub(crate) fn group(worker: &Worker, live: bool) -> Group {
+    if derived_status(&worker.facts) == DerivedStatus::NeedsYou {
+        Group::NeedsYou
+    } else if live {
+        Group::Running
+    } else {
+        Group::Stopped
+    }
+}
+
+/// Agents grouped by section, newest first within each.
+pub(crate) fn list_order<'a>(
+    workers: Vec<&'a Worker>,
+    live: &[String],
+) -> Vec<(Group, &'a Worker)> {
+    let mut rows: Vec<_> = workers
+        .into_iter()
+        .map(|worker| (group(worker, live.contains(&worker.id)), worker))
+        .collect();
+    rows.sort_by_key(|(group, worker)| (*group, std::cmp::Reverse(worker.created_at)));
+    rows
 }
 
 fn pr_number(worker: &Worker) -> Option<&str> {
@@ -294,7 +313,7 @@ impl Workspace {
                     .map(|worker| worker.id.clone())
                     .collect();
                 Capacity {
-                    max_workers: live.len().max(6),
+                    max_workers: live.len().max(10),
                     live,
                     ..Default::default()
                 }
@@ -730,19 +749,8 @@ impl Workspace {
                     .child("Add a repository to dock agents"),
             );
         }
-        // Berths are per project: show the selected project's slots, or nothing for All berths.
-        let mut capacity = div().flex().gap_1();
-        for (_, worker) in scope.map(|id| self.slots(Some(id))).unwrap_or_default() {
-            let color = worker.map_or(theme.border, |worker| self.tone_color(status(worker).tone));
-            capacity = capacity.child(
-                div()
-                    .h(px(6.))
-                    .flex_1()
-                    .max_w(px(22.))
-                    .rounded_full()
-                    .bg(rgb(color)),
-            );
-        }
+        // Limits are per project: show the selected project's usage, or nothing for All agents.
+        let capacity = scope.map(|id| self.capacity_bar(id));
         let unfinished = self.recovery_entries.len();
         div()
             .id("sidebar")
@@ -782,7 +790,7 @@ impl Workspace {
                             .text_color(rgb(theme.muted))
                             .child(format!("{in_use} live")),
                     )
-                    .tooltip(|_, cx| crate::keyboard_ui::tooltip("All berths · ⌘1".into(), cx))
+                    .tooltip(|_, cx| crate::keyboard_ui::tooltip("All agents · ⌘1".into(), cx))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.view = crate::View::Berths;
                         this.select_project(None, window, cx);
@@ -927,11 +935,17 @@ impl Workspace {
                             .text_color(rgb(theme.muted))
                             .child(match scope {
                                 Some(id) => {
-                                    format!("Berths · {} of {max}", self.berths(Some(id)).len())
+                                    format!(
+                                        "Agents · {} of {max} running",
+                                        self.berths(Some(id)).len()
+                                    )
                                 }
-                                None => format!("{max} berths per project"),
+                                None => format!(
+                                    "Agents · {} running · {max} per project",
+                                    self.capacity.live.len()
+                                ),
                             })
-                            .child(capacity),
+                            .children(capacity),
                     )
                     .child(
                         div()
@@ -986,28 +1000,23 @@ impl Workspace {
     pub(crate) fn header(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
         let project = self.current_project();
-        let name = project.map_or_else(|| "All berths".to_owned(), |p| p.name.clone());
-        let here = self.berths(project.map(|p| p.id.as_str())).len();
+        let name = project.map_or_else(|| "All agents".to_owned(), |p| p.name.clone());
+        let rows = self.listed();
+        let count = |group: Group| rows.iter().filter(|(g, _)| *g == group).count();
         let max = self.capacity.max_workers;
         let summary = match project {
-            Some(_) => format!("{here} of {max} berths in use"),
+            Some(p) => format!(
+                "{} of {max} running · {} need you",
+                self.berths(Some(&p.id)).len(),
+                count(Group::NeedsYou)
+            ),
             None => format!(
-                "{here} berth{} live across projects · {max} per project",
-                if here == 1 { "" } else { "s" }
+                "{} running · {} need you · up to {max} per project",
+                self.capacity.live.len(),
+                count(Group::NeedsYou)
             ),
         };
-        let mut pips = div().flex().items_center().gap_1();
-        let slots = project.map(|p| self.slots(Some(&p.id))).unwrap_or_default();
-        for (_, worker) in slots {
-            pips = pips.child(match worker {
-                Some(worker) => self.dot(self.tone_color(status(worker).tone), 9.),
-                None => div()
-                    .size(px(9.))
-                    .rounded_full()
-                    .border_1()
-                    .border_color(rgb(theme.border)),
-            });
-        }
+        let pips = project.map(|p| self.capacity_bar(&p.id).w(px(160.)));
         div()
             .flex()
             .justify_between()
@@ -1031,7 +1040,7 @@ impl Workspace {
                             .text_sm()
                             .text_color(rgb(theme.muted))
                             .child(summary)
-                            .child(pips),
+                            .children(pips),
                     ),
             )
             .child(
@@ -1061,154 +1070,55 @@ impl Workspace {
             .into_any_element()
     }
 
-    pub(crate) fn needs_strip(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let theme = self.theme;
-        let needs: Vec<_> = self
-            .workers
-            .iter()
-            .filter(|worker| {
-                self.in_scope(worker) && derived_status(&worker.facts) == DerivedStatus::NeedsYou
-            })
-            .collect();
-        if needs.is_empty() {
-            return div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .text_sm()
-                .text_color(rgb(theme.muted))
-                .child(icon(Icon::Check, px(16.), rgb(theme.success)))
-                .child("Nothing needs you")
-                .into_any_element();
-        }
-        let mut items = div().flex().flex_wrap().gap_2();
-        for worker in needs {
-            let status = status(worker);
-            let color = self.tone_color(status.tone);
-            let id = worker.id.clone();
-            let key_id = id.clone();
-            let hint = format!("{} · {} · Enter to focus berth", worker.title, status.pill);
-            items = items.child(
-                div()
-                    .id(SharedString::from(format!("needs-{id}")))
-                    .tab_index(0)
-                    .focus(|style| style.border_color(rgb(theme.focus)))
-                    .tooltip(move |_, cx| crate::keyboard_ui::tooltip(hint.clone(), cx))
-                    .on_key_down(cx.listener(
-                        move |this, event: &gpui::KeyDownEvent, window, cx| {
-                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                this.focus_worker_berth(&key_id, window, cx);
-                                cx.stop_propagation();
-                            }
-                        },
-                    ))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_3()
-                    .py_1()
-                    .rounded_full()
-                    .cursor_pointer()
-                    .bg(rgb(theme.surface))
-                    .border_1()
-                    .border_color(rgb(color))
-                    .text_sm()
-                    .child(self.dot(color, 7.))
-                    .child(worker.title.clone())
-                    .child(div().text_color(rgb(color)).child(status.pill))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.focus_worker_berth(&id, window, cx);
-                    })),
-            );
-        }
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .p_3()
-            .rounded_lg()
-            .bg(rgb(theme.panel))
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(theme.attention))
-                    .child("Needs you"),
-            )
-            .child(items)
-            .into_any_element()
+    /// Agents in the selected project (or all), in list order.
+    pub(crate) fn listed(&self) -> Vec<(Group, &Worker)> {
+        list_order(
+            self.workers
+                .iter()
+                .filter(|worker| self.in_scope(worker))
+                .collect(),
+            &self.capacity.live,
+        )
     }
 
-    /// `index` is the grid position for keyboard moves; `number` is the berth shown.
-    fn berth(
-        &self,
-        index: usize,
-        number: usize,
-        worker: &Worker,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    fn list_row(&self, index: usize, worker: &Worker, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
         let status = status(worker);
         let color = self.tone_color(status.tone);
-        let glow = matches!(status.tone, Tone::Input | Tone::Blocked);
-        let focused = self.focused_berth.as_deref() == Some(&worker.id);
         let id = worker.id.clone();
         let focus_key = format!("berth-{id}");
+        let focused = self.focused_berth.as_deref() == Some(&worker.id);
         let hint = format!(
-            "Berth {number}: {} · {} · Enter: terminal · ⌘Enter: action · Arrow keys: move",
+            "{} · {} · Enter: open · ⌘Enter: action · ↑↓: move",
             worker.title, status.pill
         );
-        let mut preview = div()
-            .h(px(PREVIEW_LINES as f32 * 16. + 16.))
-            .p_2()
-            .rounded_md()
-            .overflow_hidden()
-            .bg(rgb(theme.sidebar))
-            .flex()
-            .flex_col()
-            .justify_end()
-            .text_xs()
-            .font_family(MONO)
-            .text_color(rgb(theme.muted));
-        match self.previews.get(&worker.id) {
-            Some(screen) if !screen.lines.is_empty() => {
-                for line in &screen.lines {
-                    preview = preview.child(div().whitespace_nowrap().child(line.clone()));
-                }
-            }
-            _ => preview = preview.child("Waiting for output…"),
-        }
+        let preview = self
+            .previews
+            .get(&worker.id)
+            .and_then(|screen| screen.lines.last().cloned())
+            .unwrap_or_default();
+        let project = self
+            .selected_project
+            .is_none()
+            .then(|| self.project_name(&worker.project_id))
+            .flatten()
+            .map(str::to_owned);
+        let role = if worker.role == sigmadock_core::WorkerRole::Orchestrator {
+            "Orchestrator"
+        } else {
+            agent_label(&worker.agent)
+        };
         let action = status.action.clone().map(|action| {
             let label = match &action {
                 Action::Reply => "Reply",
-                Action::SendCi => "Send CI to agent",
+                Action::SendCi => "Send CI",
                 Action::OpenPr(_) => "Open PR",
             };
-            let pr = matches!(action, Action::OpenPr(_));
             let id = id.clone();
-            let key_id = id.clone();
-            let key_action = action.clone();
             div()
-                .id(SharedString::from(format!("berth-action-{id}")))
-                .tab_index(0)
-                .border_2()
-                .border_color(gpui::transparent_black())
-                .focus(|style| style.border_color(rgb(theme.focus)))
-                .tooltip(move |_, cx| {
-                    crate::keyboard_ui::tooltip(
-                        format!("{label} · ⌘Enter from berth, Enter on action"),
-                        cx,
-                    )
-                })
-                .on_key_down(
-                    cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            this.run_berth_action(&key_action, key_id.clone(), window, cx);
-                            cx.stop_propagation();
-                        }
-                    }),
-                )
+                .id(SharedString::from(format!("row-action-{id}")))
                 .flex()
+                .flex_none()
                 .items_center()
                 .gap_1p5()
                 .px_3()
@@ -1219,7 +1129,7 @@ impl Workspace {
                 .text_color(rgb(theme.surface))
                 .text_sm()
                 .font_weight(FontWeight::MEDIUM)
-                .when(pr, |button| {
+                .when(matches!(action, Action::OpenPr(_)), |button| {
                     button.child(icon(Icon::GitPullRequest, px(14.), rgb(theme.surface)))
                 })
                 .child(label)
@@ -1228,319 +1138,217 @@ impl Workspace {
                     this.run_berth_action(&action, id.clone(), window, cx);
                 }))
         });
+        let checks_id = worker.id.clone();
         div()
             .id(SharedString::from(focus_key.clone()))
             .tab_index(0)
-            .track_focus(&self.berth_focus[&focus_key])
-            .focus(|style| style.border_color(rgb(theme.focus)))
+            .when_some(self.berth_focus.get(&focus_key), |row, handle| {
+                row.track_focus(handle)
+            })
             .tooltip(move |_, cx| crate::keyboard_ui::tooltip(hint.clone(), cx))
             .on_key_down(
                 cx.listener(move |this, event, window, cx| {
                     this.berth_key(index, event, window, cx)
                 }),
             )
-            .cursor_pointer()
             .flex()
-            .flex_col()
+            .items_center()
             .gap_3()
-            .p_4()
+            .px_4()
+            .py_2p5()
             .rounded_lg()
+            .cursor_pointer()
             .bg(rgb(theme.surface))
             .border_1()
-            .border_color(rgb(if focused || glow { color } else { theme.border }))
-            .when(focused, |berth| berth.border_2())
-            .when(glow, |berth| {
-                berth.shadow(vec![BoxShadow {
-                    color: rgba((color << 8) | 0x66).into(),
-                    offset: point(px(0.), px(0.)),
-                    blur_radius: px(14.),
-                    spread_radius: px(1.),
-                }])
-            })
+            .border_color(rgb(if focused { theme.focus } else { theme.border }))
+            .focus(|style| style.border_color(rgb(theme.focus)))
             .hover(|style| style.border_color(rgb(theme.focus)))
+            .child(crate::icons::app_icon(px(22.)))
             .child(
                 div()
+                    .flex_1()
+                    .min_w(px(0.))
                     .flex()
-                    .items_center()
-                    .gap_3()
+                    .flex_col()
+                    .gap_0p5()
                     .child(
                         div()
-                            .size(px(30.))
-                            .flex_none()
-                            .rounded_full()
-                            .border_2()
-                            .border_color(rgb(color))
                             .flex()
                             .items_center()
-                            .justify_center()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(number.to_string()),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .truncate()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(worker.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .px_2()
-                            .py_0p5()
-                            .rounded_full()
-                            .bg(rgba((color << 8) | 0x26))
-                            .text_xs()
-                            .text_color(rgb(color))
-                            .child(status.pill),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_sm()
-                    .child(
-                        div()
-                            .flex_none()
-                            .px_2()
-                            .py_0p5()
-                            .rounded_sm()
-                            .bg(rgb(theme.chip))
-                            .text_xs()
-                            .text_color(rgb(theme.muted))
-                            .child(agent_label(&worker.agent).to_owned()),
-                    )
-                    .when_some(
-                        self.selected_project
-                            .is_none()
-                            .then(|| self.project_name(&worker.project_id))
-                            .flatten(),
-                        |row, name| {
-                            row.child(
+                            .gap_2()
+                            .child(
                                 div()
-                                    .flex_none()
-                                    .text_xs()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(name.to_owned()),
+                                    .min_w(px(0.))
+                                    .truncate()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(worker.title.clone()),
                             )
-                        },
+                            .when_some(project, |row, name| {
+                                row.child(
+                                    div()
+                                        .flex_none()
+                                        .px_1p5()
+                                        .rounded_sm()
+                                        .bg(rgb(theme.chip))
+                                        .text_xs()
+                                        .text_color(rgb(theme.muted))
+                                        .child(name),
+                                )
+                            })
+                            .when_some(worker.base_warning.clone(), |row, warning| {
+                                row.child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "base-warning-{}",
+                                            worker.id
+                                        )))
+                                        .flex_none()
+                                        .text_xs()
+                                        .text_color(rgb(theme.warning))
+                                        .child("cached base")
+                                        .tooltip(move |_, cx| {
+                                            crate::keyboard_ui::tooltip(warning.clone(), cx)
+                                        }),
+                                )
+                            }),
                     )
-                    .child(icon(Icon::GitBranch, px(14.), rgb(theme.muted)))
                     .child(
                         div()
-                            .min_w(px(0.))
                             .truncate()
+                            .text_xs()
                             .font_family(MONO)
                             .text_color(rgb(theme.muted))
-                            .child(worker.branch.clone()),
+                            .child(if preview.is_empty() {
+                                "No output yet".to_owned()
+                            } else {
+                                preview
+                            }),
                     ),
             )
-            .when_some(worker.base_warning.clone(), |berth, warning| {
-                berth.child(
-                    div()
-                        .id(SharedString::from(format!("base-warning-{}", worker.id)))
-                        .text_sm()
-                        .text_color(rgb(theme.warning))
-                        .child("Using cached remote base")
-                        .tooltip(move |_, cx| crate::keyboard_ui::tooltip(warning.clone(), cx)),
-                )
-            })
-            .child({
-                let checks_id = worker.id.clone();
-                let key_id = checks_id.clone();
+            .child(
                 div()
-                    .id(SharedString::from(format!("berth-checks-{checks_id}")))
-                    .tab_index(0)
-                    .border_1()
-                    .border_color(gpui::transparent_black())
-                    .focus(|style| style.border_color(rgb(theme.focus)))
-                    .p_1()
-                    .rounded_md()
-                    .bg(rgb(theme.button))
-                    .child("Checks · ⌘⇧K")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.open_checks(checks_id.clone(), window, cx);
-                    }))
-                    .on_key_down(cx.listener(
-                        move |this, event: &gpui::KeyDownEvent, window, cx| {
-                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                this.open_checks(key_id.clone(), window, cx);
-                                cx.stop_propagation();
-                            }
-                        },
-                    ))
-            })
-            .child(preview)
+                    .flex_none()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(rgb(theme.chip))
+                    .text_xs()
+                    .text_color(rgb(theme.muted))
+                    .child(role.to_owned()),
+            )
             .child(
                 div()
                     .flex()
+                    .flex_none()
+                    .w(px(200.))
                     .items_center()
-                    .justify_between()
-                    .h(px(28.))
+                    .gap_1()
                     .text_xs()
                     .font_family(MONO)
                     .text_color(rgb(theme.muted))
-                    .child(format!(":{}", worker.port))
-                    .children(action),
+                    .child(icon(Icon::GitBranch, px(12.), rgb(theme.muted)))
+                    .child(div().min_w(px(0.)).truncate().child(worker.branch.clone())),
             )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .w(px(130.))
+                    .items_center()
+                    .gap_1p5()
+                    .text_xs()
+                    .text_color(rgb(color))
+                    .child(self.dot(color, 7.))
+                    .child(status.pill.clone()),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("row-checks-{checks_id}")))
+                    .flex_none()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_xs()
+                    .bg(rgb(theme.button))
+                    .hover(|style| style.bg(rgb(theme.selection)))
+                    .child("Checks")
+                    .tooltip(|_, cx| crate::keyboard_ui::tooltip("Checks · ⌘⇧K".into(), cx))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_checks(checks_id.clone(), window, cx);
+                    })),
+            )
+            .children(action)
             .on_click(
                 cx.listener(move |this, _, window, cx| this.open_worker(id.clone(), window, cx)),
             )
             .into_any_element()
     }
 
-    fn empty_berth(&self, number: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// Every agent in scope, grouped by what it needs, with today's archived ones last.
+    pub(crate) fn agent_list(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
-        let project = self.selected_project.as_deref();
-        let in_use = project.map_or(0, |id| self.berths(Some(id)).len());
-        let full =
-            project.is_none_or(|id| self.project_full(id)) || number > self.capacity.max_workers;
-        div()
-            .id(SharedString::from(format!("empty-berth-{number}")))
-            .tab_index(0)
-            .track_focus(&self.berth_focus[&format!("empty-berth-{number}")])
-            .focus(|style| style.border_color(rgb(theme.focus)))
-            .tooltip(move |_, cx| {
-                crate::keyboard_ui::tooltip(
-                    format!(
-                        "Berth {number}: {} · Arrow keys: move",
-                        if full {
-                            "No free berth"
+        let rows = self.listed();
+        let mut list = div().flex().flex_col().gap_2();
+        let mut current = None;
+        for (index, (section, worker)) in rows.iter().enumerate() {
+            if current != Some(*section) {
+                current = Some(*section);
+                let count = rows.iter().filter(|(group, _)| group == section).count();
+                list = list.child(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .pt_3()
+                        .px_1()
+                        .text_xs()
+                        .text_color(rgb(if *section == Group::NeedsYou {
+                            theme.attention
                         } else {
-                            "Enter: dock a task · ⌘N: new task"
-                        }
-                    ),
-                    cx,
-                )
-            })
-            .on_key_down(cx.listener(move |this, event, window, cx| {
-                this.berth_key(number - 1, event, window, cx)
-            }))
-            .min_h(px(250.))
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .rounded_lg()
-            .border_2()
-            .border_dashed()
-            .border_color(rgb(theme.empty))
-            .text_color(rgb(theme.muted))
-            .child(
-                div()
-                    .text_sm()
-                    .font_family(MONO)
-                    .child(format!("Berth {number}")),
-            )
-            .when(full, |berth| {
-                berth
-                    .opacity(0.55)
-                    .child(if number > self.capacity.max_workers {
-                        "Outside current capacity"
-                    } else {
-                        "No free berth"
-                    })
-                    .child(div().text_xs().child(format!(
-                        "{in_use} of {} in use in this project",
-                        self.capacity.max_workers
-                    )))
-            })
-            .when(!full, |berth| {
-                berth
-                    .cursor_pointer()
-                    .hover(|style| style.border_color(rgb(theme.focus)))
-                    .child(
-                        div()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(theme.text))
-                            .child("Dock a task"),
-                    )
-                    .child(div().text_xs().font_family(MONO).child("⌘N"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if !this.form_open {
-                            this.open_new_task(window, cx);
-                        }
-                    }))
-            })
-            .into_any_element()
-    }
-
-    /// Grid slots in berth-number order: the worker docked at each number, if any.
-    /// Workers keep stable berth numbers, so occupied slots can have gaps between them.
-    /// Numbers are per project, so All berths lists live berths without free slots.
-    pub(crate) fn slots(&self, project: Option<&str>) -> Vec<(usize, Option<&Worker>)> {
-        match project {
-            Some(_) => slot_layout(self.berths(project), self.capacity.max_workers),
-            None => self
-                .berths(None)
-                .into_iter()
-                .map(|worker| (worker.berth.map_or(0, usize::from), Some(worker)))
-                .collect(),
+                            theme.muted
+                        }))
+                        .child(section.title().to_uppercase())
+                        .child(count.to_string()),
+                );
+            }
+            list = list.child(self.list_row(index, worker, cx));
         }
-    }
-
-    pub(crate) fn grid(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let project = self.current_project().map(|p| p.id.clone());
-        let mut grid = div().grid().grid_cols(3).gap_4();
-        if project.is_none() && self.capacity.live.is_empty() {
-            return div()
-                .text_sm()
-                .text_color(rgb(self.theme.muted))
-                .child("No live berths. Pick a project to dock a task.")
-                .into_any_element();
-        }
-        for (index, (number, worker)) in self.slots(project.as_deref()).into_iter().enumerate() {
-            grid = grid.child(match worker {
-                Some(worker) => self.berth(index, number, worker, cx),
-                None => self.empty_berth(number, cx),
-            });
-        }
-        grid.into_any_element()
-    }
-
-    fn side_row(
-        &self,
-        worker: &Worker,
-        clickable: bool,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let theme = self.theme;
-        let status = status(worker);
-        let color = self.tone_color(status.tone);
-        let id = worker.id.clone();
-        let focused = self.focused_berth.as_deref() == Some(&worker.id);
-        div()
-            .id(SharedString::from(format!("side-{id}")))
-            .flex()
-            .flex_col()
-            .gap_1()
-            .p_2()
-            .rounded_md()
-            .border_1()
-            .border_color(rgb(if focused { color } else { theme.border }))
-            .bg(rgb(theme.surface))
-            .child(
+        if rows.is_empty() {
+            list = list.child(
                 div()
                     .flex()
+                    .flex_col()
                     .items_center()
                     .gap_2()
-                    .child(self.dot(color, 7.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .truncate()
-                            .text_sm()
-                            .child(worker.title.clone()),
-                    ),
-            )
-            .child(div().text_xs().text_color(rgb(theme.muted)).child({
+                    .py_12()
+                    .text_color(rgb(theme.muted))
+                    .child(crate::icons::app_icon(px(40.)))
+                    .child("No agents yet")
+                    .child(div().text_sm().child("Start one with New task · ⌘N")),
+            );
+        }
+        let midnight = local_midnight(unix_time());
+        let archived: Vec<_> = self
+            .departed
+            .iter()
+            .filter(|worker| self.in_scope(worker))
+            .filter(|worker| worker.archived_at.is_some_and(|at| at >= midnight))
+            .collect();
+        if !archived.is_empty() {
+            list = list.child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .pt_3()
+                    .px_1()
+                    .text_xs()
+                    .text_color(rgb(theme.muted))
+                    .child("ARCHIVED TODAY")
+                    .child(archived.len().to_string()),
+            );
+            for worker in archived {
+                let status = status(worker);
                 let mut text = status.pill;
                 if let Some(number) = pr_number(worker) {
                     text.push_str(&format!(" · #{number}"));
@@ -1548,117 +1356,49 @@ impl Workspace {
                 if let Some(at) = worker.archived_at {
                     text.push_str(&format!(" · {}", relative_time(at, unix_time())));
                 }
-                text
-            }))
-            .when(!clickable, |row| {
-                let id = id.clone();
-                row.child(
+                list = list.child(
                     div()
-                        .id(SharedString::from(format!("summary-{id}")))
-                        .text_xs()
-                        .text_color(rgb(theme.accent))
-                        .cursor_pointer()
-                        .hover(|style| style.underline())
-                        .child(self.summary_label(&id, "Copy summary"))
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.copy_summary(id.clone(), cx)),
-                        ),
-                )
-            })
-            .when(clickable, |row| {
-                row.cursor_pointer()
-                    .hover(|style| style.border_color(rgb(theme.focus)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_worker(id.clone(), window, cx)
-                    }))
-            })
-            .into_any_element()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .px_4()
+                        .py_1p5()
+                        .rounded_lg()
+                        .text_sm()
+                        .text_color(rgb(theme.muted))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate()
+                                .child(worker.title.clone()),
+                        )
+                        .child(div().flex_none().text_xs().child(text)),
+                );
+            }
+        }
+        list.into_any_element()
     }
 
-    pub(crate) fn side_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// Live agents of a project against its limit, as a row of segments.
+    pub(crate) fn capacity_bar(&self, project: &str) -> gpui::Div {
         let theme = self.theme;
-        let now = unix_time();
-        let midnight = local_midnight(now);
-        let off_berth: Vec<_> = self
-            .workers
-            .iter()
-            .filter(|worker| {
-                self.in_scope(worker)
-                    && worker.role != sigmadock_core::WorkerRole::Orchestrator
-                    && !self.capacity.live.contains(&worker.id)
-            })
-            .collect();
-        let (merged, docked): (Vec<_>, Vec<_>) = off_berth
-            .into_iter()
-            .partition(|worker| worker.facts.pr == PullRequestState::Merged);
-        let departed = self
-            .departed
-            .iter()
-            .filter(|worker| self.in_scope(worker))
-            .filter(|worker| worker.archived_at.is_some_and(|at| at >= midnight));
-        let section = |title: &'static str, hint: &'static str| {
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .text_xs()
-                        .font_family(MONO)
-                        .text_color(rgb(theme.muted))
-                        .child(title),
-                )
-                .child(div().text_xs().text_color(rgb(theme.muted)).child(hint))
-        };
-        let mut supervisors = div().flex().flex_col().gap_2();
-        for worker in self.workers.iter().filter(|worker| {
-            self.in_scope(worker) && worker.role == sigmadock_core::WorkerRole::Orchestrator
-        }) {
-            supervisors = supervisors.child(self.side_row(worker, true, cx));
-        }
-        let mut docked_list = div().flex().flex_col().gap_2();
-        for worker in &docked {
-            docked_list = docked_list.child(self.side_row(worker, true, cx));
-        }
-        if docked.is_empty() {
-            docked_list = docked_list.child(
+        let live = self.berths(Some(project));
+        let mut bar = div().flex().gap_0p5();
+        for slot in 0..self.capacity.max_workers.max(live.len()) {
+            let color = live
+                .get(slot)
+                .map_or(theme.border, |worker| self.tone_color(status(worker).tone));
+            bar = bar.child(
                 div()
-                    .text_sm()
-                    .text_color(rgb(theme.muted))
-                    .child("Nothing moored"),
+                    .h(px(6.))
+                    .flex_1()
+                    .max_w(px(18.))
+                    .rounded_full()
+                    .bg(rgb(color)),
             );
         }
-        let mut departed_list = div().flex().flex_col().gap_2();
-        let mut any_departed = false;
-        for worker in merged.into_iter().chain(departed) {
-            any_departed = true;
-            departed_list = departed_list.child(self.side_row(worker, false, cx));
-        }
-        if !any_departed {
-            departed_list = departed_list.child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(theme.muted))
-                    .child("No departures yet today"),
-            );
-        }
-        div()
-            .id("side-panel")
-            .w(px(250.))
-            .flex_none()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(section(
-                "ORCHESTRATORS",
-                "Separate allowance: one per project",
-            ))
-            .child(supervisors)
-            .child(section("MOORED", "Session ended, work not yet archived"))
-            .child(docked_list)
-            .child(section("DEPARTED TODAY", "Merged or archived"))
-            .child(departed_list)
-            .into_any_element()
+        bar
     }
 
     pub(crate) fn footer(&self) -> gpui::AnyElement {
@@ -1687,7 +1427,7 @@ impl Workspace {
                     .child(label),
             )
             .child(format!(
-                "{} of {} berths in use · local workspace",
+                "{} running · up to {} per project · local workspace",
                 self.capacity.live.len(),
                 self.capacity.max_workers
             ))
@@ -1710,22 +1450,38 @@ mod tests {
     }
 
     #[test]
-    fn slots_keep_berth_numbers_with_gaps() {
-        let mut first = worker(Facts::default());
-        first.berth = Some(3);
-        let mut second = worker(Facts::default());
-        second.id = "x".into();
-        second.berth = Some(7);
-        let slots = slot_layout(vec![&first, &second], 5);
-        assert_eq!(slots.len(), 7);
-        let docked: Vec<_> = slots
-            .iter()
-            .map(|(number, worker)| (*number, worker.map(|w| w.id.as_str())))
-            .filter(|(_, id)| id.is_some())
+    fn agents_list_by_need_then_newest() {
+        let make = |id: &str, created_at: u64, facts: Facts| {
+            let mut worker = worker(facts);
+            worker.id = id.into();
+            worker.created_at = created_at;
+            worker
+        };
+        let old_running = make("a", 1, Facts::default());
+        let new_running = make("b", 2, Facts::default());
+        let stopped = make("c", 3, Facts::default());
+        let blocked = make(
+            "d",
+            0,
+            Facts {
+                session: SessionState::NeedsInput,
+                ..Facts::default()
+            },
+        );
+        let live = vec!["a".to_owned(), "b".to_owned(), "d".to_owned()];
+        let order: Vec<_> = list_order(vec![&old_running, &stopped, &blocked, &new_running], &live)
+            .into_iter()
+            .map(|(group, worker)| (group, worker.id.as_str()))
             .collect();
-        assert_eq!(docked, [(3, Some("w")), (7, Some("x"))]);
-        assert!(slots[1].1.is_none());
-        assert_eq!(slot_layout(vec![], 2).len(), 2);
+        assert_eq!(
+            order,
+            [
+                (Group::NeedsYou, "d"),
+                (Group::Running, "b"),
+                (Group::Running, "a"),
+                (Group::Stopped, "c"),
+            ]
+        );
     }
 
     #[test]
