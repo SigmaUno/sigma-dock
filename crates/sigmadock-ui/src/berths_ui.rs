@@ -1405,8 +1405,10 @@ impl Workspace {
                     .text_xs()
                     .bg(rgb(theme.button))
                     .hover(|style| style.bg(rgb(theme.selection)))
-                    .child("Checks")
-                    .tooltip(|_, cx| crate::keyboard_ui::tooltip("Checks · ⌘⇧K".into(), cx))
+                    .child("Readiness")
+                    .tooltip(|_, cx| {
+                        crate::keyboard_ui::tooltip("Merge readiness · ⌘⇧K".into(), cx)
+                    })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.open_checks(checks_id.clone(), window, cx);

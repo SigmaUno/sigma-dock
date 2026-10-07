@@ -18,9 +18,9 @@ The canonical homepage is https://sigmadock.dev. The [Homebrew preview tap](http
 
 Both distribution workflows verify the pushed release tag before long checks. This keeps the tested commit referenced if `main` advances and allows publication using `--verify-tag`, avoiding GitHub's [workflow-scoped release restriction](https://github.blog/changelog/2023-11-02-github-actions-enforcing-workflow-scope-when-creating-a-release/) without a new publishing token. An existing tag is never moved. Rerun failed jobs at the same tag for transient or credential failures. Code fixes require a new reviewed commit and version tag; never move an existing release tag.
 
-## Unreleased: advisory Checks pane
+## Unreleased: advisory Readiness pane
 
-Each berth exposes a Checks pane, also available with ⌘⇧K, combining Git state, PR metadata, CI excerpts, unresolved inline reviews and conflict instructions. Feedback actions preview exact text before using the existing delivery paths. The shared readiness summary preserves blockers and treats unknown, errored, incomplete or mismatched data as unknown. No new background forge polling or automatic merge behavior is introduced.
+Each berth exposes a Readiness pane, also available with ⌘⇧K, combining Git state, PR metadata, CI excerpts, unresolved inline reviews and conflict instructions. Feedback actions preview exact text before using the existing delivery paths. The shared readiness summary preserves blockers and treats unknown, errored, incomplete or mismatched data as unknown. No new background forge polling or automatic merge behavior is introduced.
 
 The additive `worker_checks` RPC returns independent detail errors. Facts include the observed PR target branch; CI previews include a completeness flag. Older serialized facts remain readable. GitHub review feedback now uses review-thread resolution metadata from GraphQL; a token with repository read access is required. Forgejo uses review comment resolver metadata when provided, and missing metadata is reported as unknown.
 
