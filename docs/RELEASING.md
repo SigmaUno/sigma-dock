@@ -21,3 +21,7 @@ Both distribution workflows verify the pushed release tag before long checks. Th
 ## Unreleased: daemon API 2 and berths
 
 Issue #17 adds stable worker berth slots, global/per-project capacity and a persistent FIFO task queue. SQLite migrates to schema 4, retaining old workers with no assigned berth until their next session. The daemon API is now 2; UI/CLI/MCP clients refuse API-1 daemons. Finish running sessions and restart the matching daemon before using the new clients. Existing API-2 responses use `status`, with `column` retained as a deprecated alias for one release. Queue prompts remain in local state until cancellation or successful launch. See [architecture](ARCHITECTURE.md) for task failure/retry and project-removal behavior. Native queue presentation remains tracked in #21.
+
+## Unreleased: daemon event subscriptions
+
+Issue #19 adds an API-2 `subscribe` stream without removing polling RPCs. Native workspace refreshes and terminal output follow events, with bounded subscribers, reconnect/resync and polling fallback. Session generations prevent replay from mixing resumed sessions. The event regression and idle-workload measurement run in the existing tag-triggered CI and crate release workflows.

@@ -21,6 +21,7 @@ jobs:
       - run: python3 scripts/test_macos_distribution.py
       - run: python3 scripts/smoke.py
       - run: python3 scripts/feedback_smoke.py
+      - run: python3 scripts/events_smoke.py
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check

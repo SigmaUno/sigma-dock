@@ -3,6 +3,7 @@ mod appearance_ui;
 mod berths_ui;
 mod bootstrap;
 mod ci_ui;
+mod events;
 mod icons;
 mod keyboard_ui;
 mod preferences;
@@ -29,7 +30,6 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    thread,
     time::Duration,
 };
 #[derive(Parser)]
@@ -63,6 +63,9 @@ struct RemoteReader {
     offset: usize,
     ended: bool,
     connected: Arc<AtomicBool>,
+    events: events::EventFeed,
+    observed: Option<events::WakeStamp>,
+    more: bool,
 }
 impl Read for RemoteReader {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
@@ -82,6 +85,30 @@ impl Read for RemoteReader {
             if self.ended {
                 return Ok(0);
             }
+            let stamp = if self.more {
+                self.events.stamp(&self.worker)
+            } else {
+                let Some(stamp) =
+                    self.events
+                        .wait_for_output(&self.worker, self.observed, &self.connected)
+                else {
+                    return Ok(0);
+                };
+                stamp
+            };
+            if let (Some(previous), Some(signal)) =
+                (self.observed.and_then(|stamp| stamp.signal), stamp.signal)
+                && previous.generation != signal.generation
+            {
+                self.cursor = 0;
+                self.pending = b"\x1bc".to_vec();
+                self.offset = 0;
+                self.observed = None;
+                self.more = true;
+                continue;
+            }
+            // Capture before the RPC so an event racing with the response is not lost.
+            self.observed = Some(stamp);
             let output: Output = serde_json::from_value(
                 self.client
                     .call(
@@ -93,13 +120,11 @@ impl Read for RemoteReader {
             .map_err(io::Error::other)?;
             self.cursor = output.cursor;
             self.ended = output.exited;
+            self.more = output.bytes.len() == 64 * 1024;
             self.pending = output.bytes;
             self.offset = 0;
             if output.truncated {
                 self.pending.splice(0..0, b"\x1bc".iter().copied());
-            }
-            if self.pending.is_empty() && !self.ended {
-                thread::sleep(Duration::from_millis(25));
             }
         }
     }
@@ -111,6 +136,8 @@ fn full_capacity_message(max_workers: usize) -> String {
 }
 
 struct Workspace {
+    events: events::EventMonitor,
+    event_epoch: u64,
     client: Client,
     workers: Vec<Worker>,
     /// Archived workers, for the "Departed today" list.
@@ -166,11 +193,28 @@ struct Workspace {
 impl Workspace {
     fn new(client: Client, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let initial = berths_ui::Snapshot::load(&client);
-        let poll_client = client.clone();
+        let event_monitor = events::EventMonitor::start(client.clone());
         cx.spawn(async move |this, cx| {
+            let mut last_resync = std::time::Instant::now();
             loop {
-                cx.background_executor().timer(Duration::from_secs(2)).await;
-                let client = poll_client.clone();
+                cx.background_executor()
+                    .timer(Duration::from_millis(200))
+                    .await;
+                let Ok(request) = this.update(cx, |this, _| {
+                    let (epoch, dirty) = this.events.feed.take_refresh();
+                    if epoch != this.event_epoch {
+                        this.event_epoch = epoch;
+                        this.previews.clear();
+                    }
+                    (dirty || last_resync.elapsed() >= Duration::from_secs(30))
+                        .then(|| this.client.clone())
+                }) else {
+                    break;
+                };
+                let Some(client) = request else {
+                    continue;
+                };
+                last_resync = std::time::Instant::now();
                 let snapshot = cx
                     .background_executor()
                     .spawn(async move { berths_ui::Snapshot::load(&client) })
@@ -202,6 +246,8 @@ impl Workspace {
             cx.notify();
         });
         let mut workspace = Self {
+            events: event_monitor,
+            event_epoch: 0,
             usage_open: false,
             usage_report: None,
             usage_loading: false,
@@ -276,6 +322,9 @@ impl Workspace {
             offset: 0,
             ended: false,
             connected: self.connection.clone(),
+            events: self.events.feed.clone(),
+            observed: None,
+            more: false,
         };
         let writer = RemoteWriter {
             client: self.client.clone(),
@@ -846,4 +895,79 @@ fn main() -> Result<()> {
         cx.activate(true);
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod reader_tests {
+    use super::*;
+    use sigmadock_core::{DaemonEvent, OutputSignal};
+    use std::{io::BufReader, os::unix::net::UnixListener, sync::atomic::AtomicUsize};
+    #[test]
+    fn terminal_fetches_after_output_events_and_does_not_poll_while_idle() {
+        let path =
+            std::env::temp_dir().join(format!("sigmadock-reader-{}.sock", std::process::id()));
+        let listener = UnixListener::bind(&path).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let server = std::thread::spawn(move || {
+            for (cursor, bytes) in [(5, b"hello"), (10, b"world")] {
+                let (mut socket, _) = listener.accept().unwrap();
+                let request: serde_json::Value = serde_json::from_slice(
+                    &sigmadock_core::read_frame(&mut BufReader::new(socket.try_clone().unwrap()))
+                        .unwrap()
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(request["method"], "output");
+                count.fetch_add(1, Ordering::Relaxed);
+                writeln!(socket, "{}", json!({"jsonrpc":"2.0","id":1,"result":{"cursor":cursor,"bytes":bytes.to_vec(),"exited":false,"truncated":false,"cols":80,"rows":24}})).unwrap();
+            }
+        });
+        let feed = events::EventFeed::default();
+        feed.emit_for_test(DaemonEvent::Resync);
+        let mut signal = OutputSignal {
+            cursor: 5,
+            cols: 80,
+            rows: 24,
+            generation: 1,
+            exited: false,
+        };
+        feed.emit_for_test(DaemonEvent::OutputAvailable {
+            worker_id: "w".into(),
+            signal,
+        });
+        let mut reader = RemoteReader {
+            client: Client {
+                socket: path.clone(),
+            },
+            worker: "w".into(),
+            cursor: 0,
+            pending: vec![],
+            offset: 0,
+            ended: false,
+            connected: Arc::new(AtomicBool::new(true)),
+            events: feed.clone(),
+            observed: None,
+            more: false,
+        };
+        let mut bytes = [0; 5];
+        assert_eq!(reader.read(&mut bytes).unwrap(), 5);
+        assert_eq!(&bytes, b"hello");
+        let waiter = std::thread::spawn(move || {
+            let mut bytes = [0; 5];
+            assert_eq!(reader.read(&mut bytes).unwrap(), 5);
+            bytes
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        signal.cursor = 10;
+        feed.emit_for_test(DaemonEvent::OutputAvailable {
+            worker_id: "w".into(),
+            signal,
+        });
+        assert_eq!(&waiter.join().unwrap(), b"world");
+        server.join().unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        std::fs::remove_file(path).unwrap();
+    }
 }

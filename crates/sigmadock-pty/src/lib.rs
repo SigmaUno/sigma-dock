@@ -1,7 +1,7 @@
 //! PTY ownership and bounded output replay independent of any UI.
 use anyhow::{Result, bail};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
-use sigmadock_core::{Output, SessionContext, SessionState, output_text, unix_time};
+use sigmadock_core::{Output, OutputSignal, SessionContext, SessionState, output_text, unix_time};
 use std::{
     collections::VecDeque,
     io::{Read, Write},
@@ -25,6 +25,7 @@ struct State {
     exit_code: Option<u32>,
 }
 pub struct Session {
+    generation: u64,
     writer: Mutex<Box<dyn Write + Send>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
@@ -112,7 +113,9 @@ impl Session {
                 }
             }
         });
+        static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Ok(Self {
+            generation: NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             writer: Mutex::new(writer),
             master: Mutex::new(pair.master),
             child,
@@ -219,6 +222,16 @@ impl Session {
             pid: self.pid,
             text: output_text(&bytes),
             truncated: state.cursor.saturating_sub(since) > bytes.len() as u64,
+        }
+    }
+    pub fn output_signal(&self) -> OutputSignal {
+        let state = self.state.lock().unwrap();
+        OutputSignal {
+            cursor: state.cursor,
+            cols: state.cols,
+            rows: state.rows,
+            exited: state.exited && state.eof,
+            generation: self.generation,
         }
     }
     pub fn output(&self, cursor: u64) -> Output {
