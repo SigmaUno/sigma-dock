@@ -123,12 +123,41 @@ impl Appearance {
         }
     }
 }
+/// Harnesses that can run as a managed orchestrator, and so as the Inbox's default agent.
+pub const DEFAULT_AGENTS: [&str; 2] = ["claude", "codex"];
+
+/// The agent the Inbox talks to: the orchestrator of `project`, started with `agent`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DefaultAgent {
+    pub agent: String,
+    /// Project ID; `None` or a removed project falls back to the first project.
+    pub project: Option<String>,
+}
+impl Default for DefaultAgent {
+    fn default() -> Self {
+        Self {
+            agent: "claude".into(),
+            project: None,
+        }
+    }
+}
+impl DefaultAgent {
+    /// The configured harness, or Claude Code when the file holds an unsupported one.
+    pub fn harness(&self) -> &'static str {
+        DEFAULT_AGENTS
+            .into_iter()
+            .find(|name| *name == self.agent)
+            .unwrap_or("claude")
+    }
+}
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct Preferences {
     pub appearance: Appearance,
     pub updates: crate::updates::UpdatePreferences,
     pub editor: crate::editor::EditorPreferences,
+    pub default_agent: DefaultAgent,
 }
 impl Preferences {
     pub fn load(path: &Path) -> Result<Self> {
@@ -213,6 +242,17 @@ mod tests {
         assert!(value.validate().is_err());
     }
     #[test]
+    fn default_agent_falls_back_to_a_supported_harness() {
+        let old: Preferences = serde_json::from_str(r#"{"editor":{}}"#).unwrap();
+        assert_eq!(old.default_agent, DefaultAgent::default());
+        assert_eq!(old.default_agent.harness(), "claude");
+        let shell = DefaultAgent {
+            agent: "shell".into(),
+            project: None,
+        };
+        assert_eq!(shell.harness(), "claude");
+    }
+    #[test]
     fn preferences_survive_restart_and_apply_to_new_terminal() {
         let path = std::env::temp_dir().join(format!(
             "sigma-prefs-{}-{:?}/preferences.json",
@@ -228,6 +268,10 @@ mod tests {
             appearance: Appearance {
                 cursor: Cursor::Beam,
                 ..Appearance::light()
+            },
+            default_agent: DefaultAgent {
+                agent: "codex".into(),
+                project: Some("p".into()),
             },
         };
         preferences.save(&path).unwrap();
