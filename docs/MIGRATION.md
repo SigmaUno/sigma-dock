@@ -21,6 +21,17 @@ Previously published 0.1.0 and 0.1.1 packages remain available, unchanged and un
 
 Rust library imports change from `sigma_dock_*` to `sigmadock_*`. Install the daemon using `cargo install sigmadockd`; its executable is now `sigmadockd`. The MCP executable is `sigmadock-mcp`. There is no legacy daemon executable shim: update scripts that explicitly launch `sigma-dockerd` or `sigma-dock-mcp`.
 
+After the new 0.1.2 packages finish publishing, users of Cargo-installed binaries can update with:
+
+```sh
+cargo install sigmadockd --version 0.1.2
+cargo install sigmadock-mcp --version 0.1.2
+cargo install sigmadock-cli --version 0.1.2 --force
+cargo install sigmadock-ui --version 0.1.2 --force
+```
+
+The CLI and UI need `--force` when replacing executables owned by the previous package names. Git, native build dependencies and agent CLIs remain separate prerequisites. Existing daemon processes continue using their original executable until they are stopped; finish workers before restarting. App-bundle users can replace `SigmaDock.app` normally; Homebrew preview users can run `brew upgrade --cask sigma-dock-preview` after the cask update.
+
 The graphical executable remains `sigma-dock` and the command-line client remains `sdk` for compatibility. The app bundle remains `SigmaDock.app`. Existing `SIGMA_DOCK_*` environment variables, local data/config directories, daemon socket paths, database schema, IPC protocol and worktree branch prefixes remain unchanged. Upgrading does not move or delete projects, settings, session history or worktrees.
 
 An already running compatible daemon can still be reached through the existing socket. Finish or archive live workers before replacing or restarting that daemon; installing a new executable does not migrate running PTYs into a new process. The renamed app discovers `sigmadockd` beside its executable or on PATH.
