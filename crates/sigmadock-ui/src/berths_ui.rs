@@ -215,6 +215,15 @@ pub(crate) struct Snapshot {
 
 impl Snapshot {
     pub(crate) fn load(client: &Client) -> Self {
+        if let Err(error) = client.check_version() {
+            let message = error.to_string();
+            return Self {
+                workers: Err(anyhow::anyhow!(message.clone())),
+                recovery: Err(anyhow::anyhow!(message.clone())),
+                projects: Err(anyhow::anyhow!(message.clone())),
+                capacity: Err(anyhow::anyhow!(message)),
+            };
+        }
         Self {
             workers: client
                 .call("list_workers", json!({"include_archived": true}))
@@ -265,6 +274,7 @@ impl Workspace {
                 Capacity {
                     max_workers: live.len().max(5),
                     live,
+                    ..Default::default()
                 }
             }
             Err(_) => std::mem::take(&mut self.capacity),
@@ -658,8 +668,11 @@ impl Workspace {
         let in_use = self.capacity.live.len();
         let max = self.capacity.max_workers;
         let mut pips = div().flex().items_center().gap_1();
-        for slot in 0..max {
-            let worker = self.capacity.live.get(slot).and_then(|id| self.worker(id));
+        for slot in 1..=max {
+            let worker = self
+                .berths(None)
+                .into_iter()
+                .find(|worker| worker.berth == Some(slot as u8));
             pips = pips.child(match worker {
                 Some(worker) => self.dot(self.tone_color(status(worker).tone), 9.),
                 None => div()
@@ -945,7 +958,11 @@ impl Workspace {
 
     fn empty_berth(&self, number: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
-        let full = self.global_full();
+        let occupied = self
+            .berths(None)
+            .iter()
+            .any(|worker| worker.berth == Some(number as u8));
+        let full = self.global_full() || occupied || number > self.capacity.max_workers;
         div()
             .id(SharedString::from(format!("empty-berth-{number}")))
             .min_h(px(250.))
@@ -968,7 +985,13 @@ impl Workspace {
             .when(full, |berth| {
                 berth
                     .opacity(0.55)
-                    .child("No free berth")
+                    .child(if occupied {
+                        "Occupied in another project"
+                    } else if number > self.capacity.max_workers {
+                        "Outside current capacity"
+                    } else {
+                        "No free berth"
+                    })
                     .child(div().text_xs().child(format!(
                         "{} of {} in use across projects",
                         self.capacity.live.len(),
@@ -999,11 +1022,22 @@ impl Workspace {
         let project = self.current_project().map(|p| p.id.clone());
         let berths = self.berths(project.as_deref());
         let mut grid = div().grid().grid_cols(3).gap_4();
-        for (index, worker) in berths.iter().enumerate() {
-            grid = grid.child(self.berth(index + 1, worker, cx));
-        }
-        for number in berths.len() + 1..=self.capacity.max_workers {
-            grid = grid.child(self.empty_berth(number, cx));
+        let max_slot = berths
+            .iter()
+            .filter_map(|worker| worker.berth)
+            .map(usize::from)
+            .max()
+            .unwrap_or(0)
+            .max(self.capacity.max_workers);
+        for number in 1..=max_slot {
+            if let Some(worker) = berths
+                .iter()
+                .find(|worker| worker.berth == Some(number as u8))
+            {
+                grid = grid.child(self.berth(number, worker, cx));
+            } else {
+                grid = grid.child(self.empty_berth(number, cx));
+            }
         }
         grid.into_any_element()
     }
@@ -1071,7 +1105,11 @@ impl Workspace {
         let off_berth: Vec<_> = self
             .workers
             .iter()
-            .filter(|worker| self.in_scope(worker) && !self.capacity.live.contains(&worker.id))
+            .filter(|worker| {
+                self.in_scope(worker)
+                    && worker.role != sigmadock_core::WorkerRole::Orchestrator
+                    && !self.capacity.live.contains(&worker.id)
+            })
             .collect();
         let (merged, docked): (Vec<_>, Vec<_>) = off_berth
             .into_iter()
@@ -1095,6 +1133,12 @@ impl Workspace {
                 )
                 .child(div().text_xs().text_color(rgb(theme.muted)).child(hint))
         };
+        let mut supervisors = div().flex().flex_col().gap_2();
+        for worker in self.workers.iter().filter(|worker| {
+            self.in_scope(worker) && worker.role == sigmadock_core::WorkerRole::Orchestrator
+        }) {
+            supervisors = supervisors.child(self.side_row(worker, true, cx));
+        }
         let mut docked_list = div().flex().flex_col().gap_2();
         for worker in &docked {
             docked_list = docked_list.child(self.side_row(worker, true, cx));
@@ -1128,6 +1172,11 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_4()
+            .child(section(
+                "ORCHESTRATORS",
+                "Separate allowance: one per project",
+            ))
+            .child(supervisors)
             .child(section("MOORED", "Session ended, work not yet archived"))
             .child(docked_list)
             .child(section("DEPARTED TODAY", "Merged or archived"))

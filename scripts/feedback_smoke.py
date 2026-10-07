@@ -98,20 +98,21 @@ with open('received.txt','w') as out:
             if p.poll() is not None:
                 raise AssertionError((temp/'daemon.log').read_text())
             try:
-                return rpc('ping')['version'] == 1
+                return rpc('ping')['version'] == 2
             except OSError:
                 return False
         wait_for(ready)
         return p
     def project(name):
         repo = temp/name; repo.mkdir()
-        for args in [('init','-b','main'),('config','user.name','Test'),('config','user.email','test@localhost'),('commit','--allow-empty','-m','initial')]:
+        for args in [('init','-b','main'),('config','user.name','Test'),('config','user.email','test@localhost'),('config','commit.gpgsign','false'),('commit','--allow-empty','-m','initial')]:
             subprocess.run(['git','-C',str(repo)]+list(args),check=True,capture_output=True)
         return rpc('add_project', {'path': str(repo)})
-    def mcp(scope, name, arguments):
+    def mcp(scope, name, arguments, allow_spawn=False):
         request = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': name, 'arguments': arguments}}
-        result = subprocess.run([str(BIN/'sigmadock-mcp'), '--project-id', scope], env=env, input=json.dumps(request)+'\n', text=True, capture_output=True, check=True)
-        return json.loads(result.stdout)['result']
+        result = subprocess.run([str(BIN/'sigmadock-mcp'), '--project-id', scope] + (['--allow-spawn'] if allow_spawn else []), env=env, input=json.dumps(request)+'\n', text=True, capture_output=True, check=True)
+        reply = json.loads(result.stdout)
+        return reply.get('result', {'isError': True, 'error': reply.get('error')})
     try:
         daemon = start()
         p = project('first'); other_project = project('second')
@@ -141,7 +142,23 @@ with open('received.txt','w') as out:
         assert denied['isError'] is True
         notes_reply = mcp(p['id'], 'read_planning_notes', {})
         assert json.loads(notes_reply['content'][0]['text'])['text'] == 'Plan: repair failing tests'
+        # Spawn remains explicitly enabled, and queues respect project scope.
+        rpc('set_max_workers', {'max_workers': 2})
+        assert rpc('capacity')['in_use'] == 2
+        denied = mcp(p['id'], 'spawn_worker', {'title': 'denied', 'agent': 'claude', 'queue': True})
+        assert denied.get('isError') is True
+        queued = mcp(p['id'], 'spawn_worker', {'title': 'scoped waiting', 'agent': 'claude', 'queue': True}, allow_spawn=True)
+        queued_id = json.loads(queued['content'][0]['text'])['id']
+        foreign = rpc('spawn_worker', {'project_id': other_project['id'], 'title': 'other waiting', 'agent': 'claude', 'queue': True})
+        scoped_queue = json.loads(mcp(p['id'], 'list_queue', {})['content'][0]['text'])
+        assert [task['id'] for task in scoped_queue] == [queued_id]
+        assert mcp(p['id'], 'cancel_queued', {'id': foreign['id']})['isError'] is True
+        assert mcp(p['id'], 'cancel_queued', {'id': queued_id}).get('isError') is not True
+        rpc('cancel_queued', {'id': foreign['id']})
         orchestrator = rpc('start_orchestrator', {'project_id': p['id'], 'agent': 'claude'}); workers.append(orchestrator)
+        assert orchestrator['berth'] is None
+        assert rpc('capacity')['in_use'] == 2
+        assert orchestrator['id'] not in rpc('capacity')['live']
         rpc('start_orchestrator', {'project_id': p['id'], 'agent': 'claude'}, error=True)
         result_path = Path(orchestrator['worktree'])/'mcp-result.json'
         wait_for(result_path.exists)

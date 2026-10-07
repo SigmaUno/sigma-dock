@@ -22,6 +22,17 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Commands {
+    Capacity,
+    MaxWorkers {
+        value: usize,
+    },
+    RemoveProject {
+        project_id: String,
+    },
+    Queue {
+        #[command(subcommand)]
+        command: Option<QueueCommand>,
+    },
     Ping,
     Orchestrator {
         project_id: String,
@@ -66,8 +77,10 @@ enum Commands {
         agent: String,
         #[arg(long)]
         prompt: Option<String>,
-        #[arg(long, default_value = "HEAD")]
-        base: String,
+        #[arg(long)]
+        base: Option<String>,
+        #[arg(long)]
+        queue: bool,
     },
     Ls {
         #[arg(long)]
@@ -155,12 +168,54 @@ enum Commands {
         send: bool,
     },
 }
+#[derive(Subcommand)]
+enum QueueCommand {
+    Cancel {
+        id: String,
+    },
+    Retry {
+        id: String,
+        #[arg(long)]
+        acknowledge_unknown: bool,
+    },
+}
 fn main() -> Result<()> {
     let args = Args::parse();
     let client = Client {
         socket: args.socket,
     };
+    client.check_version()?;
     let (method, params) = match args.command {
+        Commands::Capacity => ("capacity", json!({})),
+        Commands::MaxWorkers { value } => ("set_max_workers", json!({"max_workers":value})),
+        Commands::RemoveProject { project_id } => {
+            ("remove_project", json!({"project_id":project_id}))
+        }
+        Commands::Queue { command } => match command {
+            None => {
+                let mut tasks = Vec::<Value>::new();
+                loop {
+                    let page: Vec<Value> = serde_json::from_value(
+                        client.call("list_queue", json!({"offset":tasks.len(),"limit":100}))?,
+                    )?;
+                    let finished = page.len() < 100;
+                    tasks.extend(page);
+                    if finished {
+                        break;
+                    }
+                }
+                println!("{}", serde_json::to_string_pretty(&tasks)?);
+                return Ok(());
+            }
+            Some(QueueCommand::Cancel { id }) => ("cancel_queued", json!({"id":id})),
+            Some(QueueCommand::Retry {
+                id,
+                acknowledge_unknown,
+            }) => (
+                "retry_queued",
+                json!({"id":id,"acknowledge_unknown":acknowledge_unknown}),
+            ),
+        },
         Commands::Usage { worker_id } => ("agent_usage", json!({"worker_id":worker_id})),
         Commands::UsageReporting { worker_id, enable } => (
             "configure_usage",
@@ -248,9 +303,10 @@ fn main() -> Result<()> {
             agent,
             prompt,
             base,
+            queue,
         } => (
             "spawn_worker",
-            json!({"project_id":project_id,"title":title,"agent":agent,"prompt":prompt,"base":base}),
+            json!({"project_id":project_id,"title":title,"agent":agent,"prompt":prompt,"base":base,"queue":queue}),
         ),
         Commands::Ls {
             archived,

@@ -20,6 +20,20 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
 pub fn root(path: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(git(path, &["rev-parse", "--show-toplevel"])?).canonicalize()?)
 }
+/// Pick a branch ref now, but resolve its commit only when the queued task starts.
+pub fn default_base(repo: &Path) -> Result<String> {
+    for branch in ["main", "master"] {
+        if git(
+            repo,
+            &["rev-parse", "--verify", &format!("refs/heads/{branch}")],
+        )
+        .is_ok()
+        {
+            return Ok(branch.into());
+        }
+    }
+    Ok("HEAD".into())
+}
 pub fn create(repo: &Path, path: &Path, branch: &str, base: &str) -> Result<()> {
     git(repo, &["check-ref-format", "--branch", branch])?;
     git(

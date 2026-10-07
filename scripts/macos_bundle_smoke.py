@@ -51,7 +51,7 @@ with tempfile.TemporaryDirectory(prefix='sigma-app-', dir='/tmp') as folder:
         assert 'error' not in reply, reply
         return reply['result']
     def ready():
-        try: return rpc('ping')['version'] == 1
+        try: return rpc('ping')['version'] == 2
         except OSError: return False
     app = None
     daemon_ids = []
