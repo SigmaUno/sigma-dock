@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import plistlib
 from pathlib import Path
 import signal
 import socket
@@ -14,6 +15,13 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('app', type=Path)
 args = parser.parse_args()
 bin_dir = args.app.resolve() / 'Contents/MacOS'
+
+contents = args.app.resolve() / 'Contents'
+with (contents / 'Info.plist').open('rb') as file:
+    icon_name = plistlib.load(file).get('CFBundleIconFile')
+assert icon_name, 'Info.plist has no CFBundleIconFile'
+icon = contents / 'Resources' / (icon_name if icon_name.endswith('.icns') else icon_name + '.icns')
+assert icon.is_file() and icon.read_bytes()[:4] == b'icns', f'App icon missing or invalid: {icon}'
 
 def wait(predicate):
     deadline = time.monotonic() + 20
