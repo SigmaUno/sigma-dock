@@ -1234,6 +1234,21 @@ impl Workspace {
                 }
                 text
             }))
+            .when(!clickable, |row| {
+                let id = id.clone();
+                row.child(
+                    div()
+                        .id(SharedString::from(format!("summary-{id}")))
+                        .text_xs()
+                        .text_color(rgb(theme.accent))
+                        .cursor_pointer()
+                        .hover(|style| style.underline())
+                        .child(self.summary_label(&id, "Copy summary"))
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.copy_summary(id.clone(), cx)),
+                        ),
+                )
+            })
             .when(clickable, |row| {
                 row.cursor_pointer()
                     .hover(|style| style.border_color(rgb(theme.focus)))

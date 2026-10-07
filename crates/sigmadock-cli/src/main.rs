@@ -146,6 +146,10 @@ enum Commands {
     Diff {
         worker_id: String,
     },
+    /// Print a Markdown session summary from recorded facts and git history.
+    Summary {
+        worker_id: String,
+    },
     Prune {
         project_id: String,
     },
@@ -370,6 +374,7 @@ fn main() -> Result<()> {
             json!({"worker_id":worker_id,"cleanup":cleanup}),
         ),
         Commands::Diff { worker_id } => ("diff", json!({"worker_id":worker_id})),
+        Commands::Summary { worker_id } => ("session_summary", json!({"worker_id":worker_id})),
         Commands::Prune { project_id } => ("prune", json!({"project_id":project_id})),
         Commands::Forge {
             worker_id,

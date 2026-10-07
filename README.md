@@ -46,6 +46,7 @@ Each worker gets a unique `sigma/UUID` branch, a worktree outside the source che
 sdk message WORKER_ID "Run tests and fix the failures"
 sdk status WORKER_ID
 sdk diff WORKER_ID
+sdk summary WORKER_ID > note.md  # Markdown session summary for Obsidian and similar notes
 sdk stop WORKER_ID
 sdk resume WORKER_ID --continue
 sdk archive WORKER_ID             # preserves files and branch
@@ -57,6 +58,8 @@ sdk queue cancel TASK_ID
 sdk queue retry TASK_ID --acknowledge-unknown  # after inspecting an interrupted/failed start
 sdk remove-project PROJECT_ID     # requires no unarchived workers or waiting tasks
 ```
+
+`sdk summary` and the **Summary** button (or **Copy summary** on a departed worker) build a Markdown note without any model: YAML frontmatter, the recorded outcome (status, PR, checks, review, session exit), the original instruction, commit subjects since the worker forked, and per-folder diff stats. It reads the live worktree when present, so uncommitted edits count, and the branch after `--cleanup`. Times are UTC. Workers created before this version have no recorded instruction or finish time.
 
 The native UI includes a task-creation form, harness picker, worker controls, a diff summary, and PR links. When all berths are occupied, the form explains the global capacity limit and disables creation until a session ends. It keeps your task details; the native waiting-list flow remains pending. The CLI and opt-in MCP spawning support persistent queuing with `--queue` / `queue: true`. Click **Choose repository…** in the task form to open the native folder picker. Form input currently supports typing at the end, backspace, tab and clipboard paste; full text editing and IME support are pending.
 

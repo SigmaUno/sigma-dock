@@ -2,6 +2,8 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+pub mod summary;
+
 use std::{
     io::{BufRead, BufReader, Read, Write},
     os::unix::net::UnixStream,
@@ -167,6 +169,12 @@ pub struct Worker {
     /// Unix seconds when the worker was archived; absent for workers archived before 0.1.3.
     #[serde(default)]
     pub archived_at: Option<u64>,
+    /// Initial instruction, bounded like other task data; absent before 0.1.3.
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// Unix seconds when the latest session exited; cleared on resume.
+    #[serde(default)]
+    pub finished_at: Option<u64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ForgeConfig {
