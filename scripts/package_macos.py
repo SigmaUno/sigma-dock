@@ -27,29 +27,40 @@ def distribution_policy(production, identity, notary, app_only=False):
         raise ValueError('Production requires a Developer ID Application identity, notarization credentials and a final DMG')
 
 
-def notarize(dmg, notary, output):
-    command = ['xcrun', 'notarytool', 'submit', str(dmg), '--key', notary[0],
+def notarize(artifact, notary, output, *, ticket_target=None, label="dmg"):
+    """Require Apple acceptance before stapling the submitted container or its app."""
+    command = ['xcrun', 'notarytool', 'submit', str(artifact), '--key', notary[0],
                '--key-id', notary[1], '--issuer', notary[2], '--wait', '--output-format', 'json']
     result = subprocess.run(command, capture_output=True, text=True)
     try:
         report = json.loads(result.stdout)
     except json.JSONDecodeError:
         raise SystemExit(f'Notarization returned invalid diagnostics (exit {result.returncode})')
-    (output / 'notarization-result.json').write_text(json.dumps(report, indent=2))
+    (output / f'notarization-{label}-result.json').write_text(json.dumps(report, indent=2))
     submission = report.get('id', '')
     if re.fullmatch(r'[0-9a-fA-F-]{36}', submission):
         diagnostics = subprocess.run(['xcrun', 'notarytool', 'log', submission, '--key', notary[0],
             '--key-id', notary[1], '--issuer', notary[2], '--output-format', 'json'], capture_output=True, text=True)
         if diagnostics.returncode == 0:
-            (output / 'notarization-log.json').write_text(diagnostics.stdout)
+            (output / f'notarization-{label}-log.json').write_text(diagnostics.stdout)
     if result.returncode != 0 or report.get('status') != 'Accepted':
         raise SystemExit('Apple did not accept notarization; see notarization diagnostics')
-    run('xcrun', 'stapler', 'staple', str(dmg))
-    run('xcrun', 'stapler', 'validate', str(dmg))
+    target = ticket_target or artifact
+    run('xcrun', 'stapler', 'staple', str(target))
+    run('xcrun', 'stapler', 'validate', str(target))
+
+
+def verify_signature(signature, identity):
+    authorities = [line.removeprefix('Authority=') for line in signature.splitlines()
+                   if line.startswith('Authority=')]
+    hardened = re.search(r'^CodeDirectory .*flags=.*\(.*\bruntime\b.*\)', signature, re.MULTILINE)
+    if identity not in authorities or not hardened:
+        raise SystemExit('Production binary identity or hardened runtime verification failed')
 
 
 def verify_distribution(dmg, identity):
     run('codesign', '--verify', '--strict', str(dmg))
+    run('xcrun', 'stapler', 'validate', str(dmg))
     with tempfile.TemporaryDirectory(prefix='sigma-qualification-') as directory:
         mount = Path(directory) / 'mount'
         run('hdiutil', 'attach', '-readonly', '-nobrowse', '-mountpoint', str(mount), str(dmg))
@@ -57,10 +68,10 @@ def verify_distribution(dmg, identity):
             app = Path(directory) / 'SigmaDock.app'
             shutil.copytree(mount / 'SigmaDock.app', app, symlinks=True)
             run('codesign', '--verify', '--deep', '--strict', str(app))
+            run('xcrun', 'stapler', 'validate', str(app))
             for item in [app] + [app / 'Contents/MacOS' / name for name in BINARIES]:
                 signature = subprocess.check_output(['codesign', '--display', '--verbose=4', str(item)], stderr=subprocess.STDOUT, text=True)
-                if 'Authority=' + identity not in signature or 'runtime' not in signature:
-                    raise SystemExit('Production binary identity or hardened runtime verification failed')
+                verify_signature(signature, identity)
             run('spctl', '--assess', '--type', 'execute', '--verbose=4', str(app))
             run('python3', str(ROOT / 'scripts/macos_bundle_smoke.py'), str(app))
         finally:
@@ -126,6 +137,7 @@ def main():
     shutil.copy2(ROOT / 'assets/icon/AppIcon.icns', resources / 'AppIcon.icns')
     shutil.copy2(ROOT / 'LICENSE', resources / 'LICENSE')
     shutil.copy2(ROOT / 'packaging/licenses/Catppuccin.txt', resources / 'Catppuccin-LICENSE.txt')
+    shutil.copy2(ROOT / 'packaging/licenses/Lucide.txt', resources / 'Lucide-LICENSE.txt')
     for name in ('NOTICE', 'LICENSE-MIT', 'LICENSE-APACHE'):
         shutil.copy2(ROOT / 'crates/sigmadock-terminal' / name, resources / ('terminal-' + name))
     shutil.copy2(ROOT / 'packaging/macos/INSTALL.txt', resources / 'INSTALL.txt')
@@ -142,6 +154,13 @@ def main():
     if args.app_only:
         print(app)
         return
+    if all(notary):
+        # Staple the app before copying it into the image so the installed app
+        # can carry its own ticket even without an online Gatekeeper lookup.
+        with tempfile.TemporaryDirectory(prefix='sigma-notarize-') as directory:
+            archive = Path(directory) / 'SigmaDock.zip'
+            run('ditto', '-c', '-k', '--keepParent', str(app), str(archive))
+            notarize(archive, notary, args.output, ticket_target=app, label='app')
     suffix = 'notarized' if all(notary) else ('signed' if identity else 'test')
     dmg = args.output / f'SigmaDock-{args.version}-{args.build_id}-{args.arch}-{suffix}.dmg'
     with tempfile.TemporaryDirectory(prefix='sigma-dmg-') as directory:

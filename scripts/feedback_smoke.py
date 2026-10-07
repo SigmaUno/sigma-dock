@@ -59,11 +59,13 @@ with open('received.txt','w') as out:
             if path.endswith('/pulls'):
                 value = [{'number': n+1, 'head': {'ref': branch}} for n, branch in enumerate(branches)]
             elif '/pulls/' in path and path.rsplit('/', 1)[1].isdigit():
-                value = {'number': int(path.rsplit('/', 1)[1]), 'head': {'sha': sha}, 'state': 'open', 'mergeable': False}
+                value = {'number': int(path.rsplit('/', 1)[1]), 'head': {'sha': sha}, 'base': {'ref': 'main'}, 'state': 'open', 'mergeable': False}
             elif path.endswith('/status'):
                 value = {'state': 'success', 'statuses': []}
+            elif '/reviews/' in path and path.endswith('/comments'):
+                value = [{'id': 17, 'path': 'src/main.rs', 'position': 10, 'body': 'Fix the edge case', 'resolver': None}, {'id': 18, 'path': 'src/old.rs', 'position': 1, 'body': 'Already resolved', 'resolver': {'login': 'reviewer'}}]
             elif path.endswith('/reviews'):
-                value = []
+                value = [{'id': 7, 'state': 'REQUEST_CHANGES', 'user': {'login': 'reviewer'}}]
             elif path.endswith('/actions/runs'):
                 value = {'total_count': 1, 'workflow_runs': [{'id': 7, 'workflow_id': 'test.yml', 'event': 'push', 'commit_sha': sha, 'status': 'failure'}]}
             elif path.endswith('/actions/runs/7/jobs'):
@@ -98,20 +100,26 @@ with open('received.txt','w') as out:
             if p.poll() is not None:
                 raise AssertionError((temp/'daemon.log').read_text())
             try:
-                return rpc('ping')['version'] == 1
+                return rpc('ping')['version'] == 2
             except OSError:
                 return False
         wait_for(ready)
         return p
     def project(name):
         repo = temp/name; repo.mkdir()
-        for args in [('init','-b','main'),('config','user.name','Test'),('config','user.email','test@localhost'),('commit','--allow-empty','-m','initial')]:
+        for args in [('init','-b','main'),('config','user.name','Test'),('config','user.email','test@localhost'),('config','commit.gpgsign','false'),('commit','--allow-empty','-m','initial')]:
             subprocess.run(['git','-C',str(repo)]+list(args),check=True,capture_output=True)
+        remote = temp / (name + '.git')
+        subprocess.run(['git', 'clone', '--bare', str(repo), str(remote)], check=True, capture_output=True)
+        subprocess.run(['git', '-C', str(repo), 'remote', 'add', 'origin', str(remote)], check=True, capture_output=True)
+        subprocess.run(['git', '-C', str(repo), 'fetch', 'origin'], check=True, capture_output=True)
+        subprocess.run(['git', '-C', str(repo), 'remote', 'set-head', 'origin', '-a'], check=True, capture_output=True)
         return rpc('add_project', {'path': str(repo)})
-    def mcp(scope, name, arguments):
+    def mcp(scope, name, arguments, allow_spawn=False):
         request = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': name, 'arguments': arguments}}
-        result = subprocess.run([str(BIN/'sigmadock-mcp'), '--project-id', scope], env=env, input=json.dumps(request)+'\n', text=True, capture_output=True, check=True)
-        return json.loads(result.stdout)['result']
+        result = subprocess.run([str(BIN/'sigmadock-mcp'), '--project-id', scope] + (['--allow-spawn'] if allow_spawn else []), env=env, input=json.dumps(request)+'\n', text=True, capture_output=True, check=True)
+        reply = json.loads(result.stdout)
+        return reply.get('result', {'isError': True, 'error': reply.get('error')})
     try:
         daemon = start()
         p = project('first'); other_project = project('second')
@@ -129,7 +137,34 @@ with open('received.txt','w') as out:
         assert any(entry['kind'] == 'job' and 'assertion failed' in entry['details'] for entry in rich['entries'])
         preview = rpc('ci_feedback', {'worker_id': worker['id']})
         assert preview['includes_job_logs'] and 'assertion failed' in preview['text']
+        checks = rpc('worker_checks', {'worker_id': worker['id']})
+        assert checks['git']['head'] and checks['git']['dirty']
+        assert checks['worker']['facts']['base_branch'] == 'main'
+        assert checks['worker']['facts']['review'] == 'changes_requested'
+        assert checks['worker']['facts']['mergeable'] is False
+        assert checks['ci']['entries'] and checks['ci_error'] is None
+        assert [comment['body'] for comment in checks['review']['comments']] == ['Fix the edge case']
+        assert checks['review']['comments'][0]['resolved'] is False
+        assert checks['review_error'] is None
+        # Preview loading never injects feedback. Confirmation delivers exactly the preview.
         received = Path(worker['worktree'])/'received.txt'
+        wait_for(received.exists)
+        assert 'Fix the edge case' not in received.read_text()
+        review_text = rpc('review_feedback', {'worker_id': worker['id']})
+        assert review_text == checks['review']['text']
+        rpc('message_worker', {'worker_id': worker['id'], 'message': review_text, 'expected_git_head': checks['git']['head'], 'expected_pr_head': sha})
+        wait_for(lambda: 'Fix the edge case' in received.read_text())
+        rpc('message_worker', {'worker_id': worker['id'], 'message': 'SHOULD_NOT_SEND', 'expected_git_head': 'wrong'}, error=True)
+        rpc('send_ci_feedback', {'worker_id': worker['id'], 'expected_text': 'wrong'}, error=True)
+        assert 'SHOULD_NOT_SEND' not in received.read_text()
+        conflict_text = rpc('conflict_instruction', {'worker_id': worker['id']})
+        rpc('message_worker', {'worker_id': worker['id'], 'message': conflict_text, 'expected_git_head': checks['git']['head']})
+        wait_for(lambda: 'forge reports a merge conflict' in received.read_text())
+        # A worker without a forge keeps Git data and returns explicit per-section errors.
+        unknown = rpc('worker_checks', {'worker_id': other['id']})
+        assert unknown['git'] is not None and unknown['ci'] is None and unknown['review'] is None
+        assert unknown['ci_error'] and unknown['review_error']
+
         rpc('configure_feedback', {'worker_id': worker['id'], 'auto_ci': True})
         # Let the production poller deliver feedback; a manual send races that poller.
         wait_for(lambda: received.exists() and 'assertion failed' in received.read_text(), timeout=60)
@@ -141,7 +176,24 @@ with open('received.txt','w') as out:
         assert denied['isError'] is True
         notes_reply = mcp(p['id'], 'read_planning_notes', {})
         assert json.loads(notes_reply['content'][0]['text'])['text'] == 'Plan: repair failing tests'
+        # Spawn remains explicitly enabled, and queues respect project scope.
+        rpc('set_max_workers', {'max_workers': 2})
+        assert rpc('capacity')['in_use'] == 2
+        denied = mcp(p['id'], 'spawn_worker', {'title': 'denied', 'agent': 'claude', 'queue': True})
+        assert denied.get('isError') is True
+        queued = mcp(p['id'], 'spawn_worker', {'title': 'scoped waiting', 'agent': 'claude', 'queue': True, 'base': 'main'}, allow_spawn=True)
+        queued_id = json.loads(queued['content'][0]['text'])['id']
+        foreign = rpc('spawn_worker', {'project_id': other_project['id'], 'title': 'other waiting', 'agent': 'claude', 'queue': True})
+        scoped_queue = json.loads(mcp(p['id'], 'list_queue', {})['content'][0]['text'])
+        assert [task['id'] for task in scoped_queue] == [queued_id]
+        assert scoped_queue[0]['base'] == 'main' and scoped_queue[0]['fetch_base'] is False
+        assert mcp(p['id'], 'cancel_queued', {'id': foreign['id']})['isError'] is True
+        assert mcp(p['id'], 'cancel_queued', {'id': queued_id}).get('isError') is not True
+        rpc('cancel_queued', {'id': foreign['id']})
         orchestrator = rpc('start_orchestrator', {'project_id': p['id'], 'agent': 'claude'}); workers.append(orchestrator)
+        assert orchestrator['berth'] is None
+        assert rpc('capacity')['in_use'] == 2
+        assert orchestrator['id'] not in rpc('capacity')['live']
         rpc('start_orchestrator', {'project_id': p['id'], 'agent': 'claude'}, error=True)
         result_path = Path(orchestrator['worktree'])/'mcp-result.json'
         wait_for(result_path.exists)

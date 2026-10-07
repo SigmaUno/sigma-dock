@@ -128,6 +128,7 @@ impl Appearance {
 pub struct Preferences {
     pub appearance: Appearance,
     pub updates: crate::updates::UpdatePreferences,
+    pub editor: crate::editor::EditorPreferences,
 }
 impl Preferences {
     pub fn load(path: &Path) -> Result<Self> {
@@ -145,10 +146,12 @@ impl Preferences {
         }
         let preferences: Self = serde_json::from_slice(&bytes).context("Read preferences")?;
         preferences.appearance.validate()?;
+        preferences.editor.validate()?;
         Ok(preferences)
     }
     pub fn save(&self, path: &Path) -> Result<()> {
         self.appearance.validate()?;
+        self.editor.validate()?;
         fs::create_dir_all(path.parent().context("Preferences path has no parent")?)?;
         let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
         let mut options = fs::OpenOptions::new();
@@ -218,6 +221,10 @@ mod tests {
         ));
         let preferences = Preferences {
             updates: Default::default(),
+            editor: crate::editor::EditorPreferences {
+                editor: Some(crate::editor::Editor::Zed),
+                custom_command: "ed {path}".into(),
+            },
             appearance: Appearance {
                 cursor: Cursor::Beam,
                 ..Appearance::light()

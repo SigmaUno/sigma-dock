@@ -2,6 +2,8 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+pub mod summary;
+
 use std::{
     io::{BufRead, BufReader, Read, Write},
     os::unix::net::UnixStream,
@@ -9,7 +11,10 @@ use std::{
     time::Duration,
 };
 
-pub const API_VERSION: u32 = 1;
+pub mod diff;
+mod readiness;
+pub use readiness::{GitReadiness, Readiness, ReadinessReport, ReviewComment, ReviewPreview};
+pub const API_VERSION: u32 = 2;
 pub const MAX_FRAME: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -51,6 +56,9 @@ pub enum Review {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Facts {
+    /// Observed PR target branch; absent in older facts.
+    #[serde(default)]
+    pub base_branch: Option<String>,
     pub session: SessionState,
     pub pr: PullRequestState,
     pub checks: Checks,
@@ -65,6 +73,7 @@ pub struct Facts {
 impl Default for Facts {
     fn default() -> Self {
         Self {
+            base_branch: None,
             session: SessionState::Running,
             pr: Default::default(),
             checks: Default::default(),
@@ -79,13 +88,13 @@ impl Default for Facts {
 }
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum Column {
+pub enum Status {
     Working,
     NeedsYou,
     InReview,
     ReadyToMerge,
 }
-impl Column {
+impl Status {
     pub const ALL: [Self; 4] = [
         Self::Working,
         Self::NeedsYou,
@@ -102,9 +111,9 @@ impl Column {
     }
 }
 /// Merged work stays visible; any blocker takes precedence over an approval.
-pub fn column(f: &Facts) -> Column {
+pub fn status(f: &Facts) -> Status {
     if f.pr == PullRequestState::Merged {
-        return Column::ReadyToMerge;
+        return Status::ReadyToMerge;
     }
     if matches!(f.session, SessionState::NeedsInput | SessionState::Lost)
         || f.exit_code.is_some_and(|code| code != 0)
@@ -114,28 +123,43 @@ pub fn column(f: &Facts) -> Column {
         || f.forge_error.is_some()
         || f.pr == PullRequestState::Closed
     {
-        return Column::NeedsYou;
+        return Status::NeedsYou;
     }
     if f.pr == PullRequestState::Open
         && f.review == Review::Approved
         && f.checks == Checks::Passed
         && f.mergeable == Some(true)
     {
-        return Column::ReadyToMerge;
+        return Status::ReadyToMerge;
     }
     if matches!(f.pr, PullRequestState::Open | PullRequestState::Draft) {
-        return Column::InReview;
+        return Status::InReview;
     }
-    Column::Working
+    Status::Working
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
+    /// Branch on origin used by default; absent in legacy/local-only projects.
+    #[serde(default)]
+    pub base_branch: Option<String>,
     pub id: String,
     pub path: PathBuf,
     pub name: String,
+    /// Forge every worker of this project uses; new workers inherit it.
+    #[serde(default)]
+    pub forge: Option<ForgeConfig>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Worker {
+    /// Base ref recorded at launch, independent of the source checkout's HEAD.
+    #[serde(default)]
+    pub base_ref: Option<String>,
+    /// Fetch failed and this worker started from a cached remote commit.
+    #[serde(default)]
+    pub base_warning: Option<String>,
+    /// Last assigned slot; only a live worker session occupies it.
+    #[serde(default)]
+    pub berth: Option<u8>,
     pub id: String,
     pub project_id: String,
     pub title: String,
@@ -158,6 +182,12 @@ pub struct Worker {
     /// Unix seconds when the worker was archived; absent for workers archived before 0.1.3.
     #[serde(default)]
     pub archived_at: Option<u64>,
+    /// Initial instruction, bounded like other task data; absent before 0.1.3.
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// Unix seconds when the latest session exited; cleared on resume.
+    #[serde(default)]
+    pub finished_at: Option<u64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ForgeConfig {
@@ -168,6 +198,54 @@ pub struct ForgeConfig {
     pub token_env: String,
     #[serde(default)]
     pub actions: bool,
+    /// Where the daemon reads the API token; `token_env` applies to `Env` only.
+    #[serde(default)]
+    pub token: TokenSource,
+}
+/// Apps opened from Finder get no shell environment, so a GitHub CLI login is the
+/// practical token source there; environment variables suit daemons started from a shell.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenSource {
+    #[default]
+    Env,
+    /// `gh auth token` for the API's host.
+    GithubCli,
+}
+/// `(host, owner, repo)` of a git remote URL such as `git@github.com:o/r.git`,
+/// `https://github.com/o/r` or `ssh://git@host:2222/o/r.git`.
+pub fn parse_remote(url: &str) -> Option<(String, String, String)> {
+    let url = url.trim();
+    let rest = if let Some((scheme, rest)) = url.split_once("://") {
+        if !["https", "http", "ssh", "git"].contains(&scheme) {
+            return None;
+        }
+        rest.to_owned()
+    } else {
+        // scp-like syntax: [user@]host:owner/repo
+        let (host, path) = url.split_once(':')?;
+        format!("{host}/{path}")
+    };
+    let (authority, path) = rest.split_once('/')?;
+    let host = authority
+        .rsplit('@')
+        .next()?
+        .split(':')
+        .next()?
+        .to_ascii_lowercase();
+    let mut parts = path
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .rsplitn(2, '/');
+    let repo = parts.next()?.to_owned();
+    let owner = parts.next()?.rsplit('/').next()?.to_owned();
+    let valid = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    };
+    (!host.is_empty() && valid(&owner) && valid(&repo)).then_some((host, owner, repo))
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -206,14 +284,151 @@ pub struct SessionContext {
     pub text: String,
     pub truncated: bool,
 }
-/// Berth usage: the same live-session counts `check_capacity` enforces per project.
+/// Why a forge issue or pull request is in the inbox.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InboxKind {
+    Assigned,
+    ReviewRequested,
+}
+/// One forge issue or pull request that waits on the token's user.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InboxItem {
+    pub kind: InboxKind,
+    /// `owner/repo`.
+    pub repo: String,
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub pull_request: bool,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    /// Unix seconds; 0 when the forge did not report a parseable time.
+    pub updated_at: u64,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Inbox {
+    /// Newest first, one entry per issue or pull request and kind.
+    pub items: Vec<InboxItem>,
+    /// Repositories that could not be read, with the reason.
+    pub warnings: Vec<String>,
+}
+/// Seconds since the Unix epoch for an RFC 3339 timestamp such as
+/// `2026-10-07T14:56:27Z`; `None` when it does not parse.
+pub fn parse_rfc3339(text: &str) -> Option<u64> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 20 || bytes[4] != b'-' || bytes[10] != b'T' {
+        return None;
+    }
+    let number = |range: std::ops::Range<usize>| -> Option<i64> { text.get(range)?.parse().ok() };
+    let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
+    let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
+    let mut rest = &text[19..];
+    if let Some(fraction) = rest.strip_prefix('.') {
+        rest = fraction.trim_start_matches(|c: char| c.is_ascii_digit());
+    }
+    let offset = match rest {
+        "Z" | "z" => 0,
+        _ if rest.len() == 6 && (rest.starts_with('+') || rest.starts_with('-')) => {
+            let minutes = rest[1..3].parse::<i64>().ok()? * 60 + rest[4..6].parse::<i64>().ok()?;
+            if rest.starts_with('-') {
+                -minutes
+            } else {
+                minutes
+            }
+        }
+        _ => return None,
+    };
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 {
+        return None;
+    }
+    // Days from civil date (Howard Hinnant's algorithm).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let seconds = days * 86_400 + hour * 3600 + minute * 60 + second - offset * 60;
+    u64::try_from(seconds).ok()
+}
+/// Global berth usage: the same live-session count `check_capacity` enforces.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Capacity {
-    /// Berths each project may hold; daemons before 0.1.3 reported a global `max_workers`.
-    #[serde(alias = "max_workers")]
-    pub per_project: usize,
-    /// Workers holding a berth across all projects, oldest first.
+    pub max_workers: usize,
+    /// Workers holding a berth, oldest first.
     pub live: Vec<String>,
+    #[serde(default)]
+    pub in_use: usize,
+    #[serde(default)]
+    pub queued: usize,
+    #[serde(default)]
+    pub per_project: std::collections::BTreeMap<String, ProjectCapacity>,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProjectCapacity {
+    pub in_use: usize,
+    pub queued: usize,
+}
+/// Local durable task data, not a worker until its session starts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuedTask {
+    /// Fetch the recorded project branch when this task starts.
+    #[serde(default)]
+    pub fetch_base: bool,
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub agent: String,
+    pub prompt: Option<String>,
+    pub base: String,
+    pub forge: Option<ForgeConfig>,
+    pub usage_reporting: bool,
+    pub created_at: u64,
+    pub last_error: Option<String>,
+    pub starting: bool,
+}
+/// Output availability metadata; no terminal bytes are sent over the event stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputSignal {
+    pub cursor: u64,
+    pub cols: u16,
+    pub rows: u16,
+    pub exited: bool,
+    pub generation: u64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DaemonEvent {
+    Resync,
+    WorkerChanged {
+        worker_id: String,
+    },
+    ProjectsChanged,
+    CapacityChanged,
+    QueueChanged,
+    OutputAvailable {
+        worker_id: String,
+        signal: OutputSignal,
+    },
+    Heartbeat,
+}
+/// A blocking, bounded-frame stream. A cloned shutdown handle can interrupt a reader.
+pub struct EventSubscription {
+    reader: BufReader<UnixStream>,
+}
+impl EventSubscription {
+    pub fn shutdown_handle(&self) -> Result<UnixStream> {
+        Ok(self.reader.get_ref().try_clone()?)
+    }
+    pub fn next_event(&mut self) -> Result<DaemonEvent> {
+        let frame = read_frame(&mut self.reader)?.context("event subscription closed")?;
+        let value: Value = serde_json::from_slice(&frame)?;
+        if value["jsonrpc"] != "2.0" || value["method"] != "event" {
+            bail!("invalid daemon event");
+        }
+        Ok(serde_json::from_value(value["params"].clone())?)
+    }
 }
 pub fn unix_time() -> u64 {
     std::time::SystemTime::now()
@@ -272,6 +487,11 @@ pub struct Session {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Output {
+    /// Current PTY geometry. Older daemons omit these additive fields.
+    #[serde(default)]
+    pub cols: Option<u16>,
+    #[serde(default)]
+    pub rows: Option<u16>,
     pub bytes: Vec<u8>,
     pub cursor: u64,
     pub truncated: bool,
@@ -310,6 +530,38 @@ impl Default for Client {
     }
 }
 impl Client {
+    pub fn subscribe(&self) -> Result<EventSubscription> {
+        let mut stream = UnixStream::connect(&self.socket)?;
+        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+        writeln!(
+            stream,
+            "{}",
+            json!({"jsonrpc":"2.0","id":1,"method":"subscribe","params":{}})
+        )?;
+        let mut reader = BufReader::new(stream);
+        let frame = read_frame(&mut reader)?.context("daemon closed subscription")?;
+        let reply: Value = serde_json::from_slice(&frame)?;
+        if reply["result"]["version"].as_u64() != Some(u64::from(API_VERSION)) {
+            bail!(
+                "event subscription failed: {}",
+                reply.get("error").unwrap_or(&reply)
+            );
+        }
+        // No read timeout: partial frames must not be discarded on timeout.
+        reader.get_ref().set_read_timeout(None)?;
+        Ok(EventSubscription { reader })
+    }
+    pub fn check_version(&self) -> Result<()> {
+        let reply = self.call("ping", json!({}))?;
+        if reply["version"].as_u64() != Some(u64::from(API_VERSION)) {
+            bail!(
+                "incompatible daemon API {}; expected {API_VERSION}. Finish workers and restart the daemon from this installation",
+                reply["version"]
+            );
+        }
+        Ok(())
+    }
     pub fn call(&self, method: &str, params: Value) -> Result<Value> {
         let mut stream = UnixStream::connect(&self.socket).with_context(|| {
             format!(
@@ -358,23 +610,113 @@ pub fn read_frame(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>> {
 mod tests {
     use super::*;
     #[test]
-    fn board_precedence() {
+    fn git_remotes_parse_to_host_owner_and_repo() {
+        let parsed = |url| parse_remote(url).map(|(h, o, r)| format!("{h} {o} {r}"));
+        assert_eq!(
+            parsed("git@github.com:SigmaUno/sigma-dock.git").as_deref(),
+            Some("github.com SigmaUno sigma-dock")
+        );
+        assert_eq!(
+            parsed("https://github.com/SigmaUno/sigma-dock").as_deref(),
+            Some("github.com SigmaUno sigma-dock")
+        );
+        assert_eq!(
+            parsed("ssh://git@code.example:2222/team/app.git/").as_deref(),
+            Some("code.example team app")
+        );
+        assert_eq!(
+            parsed("https://user@git.example/group/sub/app.git").as_deref(),
+            Some("git.example sub app")
+        );
+        assert_eq!(parsed("/local/path/repo"), None);
+        assert_eq!(parsed("file:///tmp/o/r"), None);
+        let config: ForgeConfig = serde_json::from_value(json!({
+            "kind": "github", "api_url": "https://api.github.com", "owner": "o", "repo": "r", "token_env": "T"
+        })).unwrap();
+        assert_eq!(config.token, TokenSource::Env);
+    }
+    #[test]
+    fn subscription_preserves_buffered_events_and_reports_eof() {
+        use std::{
+            os::unix::net::UnixListener,
+            thread,
+            time::{SystemTime, UNIX_EPOCH},
+        };
+        let socket = PathBuf::from("/tmp").join(format!(
+            "sigmadock-events-{}-{}.sock",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (finish, finished) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request: Value = serde_json::from_slice(
+                &read_frame(&mut BufReader::new(stream.try_clone().unwrap()))
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(request["method"], "subscribe");
+            // The reader may buffer notifications while consuming the acknowledgement.
+            let frames = format!(
+                "{}\n{}\n{}\n",
+                json!({"jsonrpc":"2.0","id":1,"result":{"version":API_VERSION}}),
+                json!({"jsonrpc":"2.0","method":"event","params":DaemonEvent::Resync}),
+                json!({"jsonrpc":"2.0","method":"event","params":DaemonEvent::CapacityChanged})
+            );
+            stream.write_all(frames.as_bytes()).unwrap();
+            finished.recv().unwrap();
+        });
+        let mut subscription = Client {
+            socket: socket.clone(),
+        }
+        .subscribe()
+        .unwrap();
+        assert!(matches!(
+            subscription.next_event().unwrap(),
+            DaemonEvent::Resync
+        ));
+        assert!(matches!(
+            subscription.next_event().unwrap(),
+            DaemonEvent::CapacityChanged
+        ));
+        finish.send(()).unwrap();
+        assert!(subscription.next_event().is_err());
+        server.join().unwrap();
+        std::fs::remove_file(socket).unwrap();
+    }
+    #[test]
+    fn rfc3339_timestamps_convert_to_unix_seconds() {
+        assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_rfc3339("2026-10-07T14:56:27Z"), Some(1_791_384_987));
+        assert_eq!(
+            parse_rfc3339("2026-10-07T16:56:27.123+02:00"),
+            Some(1_791_384_987)
+        );
+        assert_eq!(parse_rfc3339("yesterday"), None);
+    }
+    #[test]
+    fn status_precedence() {
         let mut f = Facts::default();
-        assert_eq!(column(&f), Column::Working);
+        assert_eq!(status(&f), Status::Working);
         f.session = SessionState::Idle;
-        assert_eq!(column(&f), Column::Working);
+        assert_eq!(status(&f), Status::Working);
         f.pr = PullRequestState::Draft;
-        assert_eq!(column(&f), Column::InReview);
+        assert_eq!(status(&f), Status::InReview);
         f.pr = PullRequestState::Open;
         f.review = Review::Approved;
         f.mergeable = Some(true);
-        assert_eq!(column(&f), Column::InReview);
+        assert_eq!(status(&f), Status::InReview);
         f.checks = Checks::Passed;
-        assert_eq!(column(&f), Column::ReadyToMerge);
+        assert_eq!(status(&f), Status::ReadyToMerge);
         f.checks = Checks::Failed;
-        assert_eq!(column(&f), Column::NeedsYou);
+        assert_eq!(status(&f), Status::NeedsYou);
         f.pr = PullRequestState::Merged;
-        assert_eq!(column(&f), Column::ReadyToMerge);
+        assert_eq!(status(&f), Status::ReadyToMerge);
     }
     #[test]
     fn each_blocker_wins() {
@@ -412,7 +754,7 @@ mod tests {
             },
         ];
         for f in variants {
-            assert_eq!(column(&f), Column::NeedsYou);
+            assert_eq!(status(&f), Status::NeedsYou);
         }
     }
     #[test]
@@ -463,6 +805,9 @@ pub struct CiEntry {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CiPreview {
+    /// False when a provider endpoint or pagination is incomplete.
+    #[serde(default)]
+    pub complete: bool,
     pub head_sha: String,
     pub current_head: String,
     pub refreshed_at: u64,
@@ -489,4 +834,41 @@ pub struct AgentUsage {
     pub context_input_tokens: Option<u64>,
     pub context_output_tokens: Option<u64>,
     pub warnings: Vec<String>,
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+    #[test]
+    fn handshake_accepts_only_the_matching_api() {
+        for version in [1, API_VERSION] {
+            let path = std::env::temp_dir().join(format!(
+                "sigmadock-version-{}-{version}.sock",
+                std::process::id()
+            ));
+            let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request: Value = serde_json::from_slice(
+                    &read_frame(&mut BufReader::new(stream.try_clone().unwrap()))
+                        .unwrap()
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(request["method"], "ping");
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({"jsonrpc":"2.0","id":request["id"],"result":{"version":version}})
+                )
+                .unwrap();
+            });
+            let client = Client {
+                socket: path.clone(),
+            };
+            assert_eq!(client.check_version().is_ok(), version == API_VERSION);
+            server.join().unwrap();
+            std::fs::remove_file(path).unwrap();
+        }
+    }
 }

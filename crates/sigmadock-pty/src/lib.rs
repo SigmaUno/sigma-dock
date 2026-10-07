@@ -1,7 +1,7 @@
 //! PTY ownership and bounded output replay independent of any UI.
 use anyhow::{Result, bail};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
-use sigmadock_core::{Output, SessionContext, SessionState, output_text, unix_time};
+use sigmadock_core::{Output, OutputSignal, SessionContext, SessionState, output_text, unix_time};
 use std::{
     collections::VecDeque,
     io::{Read, Write},
@@ -13,6 +13,8 @@ use std::{
 const CAPACITY: usize = 1024 * 1024;
 const CHUNK: usize = 64 * 1024;
 struct State {
+    rows: u16,
+    cols: u16,
     output: VecDeque<u8>,
     cursor: u64,
     last_activity: Instant,
@@ -23,6 +25,7 @@ struct State {
     exit_code: Option<u32>,
 }
 pub struct Session {
+    generation: u64,
     writer: Mutex<Box<dyn Write + Send>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
@@ -57,6 +60,8 @@ impl Session {
         let child = Arc::new(Mutex::new(child));
         drop(pair.slave);
         let state = Arc::new(Mutex::new(State {
+            rows: 30,
+            cols: 120,
             output: VecDeque::new(),
             cursor: 0,
             last_activity: Instant::now(),
@@ -108,7 +113,9 @@ impl Session {
                 }
             }
         });
+        static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Ok(Self {
+            generation: NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             writer: Mutex::new(writer),
             master: Mutex::new(pair.master),
             child,
@@ -136,12 +143,15 @@ impl Session {
         if rows == 0 || cols == 0 || rows > 1000 || cols > 1000 {
             bail!("terminal dimensions must be 1..1000");
         }
+        let mut state = self.state.lock().unwrap();
         self.master.lock().unwrap().resize(PtySize {
             rows,
             cols,
             pixel_width: 0,
             pixel_height: 0,
         })?;
+        state.rows = rows;
+        state.cols = cols;
         Ok(())
     }
     pub fn stop(&self) -> Result<()> {
@@ -214,6 +224,16 @@ impl Session {
             truncated: state.cursor.saturating_sub(since) > bytes.len() as u64,
         }
     }
+    pub fn output_signal(&self) -> OutputSignal {
+        let state = self.state.lock().unwrap();
+        OutputSignal {
+            cursor: state.cursor,
+            cols: state.cols,
+            rows: state.rows,
+            exited: state.exited && state.eof,
+            generation: self.generation,
+        }
+    }
     pub fn output(&self, cursor: u64) -> Output {
         let state = self.state.lock().unwrap();
         let start = state.cursor - state.output.len() as u64;
@@ -226,6 +246,8 @@ impl Session {
             .copied()
             .collect();
         Output {
+            rows: Some(state.rows),
+            cols: Some(state.cols),
             cursor: offset + bytes.len() as u64,
             exited: state.exited && state.eof && offset + bytes.len() as u64 == state.cursor,
             bytes,
@@ -292,7 +314,20 @@ mod tests {
             Path::new("/tmp"),
         )
         .unwrap();
+        assert_eq!(
+            (session.output(0).cols, session.output(0).rows),
+            (Some(120), Some(30))
+        );
         session.resize(24, 80).unwrap();
+        assert_eq!(
+            (session.output(0).cols, session.output(0).rows),
+            (Some(80), Some(24))
+        );
+        assert!(session.resize(0, 80).is_err());
+        assert_eq!(
+            (session.output(0).cols, session.output(0).rows),
+            (Some(80), Some(24))
+        );
         session.write(b"hello\n").unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while !session.output(0).exited && Instant::now() < deadline {

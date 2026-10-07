@@ -51,7 +51,7 @@ with tempfile.TemporaryDirectory(prefix='sigma-app-', dir='/tmp') as folder:
         assert 'error' not in reply, reply
         return reply['result']
     def ready():
-        try: return rpc('ping')['version'] == 1
+        try: return rpc('ping')['version'] == 2
         except OSError: return False
     app = None
     daemon_ids = []
@@ -61,7 +61,7 @@ with tempfile.TemporaryDirectory(prefix='sigma-app-', dir='/tmp') as folder:
             wait(ready)
             daemon_ids = [rpc('ping')['pid']]
             project = rpc('add_project', {'path':str(repo)})
-            worker = rpc('spawn_worker', {'project_id':project['id'],'title':'Bundle smoke','agent':'shell'})
+            worker = rpc('spawn_worker', {'project_id':project['id'],'title':'Bundle smoke','agent':'shell','base':'main'})
             if app.poll() is None: app.terminate()
             app.wait(timeout=10)
             assert ready(), 'Closing the app stopped the daemon'

@@ -1,11 +1,12 @@
+mod events;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use fs2::FileExt;
 use serde_json::{Value, json};
 use sigmadock_agents::{Executor, Harness, McpLaunch, orchestrator_command};
 use sigmadock_core::{
-    API_VERSION, Checks, Facts, ForgeConfig, Project, SessionState, Worker, WorkerRole, column,
-    read_frame, state_dir, task_text,
+    API_VERSION, Checks, DaemonEvent, Facts, ForgeConfig, OutputSignal, Project, QueuedTask,
+    SessionState, Worker, WorkerRole, read_frame, state_dir, status, task_text,
 };
 use sigmadock_forge::{Forge, RestForge};
 use sigmadock_ports::PortPool;
@@ -35,15 +36,24 @@ struct Args {
     state_dir: PathBuf,
     #[arg(long, env = "SIGMA_DOCK_SOCKET")]
     socket: Option<PathBuf>,
-    /// Live sessions each project may hold at once.
-    #[arg(long, alias = "max-workers", default_value_t = 6)]
-    berths_per_project: usize,
+    #[arg(long)]
+    max_workers: Option<usize>,
     #[arg(long)]
     mcp_binary: Option<PathBuf>,
     #[arg(long, default_value_t = 60)]
     idle_seconds: u64,
 }
+#[derive(Default)]
+struct EventStamp {
+    workers: HashMap<String, Value>,
+    projects: Value,
+    capacity: Value,
+    queue: Value,
+    outputs: HashMap<String, OutputSignal>,
+}
 struct Daemon {
+    events: Arc<events::EventHub>,
+    event_stamp: EventStamp,
     store: Store,
     workers: HashMap<String, Worker>,
     sessions: HashMap<String, Arc<Session>>,
@@ -52,13 +62,74 @@ struct Daemon {
     checkpoints: HashMap<String, (std::time::Instant, (u64, u64, SessionState))>,
     ports: PortPool,
     forges: HashMap<String, Arc<RestForge>>,
+    /// Last inbox read, reused for `INBOX_TTL` to bound forge API use.
+    inbox: Option<(std::time::Instant, sigmadock_core::Inbox)>,
     state_dir: PathBuf,
-    berths_per_project: usize,
+    max_workers: usize,
     mcp_binary: PathBuf,
     socket: PathBuf,
     idle_seconds: u64,
 }
 impl Daemon {
+    fn publish_events(&mut self) -> Result<()> {
+        let workers: HashMap<_, _> = self
+            .workers
+            .iter()
+            .map(|(id, worker)| Ok((id.clone(), serde_json::to_value(worker)?)))
+            .collect::<Result<_>>()?;
+        for (id, worker) in &workers {
+            if self.event_stamp.workers.get(id) != Some(worker) {
+                self.events.publish(DaemonEvent::WorkerChanged {
+                    worker_id: id.clone(),
+                });
+            }
+        }
+        let projects = serde_json::to_value(self.store.projects()?)?;
+        let capacity = serde_json::to_value(self.capacity()?)?;
+        let queue = json!(
+            self.store
+                .queue()?
+                .iter()
+                .map(|task| (&task.id, &task.last_error, task.starting))
+                .collect::<Vec<_>>()
+        );
+        for (changed, event) in [
+            (
+                projects != self.event_stamp.projects,
+                DaemonEvent::ProjectsChanged,
+            ),
+            (
+                capacity != self.event_stamp.capacity,
+                DaemonEvent::CapacityChanged,
+            ),
+            (queue != self.event_stamp.queue, DaemonEvent::QueueChanged),
+        ] {
+            if changed {
+                self.events.publish(event);
+            }
+        }
+        let outputs: HashMap<_, _> = self
+            .sessions
+            .iter()
+            .map(|(id, session)| (id.clone(), session.output_signal()))
+            .collect();
+        for (id, signal) in &outputs {
+            if self.event_stamp.outputs.get(id) != Some(signal) {
+                self.events.publish(DaemonEvent::OutputAvailable {
+                    worker_id: id.clone(),
+                    signal: *signal,
+                });
+            }
+        }
+        self.event_stamp = EventStamp {
+            workers,
+            projects,
+            capacity,
+            queue,
+            outputs,
+        };
+        Ok(())
+    }
     fn sync(&mut self) -> Result<()> {
         for (id, session) in &self.sessions {
             if let Some(worker) = self.workers.get_mut(id) {
@@ -85,6 +156,10 @@ impl Daemon {
                 }
                 let (state, code) = session.facts();
                 if worker.facts.session != state || worker.facts.exit_code != code {
+                    if state == SessionState::Exited && worker.facts.session != SessionState::Exited
+                    {
+                        worker.finished_at = Some(sigmadock_core::unix_time());
+                    }
                     worker.facts.session = state;
                     worker.facts.exit_code = code;
                     self.store.save_worker(worker)?;
@@ -109,11 +184,19 @@ impl Daemon {
             .context("no live session; resume the worker")
     }
     fn project(&self, id: &str) -> Result<Project> {
-        self.store
+        let mut project = self
+            .store
             .projects()?
             .into_iter()
             .find(|p| p.id == id)
-            .context("project not found")
+            .context("project not found")?;
+        if project.base_branch.is_none() {
+            project.base_branch = sigmadock_git::default_base(&project.path).ok();
+            if project.base_branch.is_some() {
+                self.store.save_project(&project)?;
+            }
+        }
+        Ok(project)
     }
     fn start_session(
         &self,
@@ -208,10 +291,16 @@ impl Daemon {
             }
             "add_project" => {
                 let path = sigmadock_git::root(&PathBuf::from(string(&params, "path")?))?;
-                if let Some(project) = self.store.projects()?.into_iter().find(|p| p.path == path) {
+                if let Some(mut project) = self.store.project_at(&path)? {
+                    if project.base_branch.is_none() {
+                        project.base_branch = sigmadock_git::default_base(&path).ok();
+                    }
+                    self.store.save_project(&project)?;
                     return Ok(serde_json::to_value(project)?);
                 }
                 let project = Project {
+                    forge: None,
+                    base_branch: sigmadock_git::default_base(&path).ok(),
                     id: Uuid::new_v4().to_string(),
                     name: path
                         .file_name()
@@ -223,8 +312,45 @@ impl Daemon {
                 self.store.save_project(&project)?;
                 Ok(serde_json::to_value(project)?)
             }
+            "configure_project" => {
+                let mut project = self.project(string(&params, "project_id")?)?;
+                let branch = string(&params, "base_branch")?;
+                sigmadock_git::validate_base_branch(&project.path, branch)?;
+                project.base_branch = Some(branch.to_owned());
+                self.store.save_project(&project)?;
+                Ok(serde_json::to_value(project)?)
+            }
             "list_projects" => Ok(serde_json::to_value(self.store.projects()?)?),
-            "capacity" => Ok(serde_json::to_value(self.capacity())?),
+            "detect_forge" => {
+                let project = self.project(string(&params, "project_id")?)?;
+                let url = sigmadock_git::remote_url(&project.path)?;
+                let (host, owner, repo) = sigmadock_core::parse_remote(&url)
+                    .with_context(|| format!("origin {url} is not a recognised forge URL"))?;
+                let github = host == "github.com";
+                Ok(serde_json::to_value(ForgeConfig {
+                    kind: if github { "github" } else { "forgejo" }.into(),
+                    api_url: if github {
+                        "https://api.github.com".into()
+                    } else {
+                        format!("https://{host}/api/v1")
+                    },
+                    owner,
+                    repo,
+                    token_env: if github {
+                        "GITHUB_TOKEN"
+                    } else {
+                        "FORGEJO_TOKEN"
+                    }
+                    .into(),
+                    actions: false,
+                    token: if github {
+                        sigmadock_core::TokenSource::GithubCli
+                    } else {
+                        sigmadock_core::TokenSource::Env
+                    },
+                })?)
+            }
+            "capacity" => Ok(serde_json::to_value(self.capacity()?)?),
             "list_workers" => {
                 let mut workers: Vec<_> = self
                     .workers
@@ -316,91 +442,123 @@ impl Daemon {
                 }
                 Ok(json!(true))
             }
+            // Keep the legacy field for one release; clients should use `status`.
             "get_worker_status" => {
                 let worker = self.worker(&params)?;
-                Ok(
-                    json!({"worker":worker,"column":column(&worker.facts),"pid":self.sessions.get(&worker.id).and_then(|s| s.pid)}),
-                )
+                let derived_status = status(&worker.facts);
+                Ok(json!({
+                    "worker": worker,
+                    "berth": worker.berth,
+                    "status": derived_status,
+                    "column": derived_status,
+                    "pid": self.sessions.get(&worker.id).and_then(|s| s.pid),
+                }))
             }
-            "spawn_worker" | "start_orchestrator" => {
-                let project = self.project(string(&params, "project_id")?)?;
-                self.check_capacity(&project.id)?;
-                let role = if method == "start_orchestrator" {
-                    WorkerRole::Orchestrator
-                } else {
-                    WorkerRole::Worker
-                };
-                if role == WorkerRole::Orchestrator
-                    && self.workers.values().any(|w| {
-                        w.project_id == project.id
-                            && w.role == WorkerRole::Orchestrator
-                            && !w.archived
-                    })
-                {
-                    bail!("project already has an orchestrator; resume or archive it first");
-                }
-                let agent = params["agent"].as_str().unwrap_or("claude").to_owned();
-                if role == WorkerRole::Orchestrator
-                    && !["claude", "codex"].contains(&agent.as_str())
-                {
-                    bail!("managed orchestrators support claude or codex");
-                }
-                let prompt = params["prompt"].as_str();
-                Harness(agent.clone()).command(prompt, false)?;
-                let id = Uuid::new_v4().to_string();
-                let branch = format!("sigma/{id}");
-                let worktree = self.state_dir.join("worktrees").join(&id);
-                let title = if role == WorkerRole::Orchestrator {
-                    "Project orchestrator".into()
-                } else {
-                    string(&params, "title")?.to_owned()
-                };
-                let port = self.ports.allocate()?;
-                let worker = Worker {
-                    id: id.clone(),
-                    project_id: project.id,
-                    title,
-                    agent,
-                    branch,
-                    worktree,
-                    port,
-                    created_at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
-                    archived: false,
-                    facts: Facts::default(),
-                    forge: None,
-                    role,
-                    feedback: Default::default(),
-                    usage_reporting: params["usage_reporting"] == true,
-                    orchestrator_spawn: method == "start_orchestrator"
-                        && params["allow_spawn"] == true,
-                    archived_at: None,
-                };
-                if let Err(error) = sigmadock_git::create(
-                    &project.path,
-                    &worker.worktree,
-                    &worker.branch,
-                    params["base"].as_str().unwrap_or("HEAD"),
-                ) {
-                    self.ports.release(port);
-                    return Err(error);
-                }
-                let session = match self.start_session(&worker, prompt, false) {
-                    Ok(session) => session,
-                    Err(error) => {
-                        sigmadock_git::rollback(&project.path, &worker.worktree, &worker.branch);
-                        self.ports.release(port);
-                        return Err(error);
+            "spawn_worker" => {
+                let mut params = params;
+                // Validate typed task data before persisting anything or checking capacity.
+                let task = self.task(&params)?;
+                params["base"] = json!(task.base);
+                if self.free_berth(None).is_err() || self.store.queued_count()? > 0 {
+                    if params["queue"] != true {
+                        self.check_capacity()?;
+                        bail!("waiting tasks take priority; use queue: true to wait for a berth");
                     }
-                };
-                if let Err(error) = self.store.save_worker(&worker) {
-                    let _ = session.stop();
-                    sigmadock_git::rollback(&project.path, &worker.worktree, &worker.branch);
-                    self.ports.release(port);
-                    return Err(error);
+                    let position = self.store.queued_count()? + 1;
+                    if position > 1000 {
+                        bail!("waiting queue is full");
+                    }
+                    self.store.save_queued(&task)?;
+                    Ok(json!({"queued": true, "id": task.id, "position": position}))
+                } else {
+                    self.spawn("spawn_worker", &params, None, task.fetch_base)
                 }
-                self.sessions.insert(id.clone(), session);
-                self.workers.insert(id, worker.clone());
-                Ok(serde_json::to_value(worker)?)
+            }
+            "start_orchestrator" => self.spawn(method, &params, None, params["base"].is_null()),
+            "list_queue" => {
+                let limit = params["limit"].as_u64().unwrap_or(100);
+                let offset = params["offset"].as_u64().unwrap_or(0);
+                if !(1..=100).contains(&limit) {
+                    bail!("queue page limit must be 1..100");
+                }
+                let tasks = self.store.queue()?;
+                let values: Vec<_> = tasks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, task)| {
+                        params["project_id"]
+                            .as_str()
+                            .is_none_or(|id| task.project_id == id)
+                    })
+                    .skip(usize::try_from(offset)?)
+                    .take(limit as usize)
+                    .map(|(index, task)| -> Result<Value> {
+                        let mut value = serde_json::to_value(task)?;
+                        let object = value.as_object_mut().context("invalid queued task")?;
+                        object.remove("prompt");
+                        object.remove("forge");
+                        object.insert("position".into(), json!(index + 1));
+                        Ok(value)
+                    })
+                    .collect::<Result<_>>()?;
+                Ok(json!(values))
+            }
+            "cancel_queued" | "retry_queued" => {
+                let id = string(&params, "id")?;
+                let mut task = self
+                    .store
+                    .queue()?
+                    .into_iter()
+                    .find(|task| task.id == id)
+                    .context("queued task not found")?;
+                if let Some(project) = params["project_id"].as_str()
+                    && task.project_id != project
+                {
+                    bail!("queued task is outside this project");
+                }
+                if method == "cancel_queued" {
+                    self.store.cancel_queued(id)?;
+                } else {
+                    if params["acknowledge_unknown"] != true {
+                        bail!(
+                            "inspect any surviving task process and worktree, then explicitly acknowledge_unknown before retrying"
+                        );
+                    }
+                    task.last_error = None;
+                    task.starting = false;
+                    self.store.save_queued(&task)?;
+                }
+                Ok(json!(true))
+            }
+            "set_max_workers" => {
+                let value = params["max_workers"]
+                    .as_u64()
+                    .context("missing max_workers")?;
+                if !(1..=255).contains(&value) {
+                    bail!("max_workers must be 1..255");
+                }
+                self.store.set_max_workers(value as usize)?;
+                self.max_workers = value as usize;
+                Ok(serde_json::to_value(self.capacity()?)?)
+            }
+            "remove_project" => {
+                let project = self.project(string(&params, "project_id")?)?;
+                if self
+                    .workers
+                    .values()
+                    .any(|worker| worker.project_id == project.id && !worker.archived)
+                    || self
+                        .store
+                        .queue()?
+                        .iter()
+                        .any(|task| task.project_id == project.id)
+                {
+                    bail!(
+                        "archive the project's workers and cancel its queued tasks before removing it"
+                    );
+                }
+                self.store.remove_project(&project.id)?;
+                Ok(json!(true))
             }
             "resume_worker" => {
                 let mut worker = self.worker(&params)?.clone();
@@ -421,7 +579,14 @@ impl Daemon {
                         "previous process state is unknown; verify it stopped, then explicitly acknowledge_unknown before resuming"
                     );
                 }
-                self.check_capacity(&worker.project_id)?;
+                if worker.role == WorkerRole::Worker {
+                    if self.store.queued_count()? > 0 {
+                        bail!("waiting tasks take priority; resume after the queue clears");
+                    }
+                    worker.berth = Some(self.free_berth(worker.berth)?);
+                } else {
+                    worker.berth = None;
+                }
                 let session = self.start_session(
                     &worker,
                     params["prompt"].as_str(),
@@ -429,6 +594,7 @@ impl Daemon {
                 )?;
                 worker.facts.session = SessionState::Running;
                 worker.facts.exit_code = None;
+                worker.finished_at = None;
                 if let Err(error) = self.store.save_worker(&worker) {
                     let _ = session.stop();
                     return Err(error);
@@ -441,6 +607,18 @@ impl Daemon {
                 Ok(serde_json::to_value(worker)?)
             }
             "message_worker" => {
+                let worker = self.worker(&params)?;
+                if let Some(expected) = params["expected_git_head"].as_str() {
+                    let current = sigmadock_git::readiness(&worker.worktree, None, &worker.branch)?;
+                    if current.head != expected {
+                        bail!("worker HEAD changed since preview; reload checks before sending");
+                    }
+                }
+                if let Some(expected) = params["expected_pr_head"].as_str()
+                    && worker.facts.head_sha.as_deref() != Some(expected)
+                {
+                    bail!("observed PR head changed since preview; reload checks before sending");
+                }
                 let session = self.session(&params)?;
                 let text = task_text(string(&params, "message")?, 32000);
                 // Bracketed paste avoids executing each embedded newline as a separate command.
@@ -495,7 +673,6 @@ impl Daemon {
                 self.workers.insert(worker.id.clone(), worker);
                 Ok(json!(true))
             }
-            "diff" => Ok(json!(sigmadock_git::diff(&self.worker(&params)?.worktree)?)),
             "prune" => Ok(json!(sigmadock_git::prune(
                 &self.project(string(&params, "project_id")?)?.path
             )?)),
@@ -555,35 +732,262 @@ impl Daemon {
             _ => bail!("unknown method {method}"),
         }
     }
-    fn capacity(&self) -> sigmadock_core::Capacity {
+    fn spawn(
+        &mut self,
+        method: &str,
+        params: &Value,
+        queued_id: Option<&str>,
+        fetch_base: bool,
+    ) -> Result<Value> {
+        let project = self.project(string(params, "project_id")?)?;
+        let role = if method == "start_orchestrator" {
+            WorkerRole::Orchestrator
+        } else {
+            WorkerRole::Worker
+        };
+        if role == WorkerRole::Orchestrator
+            && self.workers.values().any(|w| {
+                w.project_id == project.id && w.role == WorkerRole::Orchestrator && !w.archived
+            })
+        {
+            bail!("project already has an orchestrator; resume or archive it first");
+        }
+        let agent = params["agent"].as_str().unwrap_or("claude").to_owned();
+        if role == WorkerRole::Orchestrator && !["claude", "codex"].contains(&agent.as_str()) {
+            bail!("managed orchestrators support claude or codex");
+        }
+        let prompt = params["prompt"].as_str();
+        Harness(agent.clone()).command(prompt, false)?;
+        let berth = if role == WorkerRole::Worker {
+            Some(self.free_berth(None)?)
+        } else {
+            None
+        };
+        let id = queued_id.map_or_else(|| Uuid::new_v4().to_string(), str::to_owned);
+        let branch = format!("sigma/{id}");
+        let worktree = self.state_dir.join("worktrees").join(&id);
+        let title = if role == WorkerRole::Orchestrator {
+            "Project orchestrator".into()
+        } else {
+            string(params, "title")?.to_owned()
+        };
+        let forge_config: Option<ForgeConfig> = params
+            .get("forge")
+            .filter(|value| !value.is_null())
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()?
+            .or_else(|| project.forge.clone());
+        let forge = forge_config
+            .clone()
+            .map(RestForge::new)
+            .transpose()?
+            .map(Arc::new);
+        let (base, base_warning, base_ref) = if fetch_base {
+            let branch = params["base"]
+                .as_str()
+                .map(str::to_owned)
+                .or(project.base_branch.clone())
+                .map(Ok)
+                .unwrap_or_else(|| sigmadock_git::default_base(&project.path))?;
+            let (commit, warning) = sigmadock_git::fresh_base(&project.path, &branch)?;
+            (commit, warning, format!("refs/remotes/origin/{branch}"))
+        } else {
+            let base = string(params, "base")?;
+            let reference = sigmadock_git::recorded_base(&project.path, base)?;
+            (base.to_owned(), None, reference)
+        };
+        let port = self.ports.allocate()?;
+        let worker = Worker {
+            base_ref: Some(base_ref),
+            base_warning,
+            berth,
+            id: id.clone(),
+            project_id: project.id,
+            title,
+            agent,
+            branch,
+            worktree,
+            port,
+            created_at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+            archived: false,
+            facts: Facts::default(),
+            forge: forge_config,
+            role,
+            feedback: Default::default(),
+            usage_reporting: params["usage_reporting"] == true,
+            orchestrator_spawn: method == "start_orchestrator" && params["allow_spawn"] == true,
+            archived_at: None,
+            prompt: prompt
+                .map(|text| task_text(text, 32000))
+                .filter(|text| !text.trim().is_empty()),
+            finished_at: None,
+        };
+        if let Err(error) =
+            sigmadock_git::create(&project.path, &worker.worktree, &worker.branch, &base)
+        {
+            self.ports.release(port);
+            return Err(error);
+        }
+        let session = match self.start_session(&worker, prompt, false) {
+            Ok(session) => session,
+            Err(error) => {
+                sigmadock_git::rollback(&project.path, &worker.worktree, &worker.branch);
+                self.ports.release(port);
+                return Err(error);
+            }
+        };
+        let saved = if queued_id.is_some() {
+            self.store.finish_queued(&worker)
+        } else {
+            self.store.save_worker(&worker)
+        };
+        if let Err(error) = saved {
+            let _ = session.stop();
+            sigmadock_git::rollback(&project.path, &worker.worktree, &worker.branch);
+            self.ports.release(port);
+            return Err(error);
+        }
+        if let Some(forge) = forge {
+            self.forges.insert(id.clone(), forge);
+        }
+        self.sessions.insert(id.clone(), session);
+        self.workers.insert(id, worker.clone());
+        Ok(serde_json::to_value(worker)?)
+    }
+    fn task(&self, params: &Value) -> Result<QueuedTask> {
+        let project = self.project(string(params, "project_id")?)?;
+        let title = string(params, "title")?.to_owned();
+        if title.trim().is_empty() || title.len() > 4096 {
+            bail!("task title must be 1..4096 bytes");
+        }
+        let agent = params["agent"].as_str().unwrap_or("claude").to_owned();
+        let prompt = params["prompt"].as_str().map(str::to_owned);
+        if prompt.as_ref().is_some_and(|prompt| prompt.len() > 32000) {
+            bail!("task prompt exceeds 32000 bytes");
+        }
+        Harness(agent.clone()).command(prompt.as_deref(), false)?;
+        let forge: Option<ForgeConfig> = params
+            .get("forge")
+            .filter(|value| !value.is_null())
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()?;
+        if let Some(config) = &forge {
+            RestForge::new(config.clone())?;
+        }
+        let fetch_base = params["base"].is_null();
+        let base = match params["base"].as_str() {
+            Some(base) => base.to_owned(),
+            None if fetch_base => project
+                .base_branch
+                .clone()
+                .map(Ok)
+                .unwrap_or_else(|| sigmadock_git::default_base(&project.path))?,
+            None => bail!("base must be a string"),
+        };
+        if base.is_empty() || base.len() > 4096 || base.starts_with('-') {
+            bail!("invalid base ref");
+        }
+        Ok(QueuedTask {
+            fetch_base,
+            id: Uuid::new_v4().to_string(),
+            project_id: project.id,
+            title,
+            agent,
+            prompt,
+            base,
+            forge,
+            usage_reporting: params["usage_reporting"] == true,
+            created_at: sigmadock_core::unix_time(),
+            last_error: None,
+            starting: false,
+        })
+    }
+    fn drain_queue(&mut self) -> Result<()> {
+        while self.free_berth(None).is_ok() {
+            let Some(mut task) = self.store.next_queued()? else {
+                break;
+            };
+            if task.last_error.is_some() || task.starting {
+                break;
+            }
+            task.starting = true;
+            self.store.save_queued(&task)?;
+            let params = json!({"project_id": task.project_id, "title": task.title, "agent": task.agent, "prompt": task.prompt, "base": task.base, "forge": task.forge, "usage_reporting": task.usage_reporting});
+            if let Err(error) = self.spawn("spawn_worker", &params, Some(&task.id), task.fetch_base)
+            {
+                task.starting = false;
+                task.last_error = Some(task_text(&error.to_string(), 4096));
+                self.store.save_queued(&task)?;
+                break;
+            }
+        }
+        Ok(())
+    }
+    fn capacity(&self) -> Result<sigmadock_core::Capacity> {
         let mut live: Vec<_> = self
             .sessions
             .iter()
             .filter(|(_, session)| session.facts().0 != SessionState::Exited)
             .filter_map(|(id, _)| self.workers.get(id))
+            .filter(|worker| worker.role == WorkerRole::Worker)
             .collect();
-        live.sort_by_key(|worker| worker.created_at);
-        sigmadock_core::Capacity {
-            per_project: self.berths_per_project,
-            live: live.into_iter().map(|worker| worker.id.clone()).collect(),
+        live.sort_by_key(|worker| (worker.berth, worker.created_at, &worker.id));
+        let queue = self.store.queue()?;
+        let mut per_project: std::collections::BTreeMap<String, sigmadock_core::ProjectCapacity> =
+            self.store
+                .projects()?
+                .into_iter()
+                .map(|project| (project.id, Default::default()))
+                .collect();
+        for worker in &live {
+            per_project
+                .entry(worker.project_id.clone())
+                .or_default()
+                .in_use += 1;
         }
+        for task in &queue {
+            per_project
+                .entry(task.project_id.clone())
+                .or_default()
+                .queued += 1;
+        }
+        Ok(sigmadock_core::Capacity {
+            max_workers: self.max_workers,
+            in_use: live.len(),
+            queued: queue.len(),
+            per_project,
+            live: live.into_iter().map(|worker| worker.id.clone()).collect(),
+        })
     }
-    fn check_capacity(&self, project_id: &str) -> Result<()> {
-        let live = self
+    fn free_berth(&self, previous: Option<u8>) -> Result<u8> {
+        let occupied: Vec<_> = self
             .sessions
             .iter()
             .filter(|(_, session)| session.facts().0 != SessionState::Exited)
             .filter_map(|(id, _)| self.workers.get(id))
-            .filter(|worker| worker.project_id == project_id)
-            .count();
-        if live >= self.berths_per_project {
-            bail!(
-                "no free berth in this project ({live} of {} in use)",
-                self.berths_per_project
-            );
-        }
-        Ok(())
+            .filter(|worker| worker.role == WorkerRole::Worker)
+            .filter_map(|worker| worker.berth)
+            .collect();
+        choose_berth(self.max_workers, &occupied, previous)
     }
+    fn check_capacity(&self) -> Result<()> {
+        self.free_berth(None).map(|_| ())
+    }
+}
+fn choose_berth(max: usize, occupied: &[u8], previous: Option<u8>) -> Result<u8> {
+    if occupied.len() >= max {
+        bail!("maximum concurrent workers reached");
+    }
+    if let Some(slot) = previous
+        && usize::from(slot) <= max
+        && slot > 0
+        && !occupied.contains(&slot)
+    {
+        return Ok(slot);
+    }
+    (1..=max as u8)
+        .find(|slot| !occupied.contains(slot))
+        .context("maximum concurrent workers reached")
 }
 fn string<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
     value[field]
@@ -596,7 +1000,236 @@ fn dimension(params: &Value, key: &str) -> Result<u16> {
         params[key].as_u64().context("invalid dimension")?,
     )?)
 }
+const INBOX_TTL: Duration = Duration::from_secs(60);
+/// Assigned issues and requested reviews across every distinct configured forge repository.
+fn inbox(state: &Arc<Mutex<Daemon>>, refresh: bool) -> Result<Value> {
+    let configs = {
+        let daemon = state.lock().unwrap();
+        if !refresh
+            && let Some((at, inbox)) = &daemon.inbox
+            && at.elapsed() < INBOX_TTL
+        {
+            return Ok(serde_json::to_value(inbox)?);
+        }
+        let mut configs: Vec<ForgeConfig> = Vec::new();
+        let projects = daemon.store.projects()?;
+        for config in projects
+            .iter()
+            .filter_map(|project| project.forge.clone())
+            .chain(
+                daemon
+                    .workers
+                    .values()
+                    .filter_map(|worker| worker.forge.clone()),
+            )
+        {
+            if !configs.iter().any(|known| {
+                (&known.kind, &known.api_url, &known.owner, &known.repo)
+                    == (&config.kind, &config.api_url, &config.owner, &config.repo)
+            }) {
+                configs.push(config);
+            }
+        }
+        configs
+    };
+    let mut inbox = sigmadock_core::Inbox::default();
+    // GitHub assignments are read account-wide once per API and token, so issues in
+    // repositories without a worker still appear; review requests stay per repository.
+    let mut accounts: Vec<(String, String)> = Vec::new();
+    for config in configs {
+        let repository = format!("{}/{}", config.owner, config.repo);
+        let account = (config.api_url.clone(), config.token_env.clone());
+        let account_wide = config.kind == "github" && !accounts.contains(&account);
+        match RestForge::new(config).and_then(|forge| forge.inbox(account_wide)) {
+            Ok(items) => {
+                if account_wide {
+                    accounts.push(account);
+                }
+                for item in items {
+                    if !inbox.items.iter().any(|known| {
+                        (known.kind, &known.repo, known.number)
+                            == (item.kind, &item.repo, item.number)
+                    }) {
+                        inbox.items.push(item);
+                    }
+                }
+            }
+            Err(error) => inbox.warnings.push(format!("{repository}: {error}")),
+        }
+    }
+    inbox
+        .items
+        .sort_by_key(|item| std::cmp::Reverse(item.updated_at));
+    state.lock().unwrap().inbox = Some((std::time::Instant::now(), inbox.clone()));
+    Ok(serde_json::to_value(inbox)?)
+}
+/// Sets or clears a project's forge and applies it to the project's current workers.
+/// Building the client may run `gh`, so it happens before taking the state lock.
+fn configure_project_forge(state: &Arc<Mutex<Daemon>>, params: &Value) -> Result<Value> {
+    let forge: Option<ForgeConfig> = match params.get("forge") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(serde_json::from_value(value.clone())?),
+    };
+    let client = forge.clone().map(RestForge::new).transpose()?.map(Arc::new);
+    let mut daemon = state.lock().unwrap();
+    let mut project = daemon.project(string(params, "project_id")?)?;
+    project.forge = forge.clone();
+    daemon.store.save_project(&project)?;
+    let ids: Vec<String> = daemon
+        .workers
+        .values()
+        .filter(|worker| worker.project_id == project.id && !worker.archived)
+        .map(|worker| worker.id.clone())
+        .collect();
+    for id in &ids {
+        let mut worker = daemon.workers[id].clone();
+        worker.forge = forge.clone();
+        worker.facts.forge_error = None;
+        daemon.store.save_worker(&worker)?;
+        match &client {
+            Some(client) => daemon.forges.insert(id.clone(), client.clone()),
+            None => daemon.forges.remove(id),
+        };
+        daemon.workers.insert(id.clone(), worker);
+    }
+    daemon.inbox = None;
+    Ok(json!({"project": project, "workers": ids.len()}))
+}
 fn external_call(state: &Arc<Mutex<Daemon>>, method: &str, params: &Value) -> Result<Value> {
+    if method == "worker_checks" {
+        let (worker, project, forge) = {
+            let mut daemon = state.lock().unwrap();
+            daemon.sync()?;
+            let worker = daemon.worker(params)?.clone();
+            let project = daemon.project(&worker.project_id)?;
+            let forge = if let Some(config) = &worker.forge {
+                if !daemon.forges.contains_key(&worker.id) {
+                    daemon
+                        .forges
+                        .insert(worker.id.clone(), Arc::new(RestForge::new(config.clone())?));
+                }
+                Some(daemon.forges[&worker.id].clone())
+            } else {
+                None
+            };
+            (worker, project, forge)
+        };
+        let (git, git_error) = match sigmadock_git::readiness(
+            &worker.worktree,
+            worker
+                .facts
+                .base_branch
+                .as_deref()
+                .or(project.base_branch.as_deref()),
+            &worker.branch,
+        ) {
+            Ok(mut git) => {
+                // Observed PR HEAD confirms a push even if the tracking ref is stale/missing.
+                if worker.facts.head_sha.as_deref() == Some(&git.head) {
+                    git.unpushed = Some(0);
+                }
+                (Some(git), None)
+            }
+            Err(error) => (None, Some(error.to_string())),
+        };
+        let (ci, review) = if let Some(forge) = forge {
+            std::thread::scope(|scope| {
+                let ci = scope.spawn(|| forge.ci_preview(&worker.branch));
+                let review = scope.spawn(|| forge.review_preview(&worker.branch));
+                (ci.join().unwrap(), review.join().unwrap())
+            })
+        } else {
+            (
+                Err(anyhow::anyhow!("configure a forge first")),
+                Err(anyhow::anyhow!("configure a forge first")),
+            )
+        };
+        let (ci, ci_error) = match ci {
+            Ok(value) => (Some(value), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
+        let (review, review_error) = match review {
+            Ok(value) => (Some(value), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
+        let daemon = state.lock().unwrap();
+        let current = daemon
+            .workers
+            .get(&worker.id)
+            .context("worker disappeared")?;
+        if current.archived || current.forge != worker.forge {
+            bail!("worker configuration changed while loading checks");
+        }
+        let report = sigmadock_core::ReadinessReport {
+            worker: current.clone(),
+            git,
+            git_error,
+            ci,
+            ci_error,
+            review,
+            review_error,
+        };
+        return Ok(serde_json::to_value(report)?);
+    }
+
+    if method == "configure_project_forge" {
+        return configure_project_forge(state, params);
+    }
+    if method == "check_forge" {
+        let config: ForgeConfig = serde_json::from_value(params["forge"].clone())?;
+        return Ok(json!({"login": RestForge::new(config)?.login()?}));
+    }
+    if method == "session_summary" {
+        // Diff stats over untracked files can be slow; run git outside the state lock.
+        let (worker, project) = {
+            let daemon = state.lock().unwrap();
+            let worker = daemon.worker(params)?.clone();
+            let project = daemon.project(&worker.project_id)?;
+            (worker, project)
+        };
+        let changes = sigmadock_git::changes(&project.path, &worker.worktree, &worker.branch);
+        let text = sigmadock_core::summary::markdown(
+            &worker,
+            &project.name,
+            &changes,
+            sigmadock_core::unix_time(),
+        );
+        return Ok(json!(text));
+    }
+    if method == "inbox" {
+        return inbox(state, params["refresh"] == true);
+    }
+    if method == "diff_patch" || method == "diff" {
+        // Read Git outside the state lock; creation records the worker's base ref.
+        let (worker, project) = {
+            let daemon = state.lock().unwrap();
+            let worker = daemon.worker(params)?.clone();
+            let project = daemon.project(&worker.project_id)?;
+            (worker, project)
+        };
+        let base = worker
+            .base_ref
+            .clone()
+            .or_else(|| {
+                project
+                    .base_branch
+                    .map(|branch| format!("refs/remotes/origin/{branch}"))
+            })
+            .or_else(|| {
+                sigmadock_git::default_base(&worker.worktree)
+                    .ok()
+                    .map(|branch| format!("refs/remotes/origin/{branch}"))
+            })
+            .context("worker base is unknown; configure a project base branch")?;
+        let report = sigmadock_git::diff_report(&worker.worktree, &base)?;
+        if method == "diff" {
+            return Ok(json!(report.text(params["stat"] == true)));
+        }
+        let mut value = serde_json::to_value(&report)?;
+        // Keep the text field for older UI clients; new clients use structured files.
+        value["text"] = json!(report.text(false));
+        return Ok(value);
+    }
     if method == "agent_usage" {
         let (worker, cwd, cached) = {
             let daemon = state.lock().unwrap();
@@ -639,6 +1272,11 @@ fn external_call(state: &Arc<Mutex<Daemon>>, method: &str, params: &Value) -> Re
     if method == "ci_feedback" || method == "send_ci_feedback" {
         let report = forge.ci_feedback(&worker.branch)?;
         if method == "send_ci_feedback" {
+            if let Some(expected) = params["expected_text"].as_str()
+                && report.text != expected
+            {
+                bail!("CI feedback changed since preview; preview it again before sending");
+            }
             deliver_ci(state, &worker, &report, params["automatic"] == true)?;
         }
         return Ok(serde_json::to_value(report)?);
@@ -717,7 +1355,44 @@ fn deliver_ci(
     }
     Ok(())
 }
+fn serve_subscription(mut stream: UnixStream, state: Arc<Mutex<Daemon>>, id: &Value) -> Result<()> {
+    let hub = state.lock().unwrap().events.clone();
+    let (subscription_id, receiver) = match hub.subscribe() {
+        Ok(subscription) => subscription,
+        Err(error) => {
+            writeln!(
+                stream,
+                "{}",
+                json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":error.to_string()}})
+            )?;
+            return Ok(());
+        }
+    };
+    let result = (|| -> Result<()> {
+        writeln!(
+            stream,
+            "{}",
+            json!({"jsonrpc":"2.0","id":id,"result":{"version":API_VERSION}})
+        )?;
+        loop {
+            let event = match receiver.recv_timeout(Duration::from_secs(5)) {
+                Ok(event) => event,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => DaemonEvent::Heartbeat,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+            writeln!(
+                stream,
+                "{}",
+                json!({"jsonrpc":"2.0","method":"event","params":event})
+            )?;
+        }
+        Ok(())
+    })();
+    hub.remove(subscription_id);
+    result
+}
 fn serve(mut stream: UnixStream, state: Arc<Mutex<Daemon>>) -> Result<()> {
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     let Some(frame) = read_frame(&mut BufReader::new(stream.try_clone()?))? else {
@@ -735,6 +1410,9 @@ fn serve(mut stream: UnixStream, state: Arc<Mutex<Daemon>>) -> Result<()> {
         }
     };
     let valid = request["jsonrpc"] == "2.0" && request["method"].is_string();
+    if valid && request["method"] == "subscribe" && request.get("id").is_some() {
+        return serve_subscription(stream, state, &request["id"]);
+    }
     let result = if !valid {
         Err(anyhow::anyhow!("invalid JSON-RPC request"))
     } else if matches!(
@@ -746,6 +1424,13 @@ fn serve(mut stream: UnixStream, state: Arc<Mutex<Daemon>>) -> Result<()> {
                 | "send_ci_feedback"
                 | "ci_preview"
                 | "agent_usage"
+                | "worker_checks"
+                | "session_summary"
+                | "diff_patch"
+                | "diff"
+                | "inbox"
+                | "configure_project_forge"
+                | "check_forge"
         )
     ) {
         external_call(
@@ -777,9 +1462,6 @@ fn main() -> Result<()> {
     let mut args = Args::parse();
     if args.idle_seconds == 0 {
         bail!("idle-seconds must be positive");
-    }
-    if args.berths_per_project == 0 {
-        bail!("berths-per-project must be positive");
     }
     fs::create_dir_all(&args.state_dir)?;
     args.state_dir = args.state_dir.canonicalize()?;
@@ -820,6 +1502,11 @@ fn main() -> Result<()> {
     let store = Store::open(&db)?;
     fs::set_permissions(&db, fs::Permissions::from_mode(0o600))?;
     store.mark_disconnected()?;
+    store.recover_queue()?;
+    let max_workers = args.max_workers.or(store.max_workers()?).unwrap_or(5);
+    if !(1..=255).contains(&max_workers) {
+        bail!("max-workers must be 1..255");
+    }
     let workers: HashMap<_, _> = store
         .workers()?
         .into_iter()
@@ -830,6 +1517,8 @@ fn main() -> Result<()> {
         ports.reserve(worker.port);
     }
     let state = Arc::new(Mutex::new(Daemon {
+        events: Arc::new(events::EventHub::default()),
+        event_stamp: EventStamp::default(),
         store,
         workers,
         sessions: HashMap::new(),
@@ -838,8 +1527,9 @@ fn main() -> Result<()> {
         context_floor: HashMap::new(),
         ports,
         forges: HashMap::new(),
+        inbox: None,
         state_dir: args.state_dir,
-        berths_per_project: args.berths_per_project,
+        max_workers,
         mcp_binary: args.mcp_binary.unwrap_or(
             std::env::current_exe()?
                 .parent()
@@ -852,11 +1542,36 @@ fn main() -> Result<()> {
     let listener = UnixListener::bind(&socket)?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
     eprintln!("SigmaDock listening on {}", socket.display());
+    let shutdown = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGINT, shutdown.clone())?;
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, shutdown.clone())?;
+    let local_shutdown = shutdown.clone();
+    let local_state = state.clone();
+    thread::spawn(move || {
+        while !local_shutdown.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(200));
+            let mut daemon = local_state.lock().unwrap();
+            if local_shutdown.load(Ordering::Relaxed) {
+                break;
+            }
+            if let Err(error) = daemon
+                .sync()
+                .and_then(|_| daemon.drain_queue())
+                .and_then(|_| daemon.publish_events())
+            {
+                eprintln!("local supervision error: {error}");
+            }
+        }
+    });
+    let poll_shutdown = shutdown.clone();
     let poll_state = state.clone();
     thread::spawn(move || {
         let mut deadlines: HashMap<String, (std::time::Instant, u32)> = HashMap::new();
         loop {
             thread::sleep(Duration::from_secs(2));
+            if poll_shutdown.load(Ordering::Relaxed) {
+                break;
+            }
             let workers: Vec<_> = {
                 let mut state = poll_state.lock().unwrap();
                 if let Err(error) = state.sync() {
@@ -946,9 +1661,7 @@ fn main() -> Result<()> {
             }
         }
     });
-    let shutdown = Arc::new(AtomicBool::new(false));
-    signal_hook::flag::register(signal_hook::consts::SIGINT, shutdown.clone())?;
-    signal_hook::flag::register(signal_hook::consts::SIGTERM, shutdown.clone())?;
+
     listener.set_nonblocking(true)?;
     let connections = Arc::new(AtomicUsize::new(0));
     while !shutdown.load(Ordering::Relaxed) {
@@ -974,6 +1687,7 @@ fn main() -> Result<()> {
             connections.fetch_sub(1, Ordering::SeqCst);
         });
     }
+    state.lock().unwrap().events.close();
     let sessions: Vec<_> = state.lock().unwrap().sessions.values().cloned().collect();
     for session in &sessions {
         if session.facts().0 != SessionState::Exited {
@@ -990,4 +1704,28 @@ fn main() -> Result<()> {
     drop(listener);
     fs::remove_file(&socket)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod berth_tests {
+    use super::*;
+
+    #[test]
+    fn stable_slots_release_resume_and_lower_capacity() {
+        assert_eq!(choose_berth(5, &[], None).unwrap(), 1);
+        assert_eq!(choose_berth(5, &[1, 3], None).unwrap(), 2);
+        // Stopping slot 2 does not move sessions in slots 1 and 3.
+        assert_eq!(choose_berth(5, &[1, 3], Some(2)).unwrap(), 2);
+        assert_eq!(choose_berth(5, &[1, 2, 3], Some(2)).unwrap(), 4);
+        assert_eq!(
+            choose_berth(2, &[1, 4], None).unwrap_err().to_string(),
+            "maximum concurrent workers reached"
+        );
+        // An above-limit session stays put; its old slot cannot be reassigned.
+        assert_eq!(choose_berth(2, &[4], Some(4)).unwrap(), 1);
+        assert_eq!(
+            choose_berth(2, &[1, 2], None).unwrap_err().to_string(),
+            "maximum concurrent workers reached"
+        );
+    }
 }

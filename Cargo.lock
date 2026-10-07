@@ -5428,6 +5428,7 @@ name = "sigmadock-git"
 version = "0.1.2"
 dependencies = [
  "anyhow",
+ "libc",
  "sigmadock-core",
 ]
 

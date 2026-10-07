@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
-use sigmadock_core::{Client, Output, column, socket_path};
+use sigmadock_core::{Client, Output, socket_path, status};
 use std::{
     io::{Read, Write},
     path::PathBuf,
@@ -22,6 +22,17 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Commands {
+    Capacity,
+    MaxWorkers {
+        value: usize,
+    },
+    RemoveProject {
+        project_id: String,
+    },
+    Queue {
+        #[command(subcommand)]
+        command: Option<QueueCommand>,
+    },
     Ping,
     Orchestrator {
         project_id: String,
@@ -57,6 +68,11 @@ enum Commands {
     Project {
         path: PathBuf,
     },
+    /// Set the origin branch used by new workers.
+    ProjectBase {
+        project_id: String,
+        branch: String,
+    },
     Projects,
     Spawn {
         project_id: String,
@@ -66,8 +82,10 @@ enum Commands {
         agent: String,
         #[arg(long)]
         prompt: Option<String>,
-        #[arg(long, default_value = "HEAD")]
-        base: String,
+        #[arg(long)]
+        base: Option<String>,
+        #[arg(long)]
+        queue: bool,
     },
     Ls {
         #[arg(long)]
@@ -127,6 +145,13 @@ enum Commands {
     },
     Diff {
         worker_id: String,
+        /// Show file counts instead of unified hunks.
+        #[arg(long)]
+        stat: bool,
+    },
+    /// Print a Markdown session summary from recorded facts and git history.
+    Summary {
+        worker_id: String,
     },
     Prune {
         project_id: String,
@@ -143,6 +168,9 @@ enum Commands {
         repo: String,
         #[arg(long, default_value = "GITHUB_TOKEN")]
         token_env: String,
+        /// Read the token from `gh auth token` instead of `--token-env` (GitHub only).
+        #[arg(long)]
+        github_cli: bool,
         #[arg(long)]
         actions: bool,
     },
@@ -155,12 +183,54 @@ enum Commands {
         send: bool,
     },
 }
+#[derive(Subcommand)]
+enum QueueCommand {
+    Cancel {
+        id: String,
+    },
+    Retry {
+        id: String,
+        #[arg(long)]
+        acknowledge_unknown: bool,
+    },
+}
 fn main() -> Result<()> {
     let args = Args::parse();
     let client = Client {
         socket: args.socket,
     };
+    client.check_version()?;
     let (method, params) = match args.command {
+        Commands::Capacity => ("capacity", json!({})),
+        Commands::MaxWorkers { value } => ("set_max_workers", json!({"max_workers":value})),
+        Commands::RemoveProject { project_id } => {
+            ("remove_project", json!({"project_id":project_id}))
+        }
+        Commands::Queue { command } => match command {
+            None => {
+                let mut tasks = Vec::<Value>::new();
+                loop {
+                    let page: Vec<Value> = serde_json::from_value(
+                        client.call("list_queue", json!({"offset":tasks.len(),"limit":100}))?,
+                    )?;
+                    let finished = page.len() < 100;
+                    tasks.extend(page);
+                    if finished {
+                        break;
+                    }
+                }
+                println!("{}", serde_json::to_string_pretty(&tasks)?);
+                return Ok(());
+            }
+            Some(QueueCommand::Cancel { id }) => ("cancel_queued", json!({"id":id})),
+            Some(QueueCommand::Retry {
+                id,
+                acknowledge_unknown,
+            }) => (
+                "retry_queued",
+                json!({"id":id,"acknowledge_unknown":acknowledge_unknown}),
+            ),
+        },
         Commands::Usage { worker_id } => ("agent_usage", json!({"worker_id":worker_id})),
         Commands::UsageReporting { worker_id, enable } => (
             "configure_usage",
@@ -241,6 +311,10 @@ fn main() -> Result<()> {
             return Ok(());
         }
         Commands::Project { path } => ("add_project", json!({"path":path.canonicalize()?})),
+        Commands::ProjectBase { project_id, branch } => (
+            "configure_project",
+            json!({"project_id":project_id,"base_branch":branch}),
+        ),
         Commands::Projects => ("list_projects", json!({})),
         Commands::Spawn {
             project_id,
@@ -248,9 +322,10 @@ fn main() -> Result<()> {
             agent,
             prompt,
             base,
+            queue,
         } => (
             "spawn_worker",
-            json!({"project_id":project_id,"title":title,"agent":agent,"prompt":prompt,"base":base}),
+            json!({"project_id":project_id,"title":title,"agent":agent,"prompt":prompt,"base":base,"queue":queue}),
         ),
         Commands::Ls {
             archived,
@@ -266,7 +341,7 @@ fn main() -> Result<()> {
                     println!(
                         "{}  {:<15}  {:<10}  {}",
                         worker.id,
-                        column(&worker.facts).label(),
+                        status(&worker.facts).label(),
                         worker.agent,
                         worker.title
                     );
@@ -304,7 +379,8 @@ fn main() -> Result<()> {
             "archive_worker",
             json!({"worker_id":worker_id,"cleanup":cleanup}),
         ),
-        Commands::Diff { worker_id } => ("diff", json!({"worker_id":worker_id})),
+        Commands::Diff { worker_id, stat } => ("diff", json!({"worker_id":worker_id,"stat":stat})),
+        Commands::Summary { worker_id } => ("session_summary", json!({"worker_id":worker_id})),
         Commands::Prune { project_id } => ("prune", json!({"project_id":project_id})),
         Commands::Forge {
             worker_id,
@@ -313,10 +389,11 @@ fn main() -> Result<()> {
             owner,
             repo,
             token_env,
+            github_cli,
             actions,
         } => (
             "configure_forge",
-            json!({"worker_id":worker_id,"forge":{"kind":kind,"api_url":api_url,"owner":owner,"repo":repo,"token_env":token_env,"actions":actions}}),
+            json!({"worker_id":worker_id,"forge":{"kind":kind,"api_url":api_url,"owner":owner,"repo":repo,"token_env":token_env,"actions":actions,"token":if github_cli { "github_cli" } else { "env" }}}),
         ),
         Commands::Refresh { worker_id } => ("refresh_facts", json!({"worker_id":worker_id})),
         Commands::Review { worker_id, send } => {

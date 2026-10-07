@@ -13,3 +13,4 @@ description = "Safe isolated git worktrees for SigmaDock workers"
 [dependencies]
 anyhow.workspace = true
 sigmadock-core = { version = "0.1.2", path = "../sigmadock-core" }
+libc = "0.2"

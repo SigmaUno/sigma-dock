@@ -36,7 +36,7 @@ cargo run -p sigmadock-ui
 
 Build/install binaries with `cargo install --path crates/sigmadock-cli`, `cargo install --path crates/sigmadockd`, and `cargo install --path crates/sigmadock-ui`. Binaries are `sdk`, `sigmadockd`, and `sigma-dock`. Start the daemon separately before the UI. Use `--agent shell` to test without an agent subscription. Adapters also exist for `codex`, `gemini`, `opencode`, and `aider`; their current flags must be tested against your installed versions.
 
-Each worker gets a unique `sigma/UUID` branch, a worktree outside the source checkout, a PTY, and `PORT` and `SIGMA_DOCK_WORKER_ID` environment variables. Each project runs at most six sessions concurrently by default (`sigmadockd --berths-per-project N`). Ports 4200–4999 are assigned uniquely among active workers and checked for availability; they are best-effort leases, not OS reservations.
+Each worker gets a unique `sigma/UUID` branch, a worktree outside the source checkout, a PTY, and `PORT` and `SIGMA_DOCK_WORKER_ID` environment variables. At most five worker sessions run concurrently by default (`sigmadockd --max-workers N`). Orchestrators have a separate allowance of one per project. `sdk capacity` shows global and project counts; `sdk max-workers N` changes and persists the worker limit. Ports 4200–4999 are assigned uniquely among active workers and checked for availability; they are best-effort leases, not OS reservations.
 
 `SIGMA_DOCK_STATE_DIR` overrides local state. Defaults: `~/Library/Application Support/SigmaDock` on macOS, `$XDG_STATE_HOME/sigma-dock` or `~/.local/state/sigma-dock` on Linux. `SIGMA_DOCK_SOCKET` overrides the socket for all binaries. Keep the daemon socket and database on a local filesystem. The state directory is mode 0700 and the socket and database are mode 0600.
 
@@ -46,24 +46,54 @@ Each worker gets a unique `sigma/UUID` branch, a worktree outside the source che
 sdk message WORKER_ID "Run tests and fix the failures"
 sdk status WORKER_ID
 sdk diff WORKER_ID
+sdk diff WORKER_ID --stat
+sdk summary WORKER_ID > note.md  # Markdown session summary for Obsidian and similar notes
 sdk stop WORKER_ID
 sdk resume WORKER_ID --continue
 sdk archive WORKER_ID             # preserves files and branch
 sdk archive WORKER_ID --cleanup   # removes a clean worktree, preserves branch
 sdk prune PROJECT_ID              # prunes stale git worktree registrations
+sdk spawn PROJECT_ID --title "Next task" --agent codex --queue
+sdk queue                         # waiting tasks in global FIFO order
+sdk queue cancel TASK_ID
+sdk queue retry TASK_ID --acknowledge-unknown  # after inspecting an interrupted/failed start
+sdk remove-project PROJECT_ID     # requires no unarchived workers or waiting tasks
 ```
 
-The native UI includes a task-creation form, harness picker, worker controls, a diff summary, and PR links. Click **Choose repository…** in the task form to open the native folder picker. Form input currently supports typing at the end, backspace, tab and clipboard paste; full text editing and IME support are pending.
+`sdk summary` and the **Summary** button (or **Copy summary** on a departed worker) build a Markdown note without any model: YAML frontmatter, the recorded outcome (status, PR, checks, review, session exit), the original instruction, commit subjects since the worker forked, and per-folder diff stats. It reads the live worktree when present, so uncommitted edits count, and the branch after `--cleanup`. Times are UTC. Workers created before this version have no recorded instruction or finish time.
+
+The native UI includes a task-creation form, harness picker, worker controls, a unified diff viewer, and PR links. When all berths are occupied, the form explains the global capacity limit and disables creation until a session ends. It keeps your task details; the native waiting-list flow remains pending. The CLI and opt-in MCP spawning support persistent queuing with `--queue` / `queue: true`. Click **Choose repository…** in the task form to open the native folder picker. Form input currently supports typing at the end, backspace, tab and clipboard paste; full text editing and IME support are pending.
+
+Workspace and terminal updates share a local daemon event subscription. Unchanged previews do not fetch output, and workspace state resyncs every 30 seconds for recovery.
 
 Closing the UI does not stop workers. Normal daemon shutdown stops its sessions and saves their final observed state. Crashing the **daemon** loses its PTY handles: persisted active sessions become `lost`, never silently healthy. `sdk resume` starts a fresh process in the existing worktree; `--continue` asks a supported harness to resume its own conversation. Inspect and stop any surviving process before resuming after a daemon crash; `--acknowledge-unknown` is required for an interrupted worker. Codex continuation requires `sdk resume WORKER_ID --continue` without `--prompt`; send the next instruction with `sdk message` after startup. This prototype does not recover a live PTY across daemon restarts.
 
 Live output replay is bounded to the latest 1 MiB per session and held in memory. A plain-text recovery tail of up to 16 KiB per worker is also saved locally in SQLite, with recorded state, activity/checkpoint times and PID; it does not recover a live PTY. Recovery retention is capped at seven days and 512 contexts. Use **Unfinished sessions** to inspect/copy context, attach a live session, start a fresh process or continue a supported harness, archive, or clear saved context. `sdk unfinished` and `sdk context WORKER_ID [--clear]` expose the same data. Reconnecting after that limit resets the terminal and replays the retained tail; terminal state may be incomplete. BEL and OSC 9/777 notifications flag `Needs you`; sixty seconds without I/O means `idle`, which remains `Working`. These are heuristics, not reliable inference of every harness's intent.
 
+## Checks pane
+
+Choose **Checks** on a berth, or press **⌘⇧K** with a berth or terminal focused. The pane combines local Git changes and ahead/behind/push counts, observed PR state, CI results and excerpts, unresolved review comments grouped by file, and merge conflicts. Its header shows **Ready**, **Blocked by N**, or **Unknown**. Failures take precedence over approval; missing, errored, incomplete or mismatched commit data never counts as passing. Readiness remains advisory and does not verify protected-branch rules or merge automatically.
+
+Each feedback action opens an exact-text preview. Choose **Send to agent** to confirm, or cancel. CI uses the existing delivery guard; changed CI feedback must be previewed again. Git, PR, review and conflict plans use the existing bracketed-paste message path and reject previews after the local or observed PR HEAD changes. Review sends the displayed unresolved comments together; providers that omit comment resolution are shown as unknown.
+
+Checks load on demand without additional background forge polling or an implicit Git fetch. **Reload** reloads local Git and detail data; **Refresh forge facts** also runs the existing explicit facts refresh. Git comparisons use cached remote refs, and results may become stale as work continues. Press **Esc** to close the pane.
+
+## Worker base branches
+
+New workers start from a freshly fetched branch on `origin`, independent of the source checkout's current branch or local commits. SigmaDock detects and stores the default from `refs/remotes/origin/HEAD` when a project is added; edit it with `sdk project-base PROJECT_ID release` (use the branch name without `origin/`). Existing projects are detected on first use. If the remote default is unknown, configure the branch explicitly or run `git remote set-head origin -a` first.
+
+Each launch fetches only that branch with an eight-second timeout. A failed fetch uses the last cached remote commit and shows a warning on the berth; without a cached commit, creation fails. The user's checkout and local branches remain untouched. Queued tasks record the project branch at submission and fetch its latest commit when they start.
+
+`sdk spawn PROJECT_ID --title "Stacked task" --base sigma/OTHER_WORKER_ID` overrides the project default and skips fetching. The task form's **Base ref override** field and MCP `spawn_worker`'s `base` argument provide the same override. Local-only repositories require an explicit base ref.
+
 ## Forge facts and feedback
 
-Export a forge token into the daemon's environment before starting it. Configuration stores **the environment variable name**, never the token. For example:
+Connect a project in **Settings → Forges** (⌘,). SigmaDock fills in the forge, owner and repository from the `origin` remote, **Test connection** confirms the token, and **Save** applies the forge to the project's current agents and every new one. The token comes from your GitHub CLI login (`gh auth token`; run `gh auth login` once) or from an environment variable of the daemon. Apps opened from Finder have no shell environment, so the GitHub CLI is the simplest choice there. SigmaDock stores where to read the token, never the token itself.
+
+Single workers can still be configured from the CLI:
 
 ```sh
+sdk forge WORKER_ID --owner my-org --repo my-repo --github-cli
 sdk forge WORKER_ID --owner my-org --repo my-repo
 sdk forge WORKER_ID --kind forgejo --api-url https://forge.example/api/v1 --owner my-org --repo my-repo --token-env FORGEJO_TOKEN
 sdk refresh WORKER_ID
@@ -86,7 +116,28 @@ GitHub feedback includes check output and annotations. Full GitHub job logs requ
 
 Automatic feedback is off by default and waits for an idle coding worker with failed CI. The daemon records an attempt before writing to the PTY to prevent duplicate delivery after partial writes or restarts; delivery errors remain visible in worker status. Idle is a heuristic. Forge content is untrusted task data and the harness retains its own permission controls. Conflict instructions do not run git or push changes automatically.
 
-The native window shows **berths**: each project has its own slots for live sessions, up to the daemon's `--berths-per-project` limit. A berth shows the task, harness, branch, port, a low-rate terminal preview and one contextual action (**Reply**, **Send CI to agent** or **Open PR**); click it for the full terminal. Selecting a project shows only its berths, with free slots to dock a new task; **All berths** lists every live berth, labelled by project, without free slots. A needs-you strip lists blocked workers, and a side panel lists moored workers (session ended, not archived) and today's departures. Capacity is per project: a full project does not limit the others.
+The native window shows **berths**: one slot per live session, up to the daemon's `--max-workers` limit. A berth shows the task, harness, branch, port, a low-rate terminal preview and one contextual action (**Reply**, **Send CI to agent** or **Open PR**); click it for the full terminal. The project sidebar filters berths by repository, a needs-you strip lists blocked workers, and a side panel lists moored workers (session ended, not archived) and today's departures. Capacity is global: a project can show free berths while the overall limit is reached, in which case empty berths are disabled.
+
+The sidebar lists each project with its agents underneath, plus an **Inbox**. Opening an agent splits the window into the sidebar, the agent's terminal session and its **Changes**: the unified patch against the merge base of the worker’s recorded base ref and HEAD, with **Committed**, **Uncommitted** (index and working tree), and **Untracked** sections. The file list shows status and added/removed counts. **Viewed** checkboxes persist locally across restarts and reset when a file’s content or diff changes; use Space or Enter when focused. Binary files have a visible note. Patches are limited to 100 file entries, 64 KiB per file and 256 KiB overall, with visible truncation notices; incomplete patches cannot be marked viewed. `sdk diff WORKER_ID` prints the same sections; `--stat` prints their summaries. Changes, files and individual lines open in your own editor (Zed, Cursor, VS Code, Sublime Text, Xcode, the default app or a custom command, chosen in Settings); SigmaDock has no built-in editor. The Inbox pairs a chat with your default agent, the project orchestrator started with a briefing of the inbox, with the agents that need you and, for repositories with a configured forge token, open issues assigned to you and pull requests requesting your review.
+
+Keyboard navigation on macOS:
+
+| Shortcut | Action |
+|---|---|
+| Tab / Shift+Tab | Move focus between projects, needs-you items, berths and their actions |
+| Arrow keys on a berth | Move through the three-slot grid, including empty slots |
+| Enter on a berth | Open its terminal; on a free empty berth, open the task form |
+| ⌘Enter on a berth | Run its contextual action (Reply, Send CI to agent, or Open PR) |
+| ⌘[ | Return from the full terminal to the previous berth |
+| ⌘I | Open the Inbox |
+| ⌘⇧O | Open the agent's worktree in your editor |
+| ⌘1 | Show All berths |
+| ⌘2–⌘9 | Select the first eight projects in sidebar order |
+| ⌘N / ⌘, | New task / Settings |
+
+Focused controls use the theme's focus ring. Tooltips include berth number, task title, status and shortcuts. In the full terminal, plain Escape, Tab, Enter and arrow keys continue to go to the agent. The task form and settings keep their own input handling.
+
+GPUI 0.2.2 does not expose accessibility labels for these custom controls. Tooltips and visible labels do not establish VoiceOver support; native screen-reader qualification remains pending.
 
 Each worker's status is computed, never set manually:
 
@@ -124,6 +175,7 @@ cargo test --workspace
 cargo deny check
 python3 scripts/smoke.py
 python3 scripts/feedback_smoke.py
+python3 scripts/events_smoke.py
 ```
 
 `cargo build` defaults to the headless binaries. `cargo build -p sigmadock-ui` builds the native UI. Both `.forgejo/workflows/ci.yml` and `.github/workflows/ci.yml` run the same checks. Mirror setup is an administrator operation and is not performed by the repository.
@@ -134,6 +186,6 @@ Terminal appearance is available from **⚙ Settings** in the top-right workspac
 
 Update checks compare tagged semantic versions and require a compatible macOS installer. Preview enables prereleases; stable skips them. Development snapshots retain their Cargo version and source commit, but hashes are never ordered. [Update design and installation](docs/UPDATES.md) describes caching, privacy and the manual upgrade path.
 
-The interface follows system appearance using Catppuccin Latte (light) and Mocha (dark), including live system-mode changes. New terminal preferences also follow the system palette. **Terminal colors: custom** and edited colors preserve your choices independently; existing preference files retain their saved colors. Catppuccin attribution is included in app and crate packages.
+The interface follows system appearance using Catppuccin Latte (light) and Mocha (dark), including live system-mode changes. New terminal preferences also follow the system palette. **Terminal colors: custom** and edited colors preserve your choices independently; existing preference files retain their saved colors. Catppuccin and Lucide icon attribution is included in app and crate packages.
 
 **CI preview** opens a native results pane for the selected worker, with checks/statuses/workflows/jobs, commit and refresh time, expandable details, copy buttons and source links. Refresh is independent of the terminal. Changed-head results are marked stale. GitHub shows API check output, annotations and job steps without following log-download redirects; Forgejo Actions remain opt-in and show bounded failed-job log excerpts where supported. `sdk ci-preview WORKER_ID` returns the same structured report; `sdk ci WORKER_ID` remains feedback preview.

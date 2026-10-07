@@ -21,7 +21,7 @@ Previously published 0.1.0 and 0.1.1 packages remain available, unchanged and un
 
 Rust library imports change from `sigma_dock_*` to `sigmadock_*`. Install the daemon using `cargo install sigmadockd`; its executable is now `sigmadockd`. The MCP executable is `sigmadock-mcp`. There is no legacy daemon executable shim: update scripts that explicitly launch `sigma-dockerd` or `sigma-dock-mcp`.
 
-After the new 0.1.2 packages finish publishing, users of Cargo-installed binaries can update with:
+All twelve renamed 0.1.2 packages are published on crates.io. Users of Cargo-installed binaries can update with:
 
 ```sh
 cargo install sigmadockd --version 0.1.2

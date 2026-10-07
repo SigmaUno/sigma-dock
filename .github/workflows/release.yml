@@ -1,11 +1,5 @@
 name: Release crates
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: Workspace version to publish (must already be committed)
-        required: true
-        default: '0.1.2'
   push:
     tags: ['v*']
 permissions:
@@ -25,10 +19,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Resolve and validate release version
-        env:
-          REQUESTED_VERSION: ${{ inputs.version }}
         run: |
-          version="${REQUESTED_VERSION:-${GITHUB_REF_NAME#v}}"
+          version="${GITHUB_REF_NAME#v}"
           python3 scripts/release.py check "$version"
           echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
           if git rev-parse "refs/tags/v$version" >/dev/null 2>&1; then
@@ -44,6 +36,7 @@ jobs:
       - run: cargo build --locked
       - run: python3 scripts/smoke.py
       - run: python3 scripts/feedback_smoke.py
+      - run: python3 scripts/events_smoke.py
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
@@ -58,5 +51,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if ! gh release view "v$RELEASE_VERSION" >/dev/null 2>&1; then
-            gh release create "v$RELEASE_VERSION" --verify-tag --title "SigmaDock $RELEASE_VERSION" --prerelease --generate-notes
+            gh release create "v$RELEASE_VERSION" --verify-tag --title "SigmaDock $RELEASE_VERSION" --prerelease --generate-notes \
+              --notes "Project website: https://sigmadock.dev. Crate and executable migration: https://github.com/SigmaUno/sigma-dock/blob/v$RELEASE_VERSION/docs/MIGRATION.md"
           fi
