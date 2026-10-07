@@ -570,6 +570,18 @@ impl Daemon {
                 Ok(serde_json::to_value(worker)?)
             }
             "message_worker" => {
+                let worker = self.worker(&params)?;
+                if let Some(expected) = params["expected_git_head"].as_str() {
+                    let current = sigmadock_git::readiness(&worker.worktree, None, &worker.branch)?;
+                    if current.head != expected {
+                        bail!("worker HEAD changed since preview; reload checks before sending");
+                    }
+                }
+                if let Some(expected) = params["expected_pr_head"].as_str()
+                    && worker.facts.head_sha.as_deref() != Some(expected)
+                {
+                    bail!("observed PR head changed since preview; reload checks before sending");
+                }
                 let session = self.session(&params)?;
                 let text = task_text(string(&params, "message")?, 32000);
                 // Bracketed paste avoids executing each embedded newline as a separate command.
@@ -944,6 +956,82 @@ fn dimension(params: &Value, key: &str) -> Result<u16> {
     )?)
 }
 fn external_call(state: &Arc<Mutex<Daemon>>, method: &str, params: &Value) -> Result<Value> {
+    if method == "worker_checks" {
+        let (worker, project, forge) = {
+            let mut daemon = state.lock().unwrap();
+            daemon.sync()?;
+            let worker = daemon.worker(params)?.clone();
+            let project = daemon.project(&worker.project_id)?;
+            let forge = if let Some(config) = &worker.forge {
+                if !daemon.forges.contains_key(&worker.id) {
+                    daemon
+                        .forges
+                        .insert(worker.id.clone(), Arc::new(RestForge::new(config.clone())?));
+                }
+                Some(daemon.forges[&worker.id].clone())
+            } else {
+                None
+            };
+            (worker, project, forge)
+        };
+        let (git, git_error) = match sigmadock_git::readiness(
+            &worker.worktree,
+            worker
+                .facts
+                .base_branch
+                .as_deref()
+                .or(project.base_branch.as_deref()),
+            &worker.branch,
+        ) {
+            Ok(mut git) => {
+                // Observed PR HEAD confirms a push even if the tracking ref is stale/missing.
+                if worker.facts.head_sha.as_deref() == Some(&git.head) {
+                    git.unpushed = Some(0);
+                }
+                (Some(git), None)
+            }
+            Err(error) => (None, Some(error.to_string())),
+        };
+        let (ci, review) = if let Some(forge) = forge {
+            std::thread::scope(|scope| {
+                let ci = scope.spawn(|| forge.ci_preview(&worker.branch));
+                let review = scope.spawn(|| forge.review_preview(&worker.branch));
+                (ci.join().unwrap(), review.join().unwrap())
+            })
+        } else {
+            (
+                Err(anyhow::anyhow!("configure a forge first")),
+                Err(anyhow::anyhow!("configure a forge first")),
+            )
+        };
+        let (ci, ci_error) = match ci {
+            Ok(value) => (Some(value), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
+        let (review, review_error) = match review {
+            Ok(value) => (Some(value), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
+        let daemon = state.lock().unwrap();
+        let current = daemon
+            .workers
+            .get(&worker.id)
+            .context("worker disappeared")?;
+        if current.archived || current.forge != worker.forge {
+            bail!("worker configuration changed while loading checks");
+        }
+        let report = sigmadock_core::ReadinessReport {
+            worker: current.clone(),
+            git,
+            git_error,
+            ci,
+            ci_error,
+            review,
+            review_error,
+        };
+        return Ok(serde_json::to_value(report)?);
+    }
+
     if method == "agent_usage" {
         let (worker, cwd, cached) = {
             let daemon = state.lock().unwrap();
@@ -986,6 +1074,11 @@ fn external_call(state: &Arc<Mutex<Daemon>>, method: &str, params: &Value) -> Re
     if method == "ci_feedback" || method == "send_ci_feedback" {
         let report = forge.ci_feedback(&worker.branch)?;
         if method == "send_ci_feedback" {
+            if let Some(expected) = params["expected_text"].as_str()
+                && report.text != expected
+            {
+                bail!("CI feedback changed since preview; preview it again before sending");
+            }
             deliver_ci(state, &worker, &report, params["automatic"] == true)?;
         }
         return Ok(serde_json::to_value(report)?);
@@ -1133,6 +1226,7 @@ fn serve(mut stream: UnixStream, state: Arc<Mutex<Daemon>>) -> Result<()> {
                 | "send_ci_feedback"
                 | "ci_preview"
                 | "agent_usage"
+                | "worker_checks"
         )
     ) {
         external_call(

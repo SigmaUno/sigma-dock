@@ -1064,6 +1064,32 @@ impl Workspace {
                         .tooltip(move |_, cx| crate::keyboard_ui::tooltip(warning.clone(), cx)),
                 )
             })
+            .child({
+                let checks_id = worker.id.clone();
+                let key_id = checks_id.clone();
+                div()
+                    .id(SharedString::from(format!("berth-checks-{checks_id}")))
+                    .tab_index(0)
+                    .border_1()
+                    .border_color(gpui::transparent_black())
+                    .focus(|style| style.border_color(rgb(theme.focus)))
+                    .p_1()
+                    .rounded_md()
+                    .bg(rgb(theme.button))
+                    .child("Checks · ⌘⇧K")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_checks(checks_id.clone(), window, cx);
+                    }))
+                    .on_key_down(cx.listener(
+                        move |this, event: &gpui::KeyDownEvent, window, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                this.open_checks(key_id.clone(), window, cx);
+                                cx.stop_propagation();
+                            }
+                        },
+                    ))
+            })
             .child(preview)
             .child(
                 div()

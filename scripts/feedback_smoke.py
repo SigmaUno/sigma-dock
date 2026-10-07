@@ -59,11 +59,13 @@ with open('received.txt','w') as out:
             if path.endswith('/pulls'):
                 value = [{'number': n+1, 'head': {'ref': branch}} for n, branch in enumerate(branches)]
             elif '/pulls/' in path and path.rsplit('/', 1)[1].isdigit():
-                value = {'number': int(path.rsplit('/', 1)[1]), 'head': {'sha': sha}, 'state': 'open', 'mergeable': False}
+                value = {'number': int(path.rsplit('/', 1)[1]), 'head': {'sha': sha}, 'base': {'ref': 'main'}, 'state': 'open', 'mergeable': False}
             elif path.endswith('/status'):
                 value = {'state': 'success', 'statuses': []}
+            elif '/reviews/' in path and path.endswith('/comments'):
+                value = [{'id': 17, 'path': 'src/main.rs', 'position': 10, 'body': 'Fix the edge case', 'resolver': None}, {'id': 18, 'path': 'src/old.rs', 'position': 1, 'body': 'Already resolved', 'resolver': {'login': 'reviewer'}}]
             elif path.endswith('/reviews'):
-                value = []
+                value = [{'id': 7, 'state': 'REQUEST_CHANGES', 'user': {'login': 'reviewer'}}]
             elif path.endswith('/actions/runs'):
                 value = {'total_count': 1, 'workflow_runs': [{'id': 7, 'workflow_id': 'test.yml', 'event': 'push', 'commit_sha': sha, 'status': 'failure'}]}
             elif path.endswith('/actions/runs/7/jobs'):
@@ -135,7 +137,34 @@ with open('received.txt','w') as out:
         assert any(entry['kind'] == 'job' and 'assertion failed' in entry['details'] for entry in rich['entries'])
         preview = rpc('ci_feedback', {'worker_id': worker['id']})
         assert preview['includes_job_logs'] and 'assertion failed' in preview['text']
+        checks = rpc('worker_checks', {'worker_id': worker['id']})
+        assert checks['git']['head'] and checks['git']['dirty']
+        assert checks['worker']['facts']['base_branch'] == 'main'
+        assert checks['worker']['facts']['review'] == 'changes_requested'
+        assert checks['worker']['facts']['mergeable'] is False
+        assert checks['ci']['entries'] and checks['ci_error'] is None
+        assert [comment['body'] for comment in checks['review']['comments']] == ['Fix the edge case']
+        assert checks['review']['comments'][0]['resolved'] is False
+        assert checks['review_error'] is None
+        # Preview loading never injects feedback. Confirmation delivers exactly the preview.
         received = Path(worker['worktree'])/'received.txt'
+        wait_for(received.exists)
+        assert 'Fix the edge case' not in received.read_text()
+        review_text = rpc('review_feedback', {'worker_id': worker['id']})
+        assert review_text == checks['review']['text']
+        rpc('message_worker', {'worker_id': worker['id'], 'message': review_text, 'expected_git_head': checks['git']['head'], 'expected_pr_head': sha})
+        wait_for(lambda: 'Fix the edge case' in received.read_text())
+        rpc('message_worker', {'worker_id': worker['id'], 'message': 'SHOULD_NOT_SEND', 'expected_git_head': 'wrong'}, error=True)
+        rpc('send_ci_feedback', {'worker_id': worker['id'], 'expected_text': 'wrong'}, error=True)
+        assert 'SHOULD_NOT_SEND' not in received.read_text()
+        conflict_text = rpc('conflict_instruction', {'worker_id': worker['id']})
+        rpc('message_worker', {'worker_id': worker['id'], 'message': conflict_text, 'expected_git_head': checks['git']['head']})
+        wait_for(lambda: 'forge reports a merge conflict' in received.read_text())
+        # A worker without a forge keeps Git data and returns explicit per-section errors.
+        unknown = rpc('worker_checks', {'worker_id': other['id']})
+        assert unknown['git'] is not None and unknown['ci'] is None and unknown['review'] is None
+        assert unknown['ci_error'] and unknown['review_error']
+
         rpc('configure_feedback', {'worker_id': worker['id'], 'auto_ci': True})
         # Let the production poller deliver feedback; a manual send races that poller.
         wait_for(lambda: received.exists() and 'assertion failed' in received.read_text(), timeout=60)

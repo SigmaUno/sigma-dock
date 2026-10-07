@@ -35,6 +35,7 @@ fn adjacent(index: usize, count: usize, key: &str) -> Option<usize> {
 
 #[derive(Debug, PartialEq, Eq)]
 enum Shortcut {
+    Checks,
     Settings,
     NewTask,
     Berths,
@@ -58,6 +59,9 @@ fn workspace_shortcut(
     }
     if form || settings {
         return None;
+    }
+    if key.key == "k" && key.modifiers.platform && key.modifiers.shift {
+        return Some(Shortcut::Checks);
     }
     if key.key == "[" && key.modifiers.platform && terminal {
         return Some(Shortcut::Berths);
@@ -204,6 +208,23 @@ impl Workspace {
             self.form_open,
             self.settings_open,
         ) {
+            Some(Shortcut::Checks) => {
+                let focused = self.berth_focus.iter().find_map(|(key, handle)| {
+                    if handle.contains_focused(window, cx) {
+                        key.strip_prefix("berth-").map(str::to_owned)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(id) = self
+                    .selected
+                    .clone()
+                    .or(focused)
+                    .or(self.focused_berth.clone())
+                {
+                    self.open_checks(id, window, cx);
+                }
+            }
             Some(Shortcut::Settings) => self.toggle_settings(window, cx),
             Some(Shortcut::NewTask) => {
                 if !self.form_open {
@@ -322,6 +343,20 @@ mod tests {
             ),
             Some(Shortcut::Settings)
         );
+    }
+    #[test]
+    fn checks_shortcut_works_for_berths_and_terminal_but_not_forms() {
+        let key = Keystroke::parse("cmd-shift-k").unwrap();
+        assert_eq!(
+            workspace_shortcut(&key, false, false, false, false),
+            Some(Shortcut::Checks)
+        );
+        assert_eq!(
+            workspace_shortcut(&key, true, true, false, false),
+            Some(Shortcut::Checks)
+        );
+        assert_eq!(workspace_shortcut(&key, false, false, true, false), None);
+        assert_eq!(workspace_shortcut(&key, false, false, false, true), None);
     }
     #[test]
     fn grid_navigation_respects_rows_and_partial_last_row() {

@@ -2,6 +2,7 @@
 mod appearance_ui;
 mod berths_ui;
 mod bootstrap;
+mod checks_ui;
 mod ci_ui;
 mod events;
 mod icons;
@@ -174,6 +175,8 @@ struct Workspace {
     usage_report: Option<sigmadock_core::AgentUsage>,
     usage_loading: bool,
     usage_error: Option<String>,
+    checks: checks_ui::ChecksPane,
+    checks_focus: gpui::FocusHandle,
     ci_open: bool,
     ci_report: Option<sigmadock_core::CiPreview>,
     ci_loading: bool,
@@ -252,6 +255,8 @@ impl Workspace {
             usage_report: None,
             usage_loading: false,
             usage_error: None,
+            checks: Default::default(),
+            checks_focus: cx.focus_handle(),
             ci_open: false,
             ci_report: None,
             ci_loading: false,
@@ -738,6 +743,9 @@ impl Render for Workspace {
             );
             content = content.child(form);
         }
+        if self.checks.worker.is_some() {
+            content = content.child(self.checks_panel(cx));
+        }
         if let Some(terminal) = &self.terminal {
             if let Some(worker) = selected {
                 let id = worker.id.clone();
@@ -756,6 +764,7 @@ impl Render for Workspace {
                         )),
                 );
                 for (label, method) in [
+                    ("Checks", "worker_checks"),
                     ("Usage", "agent_usage"),
                     ("Diff", "diff"),
                     ("CI preview", "ci_feedback"),
@@ -776,8 +785,10 @@ impl Render for Workspace {
                             .bg(rgb(self.theme.button))
                             .hover(|style| style.bg(rgb(self.theme.selection)))
                             .child(label)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if method == "agent_usage" {
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if method == "worker_checks" {
+                                    this.open_checks(id.clone(), window, cx);
+                                } else if method == "agent_usage" {
                                     this.load_usage(cx);
                                 } else if method == "ci_feedback" {
                                     this.load_ci(cx);

@@ -66,6 +66,14 @@ Closing the UI does not stop workers. Normal daemon shutdown stops its sessions 
 
 Live output replay is bounded to the latest 1 MiB per session and held in memory. A plain-text recovery tail of up to 16 KiB per worker is also saved locally in SQLite, with recorded state, activity/checkpoint times and PID; it does not recover a live PTY. Recovery retention is capped at seven days and 512 contexts. Use **Unfinished sessions** to inspect/copy context, attach a live session, start a fresh process or continue a supported harness, archive, or clear saved context. `sdk unfinished` and `sdk context WORKER_ID [--clear]` expose the same data. Reconnecting after that limit resets the terminal and replays the retained tail; terminal state may be incomplete. BEL and OSC 9/777 notifications flag `Needs you`; sixty seconds without I/O means `idle`, which remains `Working`. These are heuristics, not reliable inference of every harness's intent.
 
+## Checks pane
+
+Choose **Checks** on a berth, or press **⌘⇧K** with a berth or terminal focused. The pane combines local Git changes and ahead/behind/push counts, observed PR state, CI results and excerpts, unresolved review comments grouped by file, and merge conflicts. Its header shows **Ready**, **Blocked by N**, or **Unknown**. Failures take precedence over approval; missing, errored, incomplete or mismatched commit data never counts as passing. Readiness remains advisory and does not verify protected-branch rules or merge automatically.
+
+Each feedback action opens an exact-text preview. Choose **Send to agent** to confirm, or cancel. CI uses the existing delivery guard; changed CI feedback must be previewed again. Git, PR, review and conflict plans use the existing bracketed-paste message path and reject previews after the local or observed PR HEAD changes. Review sends the displayed unresolved comments together; providers that omit comment resolution are shown as unknown.
+
+Checks load on demand without additional background forge polling or an implicit Git fetch. **Reload** reloads local Git and detail data; **Refresh forge facts** also runs the existing explicit facts refresh. Git comparisons use cached remote refs, and results may become stale as work continues. Press **Esc** to close the pane.
+
 ## Worker base branches
 
 New workers start from a freshly fetched branch on `origin`, independent of the source checkout's current branch or local commits. SigmaDock detects and stores the default from `refs/remotes/origin/HEAD` when a project is added; edit it with `sdk project-base PROJECT_ID release` (use the branch name without `origin/`). Existing projects are detected on first use. If the remote default is unknown, configure the branch explicitly or run `git remote set-head origin -a` first.
