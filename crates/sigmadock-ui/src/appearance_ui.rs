@@ -4,6 +4,9 @@ use crate::{
 };
 use gpui::{Context, SharedString, Window, div, prelude::*, px, rgb};
 
+/// `settings_editor` index of the custom editor command field.
+const EDITOR_COMMAND: usize = 1000;
+
 pub struct SettingsTooltip;
 impl gpui::Render for SettingsTooltip {
     fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -13,7 +16,7 @@ impl gpui::Render for SettingsTooltip {
             .rounded_md()
             .bg(rgb(theme.button))
             .text_color(rgb(theme.text))
-            .child("Terminal appearance settings · Cmd/Ctrl+,")
+            .child("Settings · Cmd/Ctrl+,")
     }
 }
 impl Workspace {
@@ -83,7 +86,14 @@ impl Workspace {
         }
         let index = *index;
         let text = text.clone();
-        if index == 0 && !text.trim().is_empty() && text.len() <= 128 {
+        if index == EDITOR_COMMAND {
+            self.preferences.editor.custom_command = text;
+            self.settings_error = self
+                .preferences
+                .save(&self.preferences_path)
+                .err()
+                .map(|error| error.to_string());
+        } else if index == 0 && !text.trim().is_empty() && text.len() <= 128 {
             self.preferences.appearance.font = text;
             self.apply_appearance(cx);
         } else if index != 0 {
@@ -368,7 +378,92 @@ impl Workspace {
                         this.apply_appearance(cx);
                     })),
             )
+            .child(self.editor_settings(cx))
             .child(self.update_controls(cx))
+            .into_any_element()
+    }
+}
+impl Workspace {
+    fn editor_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use crate::editor::{Editor, detected};
+        let theme = self.theme;
+        let current = self.preferences.editor.editor;
+        let mut choices = div().flex().flex_wrap().gap_2();
+        let mut options: Vec<(Option<Editor>, String)> = vec![(
+            None,
+            format!(
+                "Automatic ({})",
+                crate::editor::EditorPreferences::default()
+                    .resolved()
+                    .label()
+            ),
+        )];
+        options.extend(
+            detected()
+                .into_iter()
+                .map(|e| (Some(e), e.label().to_owned())),
+        );
+        options.push((Some(Editor::System), Editor::System.label().into()));
+        options.push((Some(Editor::Custom), Editor::Custom.label().into()));
+        for (choice, label) in options {
+            choices = choices.child(
+                div()
+                    .id(SharedString::from(format!("editor-choice-{choice:?}")))
+                    .p_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .bg(rgb(if current == choice {
+                        theme.accent
+                    } else {
+                        theme.button
+                    }))
+                    .when(current == choice, |button| {
+                        button.text_color(rgb(theme.base))
+                    })
+                    .text_sm()
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.preferences.editor.editor = choice;
+                        this.settings_error = this
+                            .preferences
+                            .save(&this.preferences_path)
+                            .err()
+                            .map(|error| error.to_string());
+                        cx.notify();
+                    })),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .pt_3()
+            .mt_2()
+            .border_t_1()
+            .border_color(rgb(theme.border))
+            .child(div().text_lg().child("Editor"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(theme.muted))
+                    .child("Open in editor actions use this. SigmaDock has no built-in editor."),
+            )
+            .child(choices)
+            .when(current == Some(Editor::Custom), |section| {
+                section
+                    .child(self.appearance_field(
+                        EDITOR_COMMAND,
+                        "Command".into(),
+                        self.preferences.editor.custom_command.clone(),
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme.muted))
+                            .child("Placeholders: {path} {line} {column} {worktree}. Run directly, not through a shell."),
+                    )
+            })
             .into_any_element()
     }
 }

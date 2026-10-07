@@ -223,6 +223,74 @@ pub struct SessionContext {
     pub text: String,
     pub truncated: bool,
 }
+/// Why a forge issue or pull request is in the inbox.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InboxKind {
+    Assigned,
+    ReviewRequested,
+}
+/// One forge issue or pull request that waits on the token's user.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InboxItem {
+    pub kind: InboxKind,
+    /// `owner/repo`.
+    pub repo: String,
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub pull_request: bool,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    /// Unix seconds; 0 when the forge did not report a parseable time.
+    pub updated_at: u64,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Inbox {
+    /// Newest first, one entry per issue or pull request and kind.
+    pub items: Vec<InboxItem>,
+    /// Repositories that could not be read, with the reason.
+    pub warnings: Vec<String>,
+}
+/// Seconds since the Unix epoch for an RFC 3339 timestamp such as
+/// `2026-10-07T14:56:27Z`; `None` when it does not parse.
+pub fn parse_rfc3339(text: &str) -> Option<u64> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 20 || bytes[4] != b'-' || bytes[10] != b'T' {
+        return None;
+    }
+    let number = |range: std::ops::Range<usize>| -> Option<i64> { text.get(range)?.parse().ok() };
+    let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
+    let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
+    let mut rest = &text[19..];
+    if let Some(fraction) = rest.strip_prefix('.') {
+        rest = fraction.trim_start_matches(|c: char| c.is_ascii_digit());
+    }
+    let offset = match rest {
+        "Z" | "z" => 0,
+        _ if rest.len() == 6 && (rest.starts_with('+') || rest.starts_with('-')) => {
+            let minutes = rest[1..3].parse::<i64>().ok()? * 60 + rest[4..6].parse::<i64>().ok()?;
+            if rest.starts_with('-') {
+                -minutes
+            } else {
+                minutes
+            }
+        }
+        _ => return None,
+    };
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 {
+        return None;
+    }
+    // Days from civil date (Howard Hinnant's algorithm).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let seconds = days * 86_400 + hour * 3600 + minute * 60 + second - offset * 60;
+    u64::try_from(seconds).ok()
+}
 /// Global berth usage: the same live-session count `check_capacity` enforces.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Capacity {
@@ -533,6 +601,16 @@ mod tests {
         assert!(subscription.next_event().is_err());
         server.join().unwrap();
         std::fs::remove_file(socket).unwrap();
+    }
+    #[test]
+    fn rfc3339_timestamps_convert_to_unix_seconds() {
+        assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_rfc3339("2026-10-07T14:56:27Z"), Some(1_791_384_987));
+        assert_eq!(
+            parse_rfc3339("2026-10-07T16:56:27.123+02:00"),
+            Some(1_791_384_987)
+        );
+        assert_eq!(parse_rfc3339("yesterday"), None);
     }
     #[test]
     fn status_precedence() {

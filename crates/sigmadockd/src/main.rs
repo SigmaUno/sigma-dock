@@ -62,6 +62,8 @@ struct Daemon {
     checkpoints: HashMap<String, (std::time::Instant, (u64, u64, SessionState))>,
     ports: PortPool,
     forges: HashMap<String, Arc<RestForge>>,
+    /// Last inbox read, reused for `INBOX_TTL` to bound forge API use.
+    inbox: Option<(std::time::Instant, sigmadock_core::Inbox)>,
     state_dir: PathBuf,
     max_workers: usize,
     mcp_binary: PathBuf,
@@ -952,6 +954,63 @@ fn dimension(params: &Value, key: &str) -> Result<u16> {
         params[key].as_u64().context("invalid dimension")?,
     )?)
 }
+const INBOX_TTL: Duration = Duration::from_secs(60);
+/// Assigned issues and requested reviews across every distinct configured forge repository.
+fn inbox(state: &Arc<Mutex<Daemon>>, refresh: bool) -> Result<Value> {
+    let configs = {
+        let daemon = state.lock().unwrap();
+        if !refresh
+            && let Some((at, inbox)) = &daemon.inbox
+            && at.elapsed() < INBOX_TTL
+        {
+            return Ok(serde_json::to_value(inbox)?);
+        }
+        let mut configs: Vec<ForgeConfig> = Vec::new();
+        for config in daemon
+            .workers
+            .values()
+            .filter_map(|worker| worker.forge.clone())
+        {
+            if !configs.iter().any(|known| {
+                (&known.kind, &known.api_url, &known.owner, &known.repo)
+                    == (&config.kind, &config.api_url, &config.owner, &config.repo)
+            }) {
+                configs.push(config);
+            }
+        }
+        configs
+    };
+    let mut inbox = sigmadock_core::Inbox::default();
+    // GitHub assignments are read account-wide once per API and token, so issues in
+    // repositories without a worker still appear; review requests stay per repository.
+    let mut accounts: Vec<(String, String)> = Vec::new();
+    for config in configs {
+        let repository = format!("{}/{}", config.owner, config.repo);
+        let account = (config.api_url.clone(), config.token_env.clone());
+        let account_wide = config.kind == "github" && !accounts.contains(&account);
+        match RestForge::new(config).and_then(|forge| forge.inbox(account_wide)) {
+            Ok(items) => {
+                if account_wide {
+                    accounts.push(account);
+                }
+                for item in items {
+                    if !inbox.items.iter().any(|known| {
+                        (known.kind, &known.repo, known.number)
+                            == (item.kind, &item.repo, item.number)
+                    }) {
+                        inbox.items.push(item);
+                    }
+                }
+            }
+            Err(error) => inbox.warnings.push(format!("{repository}: {error}")),
+        }
+    }
+    inbox
+        .items
+        .sort_by_key(|item| std::cmp::Reverse(item.updated_at));
+    state.lock().unwrap().inbox = Some((std::time::Instant::now(), inbox.clone()));
+    Ok(serde_json::to_value(inbox)?)
+}
 fn external_call(state: &Arc<Mutex<Daemon>>, method: &str, params: &Value) -> Result<Value> {
     if method == "session_summary" {
         // Diff stats over untracked files can be slow; run git outside the state lock.
@@ -969,6 +1028,15 @@ fn external_call(state: &Arc<Mutex<Daemon>>, method: &str, params: &Value) -> Re
             sigmadock_core::unix_time(),
         );
         return Ok(json!(text));
+    }
+    if method == "inbox" {
+        return inbox(state, params["refresh"] == true);
+    }
+    if method == "diff_patch" {
+        // Untracked files make this slow on large worktrees; run git outside the state lock.
+        let worktree = state.lock().unwrap().worker(params)?.worktree.clone();
+        let (text, truncated) = sigmadock_git::patch(&worktree)?;
+        return Ok(json!({"text": text, "truncated": truncated}));
     }
     if method == "agent_usage" {
         let (worker, cwd, cached) = {
@@ -1160,6 +1228,8 @@ fn serve(mut stream: UnixStream, state: Arc<Mutex<Daemon>>) -> Result<()> {
                 | "ci_preview"
                 | "agent_usage"
                 | "session_summary"
+                | "diff_patch"
+                | "inbox"
         )
     ) {
         external_call(
@@ -1256,6 +1326,7 @@ fn main() -> Result<()> {
         context_floor: HashMap::new(),
         ports,
         forges: HashMap::new(),
+        inbox: None,
         state_dir: args.state_dir,
         max_workers,
         mcp_binary: args.mcp_binary.unwrap_or(

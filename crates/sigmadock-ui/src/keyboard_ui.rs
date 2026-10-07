@@ -38,6 +38,8 @@ enum Shortcut {
     Settings,
     NewTask,
     Berths,
+    Inbox,
+    OpenEditor,
     Project(usize),
     Next,
     Previous,
@@ -61,6 +63,12 @@ fn workspace_shortcut(
     }
     if key.key == "[" && key.modifiers.platform && terminal {
         return Some(Shortcut::Berths);
+    }
+    if key.key == "o" && key.modifiers.platform && key.modifiers.shift && terminal {
+        return Some(Shortcut::OpenEditor);
+    }
+    if key.key == "i" && key.modifiers.platform && !key.modifiers.shift {
+        return Some(Shortcut::Inbox);
     }
     if key.modifiers.platform && key.key.len() == 1 && ("1"..="9").contains(&key.key.as_str()) {
         return Some(Shortcut::Project(key.key.parse::<usize>().unwrap() - 1));
@@ -206,13 +214,23 @@ impl Workspace {
         ) {
             Some(Shortcut::Settings) => self.toggle_settings(window, cx),
             Some(Shortcut::NewTask) => {
+                if self.terminal.is_some() {
+                    self.close_terminal(window, cx);
+                }
+                self.view = crate::View::Berths;
                 if !self.form_open {
                     self.open_new_task(window, cx);
                 }
             }
             Some(Shortcut::Berths) => self.close_terminal(window, cx),
-            Some(Shortcut::Project(0)) => self.select_project(None, window, cx),
+            Some(Shortcut::Inbox) => self.open_inbox(window, cx),
+            Some(Shortcut::OpenEditor) => self.open_in_editor(None, cx),
+            Some(Shortcut::Project(0)) => {
+                self.view = crate::View::Berths;
+                self.select_project(None, window, cx)
+            }
             Some(Shortcut::Project(index)) => {
+                self.view = crate::View::Berths;
                 if let Some(project) = self.projects.get(index - 1) {
                     self.select_project(Some(project.id.clone()), window, cx);
                 } else {
@@ -311,6 +329,36 @@ mod tests {
                 false
             ),
             Some(Shortcut::NewTask)
+        );
+        assert_eq!(
+            workspace_shortcut(
+                &Keystroke::parse("cmd-i").unwrap(),
+                true,
+                true,
+                false,
+                false
+            ),
+            Some(Shortcut::Inbox)
+        );
+        assert_eq!(
+            workspace_shortcut(
+                &Keystroke::parse("cmd-shift-o").unwrap(),
+                true,
+                true,
+                false,
+                false
+            ),
+            Some(Shortcut::OpenEditor)
+        );
+        assert_eq!(
+            workspace_shortcut(
+                &Keystroke::parse("cmd-shift-o").unwrap(),
+                false,
+                false,
+                false,
+                false
+            ),
+            None
         );
         assert_eq!(
             workspace_shortcut(
