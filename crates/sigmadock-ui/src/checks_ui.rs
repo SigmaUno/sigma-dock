@@ -262,17 +262,17 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_3();
-        let title = self
-            .checks
-            .report
-            .as_ref()
-            .map_or("Checks · Unknown".into(), |report| {
-                format!(
-                    "Checks · {} · {}",
-                    report.worker.title,
-                    report.readiness().label()
-                )
-            });
+        let title =
+            self.checks
+                .report
+                .as_ref()
+                .map_or("Merge readiness · Unknown".into(), |report| {
+                    format!(
+                        "Merge readiness · {} · {}",
+                        report.worker.title,
+                        report.readiness().label()
+                    )
+                });
         panel = panel.child(div().flex().items_center().gap_2().child(div().flex_1().text_lg().child(title))
             .child(self.checks_control("checks-reload".into(),"Reload",Action::Refresh,cx))
             .child(self.checks_control("checks-refresh-facts".into(),"Refresh forge facts",Action::RefreshFacts,cx))
@@ -282,7 +282,7 @@ impl Workspace {
             panel = panel.child(error.clone());
         }
         if self.checks.loading {
-            panel = panel.child("Loading checks…");
+            panel = panel.child("Loading readiness…");
         }
         if let Some(preview) = &self.checks.preview {
             panel = panel.child(

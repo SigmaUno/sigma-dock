@@ -153,7 +153,7 @@ impl Workspace {
                 .into_any_element(),
         ];
         for (label, method) in [
-            ("Checks", "worker_checks"),
+            ("Merge readiness", "worker_checks"),
             ("Usage", "agent_usage"),
             ("CI preview", "ci_feedback"),
             ("Send CI to agent", "send_ci_feedback"),
