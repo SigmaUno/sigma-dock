@@ -14,6 +14,9 @@ use sigmadock_core::{SessionState, Worker};
 
 const MONO: &str = "Menlo";
 
+/// Narrowest the agent title shrinks before the branch chip must give way.
+const TITLE_MIN_WIDTH: f32 = 120.;
+
 impl Workspace {
     pub(crate) fn header_button(&self, id: impl Into<gpui::ElementId>) -> Stateful<Div> {
         let theme = self.theme;
@@ -245,13 +248,19 @@ impl Workspace {
                 )
             })
             .child(
+                // The branch chip gives way before the title does.
                 div()
-                    .min_w(px(0.))
+                    .id("agent-title")
+                    .min_w(px(TITLE_MIN_WIDTH))
                     .flex_shrink()
                     .truncate()
                     .text_lg()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(worker.title.clone()),
+                    .child(worker.title.clone())
+                    .tooltip({
+                        let text = format!("{} · {}", worker.title, worker.branch);
+                        move |_, cx| crate::keyboard_ui::tooltip(text.clone(), cx)
+                    }),
             )
             .child(
                 div()
@@ -268,23 +277,27 @@ impl Workspace {
                     .child(div().size(px(6.)).rounded_full().bg(rgb(color)))
                     .child(status.pill.clone()),
             )
-            .child(
-                div()
-                    .flex()
-                    .min_w(px(0.))
-                    .flex_shrink()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py_0p5()
-                    .rounded_full()
-                    .bg(rgb(theme.chip))
-                    .text_xs()
-                    .font_family(MONO)
-                    .text_color(rgb(theme.muted))
-                    .child(icon(Icon::GitBranch, px(12.), rgb(theme.muted)))
-                    .child(div().truncate().child(worker.branch.clone())),
-            )
+            // Narrow windows keep the title readable; the title's tooltip names the branch.
+            .when(!self.compact, |header| {
+                header.child(
+                    div()
+                        .flex()
+                        .min_w(px(0.))
+                        .max_w(px(220.))
+                        .flex_shrink()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_full()
+                        .bg(rgb(theme.chip))
+                        .text_xs()
+                        .font_family(MONO)
+                        .text_color(rgb(theme.muted))
+                        .child(icon(Icon::GitBranch, px(12.), rgb(theme.muted)))
+                        .child(div().truncate().child(worker.branch.clone())),
+                )
+            })
             .child(div().flex_1());
         let stop_id = id.clone();
         header = header.child(if running {
@@ -312,9 +325,14 @@ impl Workspace {
                     self.header_button("open-in-editor")
                         .rounded_r_none()
                         .child(icon(Icon::ExternalLink, px(14.), rgb(theme.accent)))
-                        .child(format!("Open in {}", editor.label()))
-                        .tooltip(|_, cx| {
-                            crate::keyboard_ui::tooltip("Open the worktree · ⌘⇧O".into(), cx)
+                        .when(!self.compact, |button| {
+                            button.child(format!("Open in {}", editor.label()))
+                        })
+                        .tooltip(move |_, cx| {
+                            crate::keyboard_ui::tooltip(
+                                format!("Open the worktree in {} · ⌘⇧O", editor.label()),
+                                cx,
+                            )
                         })
                         .on_click(cx.listener(|this, _, _, cx| this.open_in_editor(None, cx))),
                 )
@@ -484,6 +502,8 @@ impl Workspace {
                 // The window splits 1/6 sidebar, 3/6 session, 2/6 changes.
                 div()
                     .w(relative(0.4))
+                    .min_w(px(260.))
+                    .max_w(px(560.))
                     .flex_none()
                     .h_full()
                     .child(self.changes_pane(cx)),

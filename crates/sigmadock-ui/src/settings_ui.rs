@@ -845,7 +845,10 @@ impl Workspace {
                                     .child(section.label()),
                             )
                             .child(
+                                // Without a definite width the hint is measured as one line
+                                // and its wrapped lines overlap the section body.
                                 div()
+                                    .w_full()
                                     .text_sm()
                                     .text_color(rgb(theme.muted))
                                     .child(section.hint()),

@@ -61,10 +61,13 @@ impl Workspace {
                             }
                         })),
                 )
-                .child(div().text_sm().child(format!(
-                    "Project: {} · branch: {}\nWorktree: {}",
+                .child(div().text_sm().truncate().child(format!(
+                    "Project: {} · branch: {}",
                     entry["project"]["path"].as_str().unwrap_or("unknown"),
                     worker["branch"].as_str().unwrap_or("unknown"),
+                )))
+                .child(div().text_sm().truncate().child(format!(
+                    "Worktree: {}",
                     worker["worktree"].as_str().unwrap_or("unknown")
                 )))
                 .child(
