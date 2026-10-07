@@ -1059,42 +1059,54 @@ impl Workspace {
                 count(Group::NeedsYou)
             ),
         };
-        let pips = project.map(|p| self.capacity_bar(&p.id).w(px(160.)));
+        let pips = project.map(|p| self.capacity_bar(&p.id).w(px(120.)));
+        // The same 56 pt bar as the Inbox and agent headers.
         div()
+            .h(px(56.))
+            .flex_none()
             .flex()
-            .justify_between()
             .items_center()
+            .gap_2()
+            .px_4()
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            .child(crate::icons::app_icon(px(22.)))
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_2xl()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(name),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .text_sm()
-                            .text_color(rgb(theme.muted))
-                            .child(summary)
-                            .children(pips),
-                    ),
+                    .min_w(px(80.))
+                    .flex_shrink()
+                    .text_lg()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .ellipsis()
+                    .child(name),
             )
             .child(
                 div()
+                    .flex_none()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_full()
+                    .bg(rgb(theme.chip))
+                    .text_xs()
+                    .text_color(rgb(theme.muted))
+                    .child(summary),
+            )
+            .children(pips.map(|pips| pips.flex_none()))
+            .child(div().flex_1())
+            .child(
+                div()
                     .id("new-worker")
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .h(px(30.))
+                    .px_3()
                     .cursor_pointer()
-                    .px_4()
-                    .py_2()
                     .rounded_md()
                     .bg(rgb(theme.accent))
-                    .text_color(rgb(theme.base))
+                    .hover(|style| style.opacity(0.9))
+                    .text_sm()
+                    .text_color(rgb(theme.surface))
                     .font_weight(FontWeight::MEDIUM)
                     .child("+  New task")
                     .tab_index(0)
@@ -1198,7 +1210,7 @@ impl Workspace {
             .items_center()
             .gap_3()
             .px_4()
-            .py_2p5()
+            .py_2()
             .rounded_lg()
             .cursor_pointer()
             .bg(rgb(theme.surface))
@@ -1223,6 +1235,7 @@ impl Workspace {
                                 div()
                                     .min_w(px(0.))
                                     .ellipsis()
+                                    .text_sm()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(worker.title.clone()),
                             )
