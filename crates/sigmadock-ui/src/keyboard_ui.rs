@@ -35,6 +35,7 @@ fn adjacent(index: usize, count: usize, key: &str) -> Option<usize> {
 
 #[derive(Debug, PartialEq, Eq)]
 enum Shortcut {
+    Checks,
     Settings,
     NewTask,
     Berths,
@@ -60,6 +61,9 @@ fn workspace_shortcut(
     }
     if form || settings {
         return None;
+    }
+    if key.key == "k" && key.modifiers.platform && key.modifiers.shift {
+        return Some(Shortcut::Checks);
     }
     if key.key == "[" && key.modifiers.platform && terminal {
         return Some(Shortcut::Berths);
@@ -90,16 +94,14 @@ fn workspace_shortcut(
 
 impl Workspace {
     pub(crate) fn prepare_berth_focus(&mut self, cx: &mut Context<Self>) {
-        let ids: Vec<_> = self
-            .berths(self.selected_project.as_deref())
-            .iter()
-            .map(|w| w.id.clone())
-            .collect();
-        let keys: Vec<_> = (0..self.capacity.max_workers.max(ids.len()))
-            .map(|i| {
-                ids.get(i).map_or_else(
-                    || format!("empty-berth-{}", i + 1),
-                    |id| format!("berth-{id}"),
+        // One handle per grid slot, keyed exactly as the grid renders it.
+        let keys: Vec<_> = self
+            .slots(self.selected_project.as_deref())
+            .into_iter()
+            .map(|(number, worker)| {
+                worker.map_or_else(
+                    || format!("empty-berth-{number}"),
+                    |worker| format!("berth-{}", worker.id),
                 )
             })
             .collect();
@@ -113,9 +115,9 @@ impl Workspace {
 
     fn focus_slot(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let id = self
-            .berths(self.selected_project.as_deref())
+            .slots(self.selected_project.as_deref())
             .get(index)
-            .map(|w| w.id.clone());
+            .and_then(|(_, worker)| worker.map(|worker| worker.id.clone()));
         let key = id.as_ref().map_or_else(
             || format!("empty-berth-{}", index + 1),
             |id| format!("berth-{id}"),
@@ -146,6 +148,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.settings_open = false;
         if self.terminal.is_some() {
             self.close_terminal(window, cx);
         }
@@ -167,9 +170,9 @@ impl Workspace {
         let key = &event.keystroke;
         if key.key == "enter" {
             let worker = self
-                .berths(self.selected_project.as_deref())
+                .slots(self.selected_project.as_deref())
                 .get(index)
-                .map(|w| (*w).clone());
+                .and_then(|(_, worker)| worker.cloned());
             if let Some(worker) = worker {
                 if key.modifiers.platform {
                     if let Some(action) = berths_ui::status(&worker).action {
@@ -187,7 +190,8 @@ impl Workspace {
             && !key.modifiers.alt
             && matches!(key.key.as_str(), "left" | "right" | "up" | "down")
         {
-            if let Some(next) = adjacent(index, self.capacity.max_workers, &key.key) {
+            let count = self.slots(self.selected_project.as_deref()).len();
+            if let Some(next) = adjacent(index, count, &key.key) {
                 self.focus_slot(next, window, cx);
             }
             cx.stop_propagation();
@@ -212,6 +216,23 @@ impl Workspace {
             self.form_open,
             self.settings_open,
         ) {
+            Some(Shortcut::Checks) => {
+                let focused = self.berth_focus.iter().find_map(|(key, handle)| {
+                    if handle.contains_focused(window, cx) {
+                        key.strip_prefix("berth-").map(str::to_owned)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(id) = self
+                    .selected
+                    .clone()
+                    .or(focused)
+                    .or(self.focused_berth.clone())
+                {
+                    self.open_checks(id, window, cx);
+                }
+            }
             Some(Shortcut::Settings) => self.toggle_settings(window, cx),
             Some(Shortcut::NewTask) => {
                 if self.terminal.is_some() {
@@ -370,6 +391,20 @@ mod tests {
             ),
             Some(Shortcut::Settings)
         );
+    }
+    #[test]
+    fn checks_shortcut_works_for_berths_and_terminal_but_not_forms() {
+        let key = Keystroke::parse("cmd-shift-k").unwrap();
+        assert_eq!(
+            workspace_shortcut(&key, false, false, false, false),
+            Some(Shortcut::Checks)
+        );
+        assert_eq!(
+            workspace_shortcut(&key, true, true, false, false),
+            Some(Shortcut::Checks)
+        );
+        assert_eq!(workspace_shortcut(&key, false, false, true, false), None);
+        assert_eq!(workspace_shortcut(&key, false, false, false, true), None);
     }
     #[test]
     fn grid_navigation_respects_rows_and_partial_last_row() {

@@ -299,6 +299,7 @@ impl Daemon {
                     return Ok(serde_json::to_value(project)?);
                 }
                 let project = Project {
+                    forge: None,
                     base_branch: sigmadock_git::default_base(&path).ok(),
                     id: Uuid::new_v4().to_string(),
                     name: path
@@ -320,6 +321,35 @@ impl Daemon {
                 Ok(serde_json::to_value(project)?)
             }
             "list_projects" => Ok(serde_json::to_value(self.store.projects()?)?),
+            "detect_forge" => {
+                let project = self.project(string(&params, "project_id")?)?;
+                let url = sigmadock_git::remote_url(&project.path)?;
+                let (host, owner, repo) = sigmadock_core::parse_remote(&url)
+                    .with_context(|| format!("origin {url} is not a recognised forge URL"))?;
+                let github = host == "github.com";
+                Ok(serde_json::to_value(ForgeConfig {
+                    kind: if github { "github" } else { "forgejo" }.into(),
+                    api_url: if github {
+                        "https://api.github.com".into()
+                    } else {
+                        format!("https://{host}/api/v1")
+                    },
+                    owner,
+                    repo,
+                    token_env: if github {
+                        "GITHUB_TOKEN"
+                    } else {
+                        "FORGEJO_TOKEN"
+                    }
+                    .into(),
+                    actions: false,
+                    token: if github {
+                        sigmadock_core::TokenSource::GithubCli
+                    } else {
+                        sigmadock_core::TokenSource::Env
+                    },
+                })?)
+            }
             "capacity" => Ok(serde_json::to_value(self.capacity()?)?),
             "list_workers" => {
                 let mut workers: Vec<_> = self
@@ -577,6 +607,18 @@ impl Daemon {
                 Ok(serde_json::to_value(worker)?)
             }
             "message_worker" => {
+                let worker = self.worker(&params)?;
+                if let Some(expected) = params["expected_git_head"].as_str() {
+                    let current = sigmadock_git::readiness(&worker.worktree, None, &worker.branch)?;
+                    if current.head != expected {
+                        bail!("worker HEAD changed since preview; reload checks before sending");
+                    }
+                }
+                if let Some(expected) = params["expected_pr_head"].as_str()
+                    && worker.facts.head_sha.as_deref() != Some(expected)
+                {
+                    bail!("observed PR head changed since preview; reload checks before sending");
+                }
                 let session = self.session(&params)?;
                 let text = task_text(string(&params, "message")?, 32000);
                 // Bracketed paste avoids executing each embedded newline as a separate command.
@@ -733,7 +775,8 @@ impl Daemon {
             .get("forge")
             .filter(|value| !value.is_null())
             .map(|value| serde_json::from_value(value.clone()))
-            .transpose()?;
+            .transpose()?
+            .or_else(|| project.forge.clone());
         let forge = forge_config
             .clone()
             .map(RestForge::new)
@@ -969,10 +1012,16 @@ fn inbox(state: &Arc<Mutex<Daemon>>, refresh: bool) -> Result<Value> {
             return Ok(serde_json::to_value(inbox)?);
         }
         let mut configs: Vec<ForgeConfig> = Vec::new();
-        for config in daemon
-            .workers
-            .values()
-            .filter_map(|worker| worker.forge.clone())
+        let projects = daemon.store.projects()?;
+        for config in projects
+            .iter()
+            .filter_map(|project| project.forge.clone())
+            .chain(
+                daemon
+                    .workers
+                    .values()
+                    .filter_map(|worker| worker.forge.clone()),
+            )
         {
             if !configs.iter().any(|known| {
                 (&known.kind, &known.api_url, &known.owner, &known.repo)
@@ -1014,7 +1063,122 @@ fn inbox(state: &Arc<Mutex<Daemon>>, refresh: bool) -> Result<Value> {
     state.lock().unwrap().inbox = Some((std::time::Instant::now(), inbox.clone()));
     Ok(serde_json::to_value(inbox)?)
 }
+/// Sets or clears a project's forge and applies it to the project's current workers.
+/// Building the client may run `gh`, so it happens before taking the state lock.
+fn configure_project_forge(state: &Arc<Mutex<Daemon>>, params: &Value) -> Result<Value> {
+    let forge: Option<ForgeConfig> = match params.get("forge") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(serde_json::from_value(value.clone())?),
+    };
+    let client = forge.clone().map(RestForge::new).transpose()?.map(Arc::new);
+    let mut daemon = state.lock().unwrap();
+    let mut project = daemon.project(string(params, "project_id")?)?;
+    project.forge = forge.clone();
+    daemon.store.save_project(&project)?;
+    let ids: Vec<String> = daemon
+        .workers
+        .values()
+        .filter(|worker| worker.project_id == project.id && !worker.archived)
+        .map(|worker| worker.id.clone())
+        .collect();
+    for id in &ids {
+        let mut worker = daemon.workers[id].clone();
+        worker.forge = forge.clone();
+        worker.facts.forge_error = None;
+        daemon.store.save_worker(&worker)?;
+        match &client {
+            Some(client) => daemon.forges.insert(id.clone(), client.clone()),
+            None => daemon.forges.remove(id),
+        };
+        daemon.workers.insert(id.clone(), worker);
+    }
+    daemon.inbox = None;
+    Ok(json!({"project": project, "workers": ids.len()}))
+}
 fn external_call(state: &Arc<Mutex<Daemon>>, method: &str, params: &Value) -> Result<Value> {
+    if method == "worker_checks" {
+        let (worker, project, forge) = {
+            let mut daemon = state.lock().unwrap();
+            daemon.sync()?;
+            let worker = daemon.worker(params)?.clone();
+            let project = daemon.project(&worker.project_id)?;
+            let forge = if let Some(config) = &worker.forge {
+                if !daemon.forges.contains_key(&worker.id) {
+                    daemon
+                        .forges
+                        .insert(worker.id.clone(), Arc::new(RestForge::new(config.clone())?));
+                }
+                Some(daemon.forges[&worker.id].clone())
+            } else {
+                None
+            };
+            (worker, project, forge)
+        };
+        let (git, git_error) = match sigmadock_git::readiness(
+            &worker.worktree,
+            worker
+                .facts
+                .base_branch
+                .as_deref()
+                .or(project.base_branch.as_deref()),
+            &worker.branch,
+        ) {
+            Ok(mut git) => {
+                // Observed PR HEAD confirms a push even if the tracking ref is stale/missing.
+                if worker.facts.head_sha.as_deref() == Some(&git.head) {
+                    git.unpushed = Some(0);
+                }
+                (Some(git), None)
+            }
+            Err(error) => (None, Some(error.to_string())),
+        };
+        let (ci, review) = if let Some(forge) = forge {
+            std::thread::scope(|scope| {
+                let ci = scope.spawn(|| forge.ci_preview(&worker.branch));
+                let review = scope.spawn(|| forge.review_preview(&worker.branch));
+                (ci.join().unwrap(), review.join().unwrap())
+            })
+        } else {
+            (
+                Err(anyhow::anyhow!("configure a forge first")),
+                Err(anyhow::anyhow!("configure a forge first")),
+            )
+        };
+        let (ci, ci_error) = match ci {
+            Ok(value) => (Some(value), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
+        let (review, review_error) = match review {
+            Ok(value) => (Some(value), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
+        let daemon = state.lock().unwrap();
+        let current = daemon
+            .workers
+            .get(&worker.id)
+            .context("worker disappeared")?;
+        if current.archived || current.forge != worker.forge {
+            bail!("worker configuration changed while loading checks");
+        }
+        let report = sigmadock_core::ReadinessReport {
+            worker: current.clone(),
+            git,
+            git_error,
+            ci,
+            ci_error,
+            review,
+            review_error,
+        };
+        return Ok(serde_json::to_value(report)?);
+    }
+
+    if method == "configure_project_forge" {
+        return configure_project_forge(state, params);
+    }
+    if method == "check_forge" {
+        let config: ForgeConfig = serde_json::from_value(params["forge"].clone())?;
+        return Ok(json!({"login": RestForge::new(config)?.login()?}));
+    }
     if method == "session_summary" {
         // Diff stats over untracked files can be slow; run git outside the state lock.
         let (worker, project) = {
@@ -1108,6 +1272,11 @@ fn external_call(state: &Arc<Mutex<Daemon>>, method: &str, params: &Value) -> Re
     if method == "ci_feedback" || method == "send_ci_feedback" {
         let report = forge.ci_feedback(&worker.branch)?;
         if method == "send_ci_feedback" {
+            if let Some(expected) = params["expected_text"].as_str()
+                && report.text != expected
+            {
+                bail!("CI feedback changed since preview; preview it again before sending");
+            }
             deliver_ci(state, &worker, &report, params["automatic"] == true)?;
         }
         return Ok(serde_json::to_value(report)?);
@@ -1255,10 +1424,13 @@ fn serve(mut stream: UnixStream, state: Arc<Mutex<Daemon>>) -> Result<()> {
                 | "send_ci_feedback"
                 | "ci_preview"
                 | "agent_usage"
+                | "worker_checks"
                 | "session_summary"
                 | "diff_patch"
                 | "diff"
                 | "inbox"
+                | "configure_project_forge"
+                | "check_forge"
         )
     ) {
         external_call(

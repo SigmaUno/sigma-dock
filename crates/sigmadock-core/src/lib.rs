@@ -12,7 +12,8 @@ use std::{
 };
 
 pub mod diff;
-
+mod readiness;
+pub use readiness::{GitReadiness, Readiness, ReadinessReport, ReviewComment, ReviewPreview};
 pub const API_VERSION: u32 = 2;
 pub const MAX_FRAME: u64 = 4 * 1024 * 1024;
 
@@ -55,6 +56,9 @@ pub enum Review {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Facts {
+    /// Observed PR target branch; absent in older facts.
+    #[serde(default)]
+    pub base_branch: Option<String>,
     pub session: SessionState,
     pub pr: PullRequestState,
     pub checks: Checks,
@@ -69,6 +73,7 @@ pub struct Facts {
 impl Default for Facts {
     fn default() -> Self {
         Self {
+            base_branch: None,
             session: SessionState::Running,
             pr: Default::default(),
             checks: Default::default(),
@@ -140,6 +145,9 @@ pub struct Project {
     pub id: String,
     pub path: PathBuf,
     pub name: String,
+    /// Forge every worker of this project uses; new workers inherit it.
+    #[serde(default)]
+    pub forge: Option<ForgeConfig>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Worker {
@@ -190,6 +198,54 @@ pub struct ForgeConfig {
     pub token_env: String,
     #[serde(default)]
     pub actions: bool,
+    /// Where the daemon reads the API token; `token_env` applies to `Env` only.
+    #[serde(default)]
+    pub token: TokenSource,
+}
+/// Apps opened from Finder get no shell environment, so a GitHub CLI login is the
+/// practical token source there; environment variables suit daemons started from a shell.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenSource {
+    #[default]
+    Env,
+    /// `gh auth token` for the API's host.
+    GithubCli,
+}
+/// `(host, owner, repo)` of a git remote URL such as `git@github.com:o/r.git`,
+/// `https://github.com/o/r` or `ssh://git@host:2222/o/r.git`.
+pub fn parse_remote(url: &str) -> Option<(String, String, String)> {
+    let url = url.trim();
+    let rest = if let Some((scheme, rest)) = url.split_once("://") {
+        if !["https", "http", "ssh", "git"].contains(&scheme) {
+            return None;
+        }
+        rest.to_owned()
+    } else {
+        // scp-like syntax: [user@]host:owner/repo
+        let (host, path) = url.split_once(':')?;
+        format!("{host}/{path}")
+    };
+    let (authority, path) = rest.split_once('/')?;
+    let host = authority
+        .rsplit('@')
+        .next()?
+        .split(':')
+        .next()?
+        .to_ascii_lowercase();
+    let mut parts = path
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .rsplitn(2, '/');
+    let repo = parts.next()?.to_owned();
+    let owner = parts.next()?.rsplit('/').next()?.to_owned();
+    let valid = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    };
+    (!host.is_empty() && valid(&owner) && valid(&repo)).then_some((host, owner, repo))
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -554,6 +610,32 @@ pub fn read_frame(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>> {
 mod tests {
     use super::*;
     #[test]
+    fn git_remotes_parse_to_host_owner_and_repo() {
+        let parsed = |url| parse_remote(url).map(|(h, o, r)| format!("{h} {o} {r}"));
+        assert_eq!(
+            parsed("git@github.com:SigmaUno/sigma-dock.git").as_deref(),
+            Some("github.com SigmaUno sigma-dock")
+        );
+        assert_eq!(
+            parsed("https://github.com/SigmaUno/sigma-dock").as_deref(),
+            Some("github.com SigmaUno sigma-dock")
+        );
+        assert_eq!(
+            parsed("ssh://git@code.example:2222/team/app.git/").as_deref(),
+            Some("code.example team app")
+        );
+        assert_eq!(
+            parsed("https://user@git.example/group/sub/app.git").as_deref(),
+            Some("git.example sub app")
+        );
+        assert_eq!(parsed("/local/path/repo"), None);
+        assert_eq!(parsed("file:///tmp/o/r"), None);
+        let config: ForgeConfig = serde_json::from_value(json!({
+            "kind": "github", "api_url": "https://api.github.com", "owner": "o", "repo": "r", "token_env": "T"
+        })).unwrap();
+        assert_eq!(config.token, TokenSource::Env);
+    }
+    #[test]
     fn subscription_preserves_buffered_events_and_reports_eof() {
         use std::{
             os::unix::net::UnixListener,
@@ -723,6 +805,9 @@ pub struct CiEntry {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CiPreview {
+    /// False when a provider endpoint or pagination is incomplete.
+    #[serde(default)]
+    pub complete: bool,
     pub head_sha: String,
     pub current_head: String,
     pub refreshed_at: u64,

@@ -77,6 +77,7 @@ impl RestForge {
     pub(super) fn preview(&self, branch: &str) -> Result<CiPreview> {
         let sha = self.head(branch)?;
         let mut report = CiPreview {
+            complete: true,
             head_sha: sha.clone(),
             current_head: sha.clone(),
             refreshed_at: unix_time(),
@@ -138,11 +139,19 @@ impl RestForge {
                         }
                         report.entries.push(entry(check, "status", index));
                     }
+                } else {
+                    report.complete = false;
+                    report
+                        .warnings
+                        .push("Invalid commit statuses response".into());
                 }
             }
-            Err(error) => report
-                .warnings
-                .push(format!("Commit status endpoint unavailable: {error}")),
+            Err(error) => {
+                report.complete = false;
+                report
+                    .warnings
+                    .push(format!("Commit status endpoint unavailable: {error}"));
+            }
         }
         if self.config.kind == "github" || self.config.actions {
             let runs = if self.config.kind == "github" {
@@ -181,6 +190,7 @@ impl RestForge {
                         }
                         report.entries.push(entry(run, "workflow", index));
                         let Some(id) = run["id"].as_u64() else {
+                            report.complete = false;
                             report
                                 .warnings
                                 .push("Workflow has no run identifier; jobs unavailable.".into());
@@ -244,15 +254,21 @@ impl RestForge {
                                     report.entries.push(detail);
                                 }
                             }
-                            Err(error) => report
-                                .warnings
-                                .push(format!("Workflow {id} jobs unavailable: {error}")),
+                            Err(error) => {
+                                report.complete = false;
+                                report
+                                    .warnings
+                                    .push(format!("Workflow {id} jobs unavailable: {error}"));
+                            }
                         }
                     }
                 }
-                Err(error) => report
-                    .warnings
-                    .push(format!("Workflow endpoint unavailable: {error}")),
+                Err(error) => {
+                    report.complete = false;
+                    report
+                        .warnings
+                        .push(format!("Workflow endpoint unavailable: {error}"));
+                }
             }
         } else {
             report.warnings.push("Forgejo Actions endpoints are disabled in this worker’s forge configuration; commit statuses are shown.".into());
@@ -293,5 +309,50 @@ mod tests {
             0,
         );
         assert!(result.truncated && result.details.len() <= 8192 && result.url.is_none());
+    }
+}
+
+#[cfg(test)]
+mod incomplete_ci_tests {
+    use crate::{
+        Forge,
+        tests::{local_forge, mock},
+    };
+    #[test]
+    fn passing_entries_do_not_hide_failed_provider_endpoints() {
+        let sha = "a".repeat(40);
+        let pull = format!(r#"{{"number":1,"head":{{"sha":"{sha}"}}}}"#);
+        let (url, server) = mock(vec![
+            (
+                "200 OK",
+                "",
+                r#"[{"number":1,"head":{"ref":"sigma/task"}}]"#,
+            ),
+            ("200 OK", "", &pull),
+            (
+                "200 OK",
+                "",
+                r#"{"statuses":[{"context":"tests","state":"success"}]}"#,
+            ),
+            ("403 Forbidden", "", "{}"),
+            (
+                "200 OK",
+                "",
+                r#"[{"number":1,"head":{"ref":"sigma/task"}}]"#,
+            ),
+            ("200 OK", "", &pull),
+        ]);
+        let mut forge = local_forge(url);
+        forge.config.actions = true;
+        let report = forge.ci_preview("sigma/task").unwrap();
+        assert_eq!(report.entries[0].state, "passed");
+        assert!(!report.complete);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("unavailable"))
+        );
+        server.join().unwrap();
     }
 }

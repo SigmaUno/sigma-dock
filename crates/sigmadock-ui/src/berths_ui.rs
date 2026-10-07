@@ -55,6 +55,26 @@ pub(crate) fn local_midnight(now: u64) -> u64 {
     now.saturating_sub((tm.tm_hour * 3600 + tm.tm_min * 60 + tm.tm_sec) as u64)
 }
 
+/// Numbered berth slots up to the larger of capacity and the highest docked berth.
+fn slot_layout(berths: Vec<&Worker>, max_workers: usize) -> Vec<(usize, Option<&Worker>)> {
+    let max_slot = berths
+        .iter()
+        .filter_map(|worker| worker.berth)
+        .map(usize::from)
+        .max()
+        .unwrap_or(0)
+        .max(max_workers);
+    (1..=max_slot)
+        .map(|number| {
+            let worker = berths
+                .iter()
+                .find(|worker| worker.berth == Some(number as u8))
+                .copied();
+            (number, worker)
+        })
+        .collect()
+}
+
 fn pr_number(worker: &Worker) -> Option<&str> {
     worker
         .facts
@@ -914,13 +934,26 @@ impl Workspace {
                             .rounded_md()
                             .cursor_pointer()
                             .text_xs()
-                            .text_color(rgb(theme.muted))
+                            .text_color(rgb(if self.settings_open {
+                                theme.accent
+                            } else {
+                                theme.muted
+                            }))
+                            .when(self.settings_open, |row| row.bg(rgb(theme.base)))
                             .hover(|style| style.bg(rgb(theme.panel)))
                             .tab_index(0)
                             .border_1()
                             .border_color(gpui::transparent_black())
                             .focus(|style| style.border_color(rgb(theme.focus)))
-                            .child(icon(Icon::Settings, px(14.), rgb(theme.muted)))
+                            .child(icon(
+                                Icon::Settings,
+                                px(14.),
+                                rgb(if self.settings_open {
+                                    theme.accent
+                                } else {
+                                    theme.muted
+                                }),
+                            ))
                             .child("Settings")
                             .tooltip(|_, cx| {
                                 cx.new(|_| crate::appearance_ui::SettingsTooltip).into()
@@ -1283,6 +1316,32 @@ impl Workspace {
                         .tooltip(move |_, cx| crate::keyboard_ui::tooltip(warning.clone(), cx)),
                 )
             })
+            .child({
+                let checks_id = worker.id.clone();
+                let key_id = checks_id.clone();
+                div()
+                    .id(SharedString::from(format!("berth-checks-{checks_id}")))
+                    .tab_index(0)
+                    .border_1()
+                    .border_color(gpui::transparent_black())
+                    .focus(|style| style.border_color(rgb(theme.focus)))
+                    .p_1()
+                    .rounded_md()
+                    .bg(rgb(theme.button))
+                    .child("Checks · ⌘⇧K")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_checks(checks_id.clone(), window, cx);
+                    }))
+                    .on_key_down(cx.listener(
+                        move |this, event: &gpui::KeyDownEvent, window, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                this.open_checks(key_id.clone(), window, cx);
+                                cx.stop_propagation();
+                            }
+                        },
+                    ))
+            })
             .child(preview)
             .child(
                 div()
@@ -1383,26 +1442,20 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// Grid slots in berth-number order: the worker docked at each number, if any.
+    /// Workers keep stable berth numbers, so occupied slots can have gaps between them.
+    pub(crate) fn slots(&self, project: Option<&str>) -> Vec<(usize, Option<&Worker>)> {
+        slot_layout(self.berths(project), self.capacity.max_workers)
+    }
+
     pub(crate) fn grid(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let project = self.current_project().map(|p| p.id.clone());
-        let berths = self.berths(project.as_deref());
         let mut grid = div().grid().grid_cols(3).gap_4();
-        let max_slot = berths
-            .iter()
-            .filter_map(|worker| worker.berth)
-            .map(usize::from)
-            .max()
-            .unwrap_or(0)
-            .max(self.capacity.max_workers);
-        for number in 1..=max_slot {
-            if let Some(worker) = berths
-                .iter()
-                .find(|worker| worker.berth == Some(number as u8))
-            {
-                grid = grid.child(self.berth(number, worker, cx));
-            } else {
-                grid = grid.child(self.empty_berth(number, cx));
-            }
+        for (number, worker) in self.slots(project.as_deref()) {
+            grid = grid.child(match worker {
+                Some(worker) => self.berth(number, worker, cx),
+                None => self.empty_berth(number, cx),
+            });
         }
         grid.into_any_element()
     }
@@ -1610,6 +1663,25 @@ mod tests {
             "archived": false, "facts": facts,
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn slots_keep_berth_numbers_with_gaps() {
+        let mut first = worker(Facts::default());
+        first.berth = Some(3);
+        let mut second = worker(Facts::default());
+        second.id = "x".into();
+        second.berth = Some(7);
+        let slots = slot_layout(vec![&first, &second], 5);
+        assert_eq!(slots.len(), 7);
+        let docked: Vec<_> = slots
+            .iter()
+            .map(|(number, worker)| (*number, worker.map(|w| w.id.as_str())))
+            .filter(|(_, id)| id.is_some())
+            .collect();
+        assert_eq!(docked, [(3, Some("w")), (7, Some("x"))]);
+        assert!(slots[1].1.is_none());
+        assert_eq!(slot_layout(vec![], 2).len(), 2);
     }
 
     #[test]

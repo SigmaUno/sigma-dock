@@ -70,6 +70,14 @@ Closing the UI does not stop workers. Normal daemon shutdown stops its sessions 
 
 Live output replay is bounded to the latest 1 MiB per session and held in memory. A plain-text recovery tail of up to 16 KiB per worker is also saved locally in SQLite, with recorded state, activity/checkpoint times and PID; it does not recover a live PTY. Recovery retention is capped at seven days and 512 contexts. Use **Unfinished sessions** to inspect/copy context, attach a live session, start a fresh process or continue a supported harness, archive, or clear saved context. `sdk unfinished` and `sdk context WORKER_ID [--clear]` expose the same data. Reconnecting after that limit resets the terminal and replays the retained tail; terminal state may be incomplete. BEL and OSC 9/777 notifications flag `Needs you`; sixty seconds without I/O means `idle`, which remains `Working`. These are heuristics, not reliable inference of every harness's intent.
 
+## Checks pane
+
+Choose **Checks** on a berth, or press **⌘⇧K** with a berth or terminal focused. The pane combines local Git changes and ahead/behind/push counts, observed PR state, CI results and excerpts, unresolved review comments grouped by file, and merge conflicts. Its header shows **Ready**, **Blocked by N**, or **Unknown**. Failures take precedence over approval; missing, errored, incomplete or mismatched commit data never counts as passing. Readiness remains advisory and does not verify protected-branch rules or merge automatically.
+
+Each feedback action opens an exact-text preview. Choose **Send to agent** to confirm, or cancel. CI uses the existing delivery guard; changed CI feedback must be previewed again. Git, PR, review and conflict plans use the existing bracketed-paste message path and reject previews after the local or observed PR HEAD changes. Review sends the displayed unresolved comments together; providers that omit comment resolution are shown as unknown.
+
+Checks load on demand without additional background forge polling or an implicit Git fetch. **Reload** reloads local Git and detail data; **Refresh forge facts** also runs the existing explicit facts refresh. Git comparisons use cached remote refs, and results may become stale as work continues. Press **Esc** to close the pane.
+
 ## Worker base branches
 
 New workers start from a freshly fetched branch on `origin`, independent of the source checkout's current branch or local commits. SigmaDock detects and stores the default from `refs/remotes/origin/HEAD` when a project is added; edit it with `sdk project-base PROJECT_ID release` (use the branch name without `origin/`). Existing projects are detected on first use. If the remote default is unknown, configure the branch explicitly or run `git remote set-head origin -a` first.
@@ -80,9 +88,12 @@ Each launch fetches only that branch with an eight-second timeout. A failed fetc
 
 ## Forge facts and feedback
 
-Export a forge token into the daemon's environment before starting it. Configuration stores **the environment variable name**, never the token. For example:
+Connect a project in **Settings → Forges** (⌘,). SigmaDock fills in the forge, owner and repository from the `origin` remote, **Test connection** confirms the token, and **Save** applies the forge to the project's current agents and every new one. The token comes from your GitHub CLI login (`gh auth token`; run `gh auth login` once) or from an environment variable of the daemon. Apps opened from Finder have no shell environment, so the GitHub CLI is the simplest choice there. SigmaDock stores where to read the token, never the token itself.
+
+Single workers can still be configured from the CLI:
 
 ```sh
+sdk forge WORKER_ID --owner my-org --repo my-repo --github-cli
 sdk forge WORKER_ID --owner my-org --repo my-repo
 sdk forge WORKER_ID --kind forgejo --api-url https://forge.example/api/v1 --owner my-org --repo my-repo --token-env FORGEJO_TOKEN
 sdk refresh WORKER_ID

@@ -143,6 +143,64 @@ pub fn prune(repo: &Path) -> Result<String> {
 }
 mod diff;
 pub use diff::{diff_report, recorded_base};
+/// Inspect local refs and files only; the checks pane never fetches implicitly.
+pub fn readiness(
+    path: &Path,
+    base_branch: Option<&str>,
+    worker_branch: &str,
+) -> Result<sigmadock_core::GitReadiness> {
+    let head = git(path, &["rev-parse", "HEAD"])?;
+    let raw = git_raw(path, &["status", "--porcelain=v1", "-z"])?;
+    let mut dirty = Vec::new();
+    let mut records = raw.split('\0').filter(|line| !line.is_empty());
+    while let Some(record) = records.next() {
+        dirty.push(sigmadock_core::task_text(record, 1024));
+        if record.starts_with('R')
+            || record.starts_with('C')
+            || record.get(1..2).is_some_and(|s| s == "R" || s == "C")
+        {
+            let _ = records.next();
+        }
+    }
+    let dirty_truncated = dirty.len() > 200;
+    dirty.truncate(200);
+    let base = base_branch.map(|branch| format!("refs/remotes/origin/{branch}"));
+    let counts = base.as_ref().and_then(|base| {
+        let output = git(
+            path,
+            &[
+                "rev-list",
+                "--left-right",
+                "--count",
+                &format!("{base}...HEAD"),
+            ],
+        )
+        .ok()?;
+        let mut parts = output.split_whitespace();
+        Some((
+            parts.next()?.parse::<u64>().ok()?,
+            parts.next()?.parse::<u64>().ok()?,
+        ))
+    });
+    let upstream = git(path, &["rev-parse", "--symbolic-full-name", "@{upstream}"])
+        .ok()
+        .unwrap_or_else(|| format!("refs/remotes/origin/{worker_branch}"));
+    let unpushed = match git(path, &["rev-parse", "--verify", &upstream]) {
+        Ok(_) => git(path, &["rev-list", "--count", &format!("{upstream}..HEAD")])
+            .ok()
+            .and_then(|s| s.parse().ok()),
+        Err(_) => counts.map(|(_, ahead)| ahead),
+    };
+    Ok(sigmadock_core::GitReadiness {
+        head,
+        base,
+        dirty,
+        dirty_truncated,
+        ahead: counts.map(|(_, ahead)| ahead),
+        behind: counts.map(|(behind, _)| behind),
+        unpushed,
+    })
+}
 /// Largest patch returned to clients, leaving room for JSON escaping in a 4 MiB frame.
 /// The rest is cut at a line boundary.
 pub const PATCH_LIMIT: usize = 256 * 1024;
@@ -178,6 +236,10 @@ fn git_raw(repo: &Path, args: &[&str]) -> Result<String> {
         bail!("git: {}", String::from_utf8_lossy(&output.stderr).trim());
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+/// URL of the `origin` remote.
+pub fn remote_url(repo: &Path) -> Result<String> {
+    git(repo, &["remote", "get-url", "origin"])
 }
 pub fn clean(path: &Path) -> Result<bool> {
     Ok(git(path, &["status", "--porcelain"])?.is_empty())
@@ -389,6 +451,68 @@ mod tests {
         for branch in ["HEAD", "-bad", "bad:ref", "../bad", ""] {
             assert!(validate_base_branch(&repo, branch).is_err());
         }
+    }
+
+    #[test]
+    fn readiness_observes_dirty_ahead_behind_and_push_state_without_fetching() {
+        let fixture = Fixture::new();
+        let repo = fixture.repo();
+        git(&repo, &["checkout", "-b", "sigma/test"]).unwrap();
+        git(&repo, &["config", "user.name", "Test"]).unwrap();
+        git(&repo, &["config", "user.email", "test@localhost"]).unwrap();
+        git(
+            &repo,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "worker",
+            ],
+        )
+        .unwrap();
+        let seed = fixture.0.join("seed");
+        git(
+            &seed,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+        )
+        .unwrap();
+        let origin = fixture.0.join("origin.git");
+        git(&seed, &["push", origin.to_str().unwrap(), "trunk"]).unwrap();
+        git(&repo, &["fetch", "origin"]).unwrap();
+        std::fs::write(repo.join("dirty file"), "preserve").unwrap();
+        let before = git(&repo, &["rev-parse", "HEAD"]).unwrap();
+        let report = readiness(&repo, Some("trunk"), "sigma/test").unwrap();
+        assert_eq!(report.behind, Some(1));
+        assert_eq!(report.ahead, Some(1));
+        assert_eq!(report.unpushed, Some(1));
+        assert_eq!(report.dirty, vec!["?? dirty file"]);
+        git(&repo, &["push", "-u", "origin", "sigma/test"]).unwrap();
+        assert_eq!(
+            readiness(&repo, Some("trunk"), "sigma/test")
+                .unwrap()
+                .unpushed,
+            Some(0)
+        );
+        assert_eq!(git(&repo, &["rev-parse", "HEAD"]).unwrap(), before);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("dirty file")).unwrap(),
+            "preserve"
+        );
+        assert_eq!(
+            readiness(&repo, Some("missing"), "sigma/test")
+                .unwrap()
+                .behind,
+            None
+        );
     }
 
     #[test]
