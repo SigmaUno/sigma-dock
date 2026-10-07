@@ -15,5 +15,5 @@ anyhow.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sigma-dock-core = { version = "0.1.0", path = "../sigma-dock-core" }
+sigma-dock-core = { version = "0.1.1", path = "../sigma-dock-core" }
 percent-encoding = "2"

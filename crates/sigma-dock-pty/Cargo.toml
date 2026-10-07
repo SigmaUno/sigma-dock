@@ -13,4 +13,4 @@ description = "Persistent local PTY sessions and replay for SigmaDock"
 [dependencies]
 anyhow.workspace = true
 portable-pty.workspace = true
-sigma-dock-core = { version = "0.1.0", path = "../sigma-dock-core" }
+sigma-dock-core = { version = "0.1.1", path = "../sigma-dock-core" }

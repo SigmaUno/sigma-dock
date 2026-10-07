@@ -13,5 +13,5 @@ description = "CLI harness adapters and MCP configuration for SigmaDock"
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
-sigma-dock-core = { version = "0.1.0", path = "../sigma-dock-core" }
+sigma-dock-core = { version = "0.1.1", path = "../sigma-dock-core" }
 serde_json.workspace = true
