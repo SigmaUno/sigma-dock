@@ -4,8 +4,8 @@ use fs2::FileExt;
 use serde_json::{Value, json};
 use sigmadock_agents::{Executor, Harness, McpLaunch, orchestrator_command};
 use sigmadock_core::{
-    API_VERSION, Checks, Facts, ForgeConfig, Project, SessionState, Worker, WorkerRole, column,
-    read_frame, state_dir, task_text,
+    API_VERSION, Checks, Facts, ForgeConfig, Project, SessionState, Worker, WorkerRole, read_frame,
+    state_dir, status, task_text,
 };
 use sigmadock_forge::{Forge, RestForge};
 use sigmadock_ports::PortPool;
@@ -315,11 +315,16 @@ impl Daemon {
                 }
                 Ok(json!(true))
             }
+            // Keep the legacy field for one release; clients should use `status`.
             "get_worker_status" => {
                 let worker = self.worker(&params)?;
-                Ok(
-                    json!({"worker":worker,"column":column(&worker.facts),"pid":self.sessions.get(&worker.id).and_then(|s| s.pid)}),
-                )
+                let derived_status = status(&worker.facts);
+                Ok(json!({
+                    "worker": worker,
+                    "status": derived_status,
+                    "column": derived_status,
+                    "pid": self.sessions.get(&worker.id).and_then(|s| s.pid),
+                }))
             }
             "spawn_worker" | "start_orchestrator" => {
                 self.check_capacity()?;

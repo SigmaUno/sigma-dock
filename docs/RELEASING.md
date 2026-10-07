@@ -17,3 +17,9 @@ Crates: `sigmadock-core`, `sigmadock-store`, `sigmadock-pty`, `sigmadock-git`, `
 The canonical homepage is https://sigmadock.dev. The [Homebrew preview tap](https://github.com/SigmaUno/homebrew-tap) and universal macOS test installers are available; production signing/notarization and stable Homebrew distribution remain pending qualification. Linux packages are future work.
 
 Both distribution workflows create and verify the exact release tag before long checks. This keeps the tested commit referenced if `main` advances and allows publication using `--verify-tag`, avoiding GitHub's [workflow-scoped release restriction](https://github.blog/changelog/2023-11-02-github-actions-enforcing-workflow-scope-when-creating-a-release/) without a new publishing token. An existing tag is never moved. A failed build may leave its reserved tag; rerun that same commit after addressing the failure rather than moving a published version tag.
+
+## Next release: worker status terminology
+
+The Rust API now exposes `sigmadock_core::Status` and `status(&Facts)` in place of the previous type and derivation function. The four derived states and their serialized snake_case values are unchanged.
+
+JSON-RPC `get_worker_status` now returns `status` alongside `worker` and `pid`. The legacy `column` field remains as a deprecated alias with the same value for one release; clients should migrate to `status` before the following release removes the alias. The MCP `get_worker_status` tool forwards both fields unchanged. `API_VERSION` stays at 1 because this response addition preserves existing clients.
