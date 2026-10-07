@@ -25,7 +25,7 @@ def wait_for(predicate, timeout=10):
 
 with tempfile.TemporaryDirectory(prefix='sigma-smoke-', dir='/tmp') as temp:
     temp = Path(temp)
-    repo, state = temp / 'repo', temp / 'state'
+    repo, other, state = temp / 'repo', temp / 'other', temp / 'state'
     repo.mkdir()
     run('git', 'init', '-b', 'main', str(repo))
     run('git', '-C', str(repo), 'config', 'user.email', 'test@localhost')
@@ -52,7 +52,7 @@ with tempfile.TemporaryDirectory(prefix='sigma-smoke-', dir='/tmp') as temp:
         return reply['result']
 
     def start():
-        process = subprocess.Popen([str(BIN / 'sigmadockd'), '--state-dir', str(state), '--max-workers', '5'], env=env, stdout=log, stderr=log)
+        process = subprocess.Popen([str(BIN / 'sigmadockd'), '--state-dir', str(state), '--berths-per-project', '5'], env=env, stdout=log, stderr=log)
         def ready():
             if process.poll() is not None:
                 raise AssertionError((temp / 'daemon.log').read_text())
@@ -79,6 +79,10 @@ with tempfile.TemporaryDirectory(prefix='sigma-smoke-', dir='/tmp') as temp:
         assert len({w['worktree'] for w in workers}) == 5
         assert all(Path(w['worktree']).exists() for w in workers)
         rpc('spawn_worker', {'project_id': project['id'], 'title': 'overflow', 'agent': 'shell'}, error=True)
+        # Berths are per project: a full project does not block another one.
+        run('git', 'clone', '-q', str(repo), str(other))
+        neighbour = rpc('add_project', {'path': str(other)})
+        workers.append(rpc('spawn_worker', {'project_id': neighbour['id'], 'title': 'neighbour', 'agent': 'shell'}))
         w = workers[0]
         rpc('resize', {'worker_id': w['id'], 'rows': 40, 'cols': 100})
         rpc('resize', {'worker_id': w['id'], 'rows': 0, 'cols': 100}, error=True)

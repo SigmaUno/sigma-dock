@@ -1,4 +1,4 @@
-//! Berths: one fixed slot per live session, a project sidebar and a needs-you strip.
+//! Berths: each project's fixed slots for live sessions, a project sidebar and a needs-you strip.
 use crate::Workspace;
 use anyhow::Result;
 use gpui::{
@@ -248,7 +248,7 @@ impl Workspace {
                     .map(|worker| worker.id.clone())
                     .collect();
                 Capacity {
-                    max_workers: live.len().max(5),
+                    per_project: 6,
                     live,
                 }
             }
@@ -339,8 +339,19 @@ impl Workspace {
             .collect()
     }
 
-    fn global_full(&self) -> bool {
-        self.capacity.live.len() >= self.capacity.max_workers
+    /// 1-based slot of a live worker within its own project's berths.
+    fn berth_number(&self, worker: &Worker) -> usize {
+        self.berths(Some(&worker.project_id))
+            .iter()
+            .position(|other| other.id == worker.id)
+            .map_or(0, |index| index + 1)
+    }
+
+    fn project_name(&self, id: &str) -> Option<&str> {
+        self.projects
+            .iter()
+            .find(|project| project.id == id)
+            .map(|project| project.name.as_str())
     }
 
     fn tone_color(&self, tone: Tone) -> u32 {
@@ -466,7 +477,17 @@ impl Workspace {
         for worker in &berths {
             dots = dots.child(self.dot(self.tone_color(status(worker).tone), 7.));
         }
-        if berths.is_empty() {
+        if project.is_some() {
+            for _ in berths.len()..self.capacity.per_project {
+                dots = dots.child(
+                    div()
+                        .size(px(7.))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(rgb(theme.border)),
+                );
+            }
+        } else if berths.is_empty() {
             dots = dots.child(div().text_xs().text_color(rgb(theme.muted)).child("idle"));
         }
         div()
@@ -530,9 +551,9 @@ impl Workspace {
             "all-berths".into(),
             "All berths".into(),
             format!(
-                "{} of {} in use",
+                "{} live · {} per project",
                 self.capacity.live.len(),
-                self.capacity.max_workers
+                self.capacity.per_project
             ),
             None,
             cx,
@@ -630,20 +651,28 @@ impl Workspace {
         let theme = self.theme;
         let project = self.current_project();
         let name = project.map_or_else(|| "All berths".to_owned(), |p| p.name.clone());
-        let here = self.berths(project.map(|p| p.id.as_str())).len();
-        let in_use = self.capacity.live.len();
-        let max = self.capacity.max_workers;
+        let here = self.berths(project.map(|p| p.id.as_str()));
+        let max = self.capacity.per_project;
+        let summary = match project {
+            Some(_) => format!("{} of {max} berths in use", here.len()),
+            None => format!(
+                "{} berth{} live across projects · {max} per project",
+                here.len(),
+                if here.len() == 1 { "" } else { "s" }
+            ),
+        };
         let mut pips = div().flex().items_center().gap_1();
-        for slot in 0..max {
-            let worker = self.capacity.live.get(slot).and_then(|id| self.worker(id));
-            pips = pips.child(match worker {
-                Some(worker) => self.dot(self.tone_color(status(worker).tone), 9.),
-                None => div()
-                    .size(px(9.))
-                    .rounded_full()
-                    .border_1()
-                    .border_color(rgb(theme.border)),
-            });
+        if project.is_some() {
+            for slot in 0..max {
+                pips = pips.child(match here.get(slot) {
+                    Some(worker) => self.dot(self.tone_color(status(worker).tone), 9.),
+                    None => div()
+                        .size(px(9.))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(rgb(theme.border)),
+                });
+            }
         }
         div()
             .flex()
@@ -667,10 +696,7 @@ impl Workspace {
                             .gap_3()
                             .text_sm()
                             .text_color(rgb(theme.muted))
-                            .child(format!(
-                                "{here} berth{} here · {in_use} of {max} in use overall",
-                                if here == 1 { "" } else { "s" }
-                            ))
+                            .child(summary)
                             .child(pips),
                     ),
             )
@@ -881,6 +907,21 @@ impl Workspace {
                             .text_color(rgb(theme.muted))
                             .child(agent_label(&worker.agent).to_owned()),
                     )
+                    .when_some(
+                        self.current_project()
+                            .is_none()
+                            .then(|| self.project_name(&worker.project_id))
+                            .flatten(),
+                        |row, name| {
+                            row.child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(name.to_owned()),
+                            )
+                        },
+                    )
                     .child(
                         div()
                             .min_w(px(0.))
@@ -911,7 +952,6 @@ impl Workspace {
 
     fn empty_berth(&self, number: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
-        let full = self.global_full();
         div()
             .id(SharedString::from(format!("empty-berth-{number}")))
             .min_h(px(250.))
@@ -931,33 +971,20 @@ impl Workspace {
                     .font_family(MONO)
                     .child(format!("Berth {number}")),
             )
-            .when(full, |berth| {
-                berth
-                    .opacity(0.55)
-                    .child("No free berth")
-                    .child(div().text_xs().child(format!(
-                        "{} of {} in use across projects",
-                        self.capacity.live.len(),
-                        self.capacity.max_workers
-                    )))
-            })
-            .when(!full, |berth| {
-                berth
-                    .cursor_pointer()
-                    .hover(|style| style.border_color(rgb(theme.focus)))
-                    .child(
-                        div()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(theme.text))
-                            .child("Dock a task"),
-                    )
-                    .child(div().text_xs().font_family(MONO).child("⌘N"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if !this.form_open {
-                            this.open_new_task(window, cx);
-                        }
-                    }))
-            })
+            .cursor_pointer()
+            .hover(|style| style.border_color(rgb(theme.focus)))
+            .child(
+                div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(theme.text))
+                    .child("Dock a task"),
+            )
+            .child(div().text_xs().font_family(MONO).child("⌘N"))
+            .on_click(cx.listener(|this, _, window, cx| {
+                if !this.form_open {
+                    this.open_new_task(window, cx);
+                }
+            }))
             .into_any_element()
     }
 
@@ -965,10 +992,24 @@ impl Workspace {
         let project = self.current_project().map(|p| p.id.clone());
         let berths = self.berths(project.as_deref());
         let mut grid = div().grid().grid_cols(3).gap_4();
+        if project.is_none() {
+            // Berths belong to projects, so the overview lists live ones without free slots.
+            if berths.is_empty() {
+                return div()
+                    .text_sm()
+                    .text_color(rgb(self.theme.muted))
+                    .child("No live berths. Pick a project to dock a task.")
+                    .into_any_element();
+            }
+            for worker in &berths {
+                grid = grid.child(self.berth(self.berth_number(worker), worker, cx));
+            }
+            return grid.into_any_element();
+        }
         for (index, worker) in berths.iter().enumerate() {
             grid = grid.child(self.berth(index + 1, worker, cx));
         }
-        for number in berths.len() + 1..=self.capacity.max_workers {
+        for number in berths.len() + 1..=self.capacity.per_project {
             grid = grid.child(self.empty_berth(number, cx));
         }
         grid.into_any_element()
@@ -1127,9 +1168,9 @@ impl Workspace {
                     .child(label),
             )
             .child(format!(
-                "{} of {} berths in use · local workspace",
+                "{} berths live · {} per project · local workspace",
                 self.capacity.live.len(),
-                self.capacity.max_workers
+                self.capacity.per_project
             ))
             .into_any_element()
     }

@@ -35,8 +35,9 @@ struct Args {
     state_dir: PathBuf,
     #[arg(long, env = "SIGMA_DOCK_SOCKET")]
     socket: Option<PathBuf>,
-    #[arg(long, default_value_t = 5)]
-    max_workers: usize,
+    /// Live sessions each project may hold at once.
+    #[arg(long, alias = "max-workers", default_value_t = 6)]
+    berths_per_project: usize,
     #[arg(long)]
     mcp_binary: Option<PathBuf>,
     #[arg(long, default_value_t = 60)]
@@ -52,7 +53,7 @@ struct Daemon {
     ports: PortPool,
     forges: HashMap<String, Arc<RestForge>>,
     state_dir: PathBuf,
-    max_workers: usize,
+    berths_per_project: usize,
     mcp_binary: PathBuf,
     socket: PathBuf,
     idle_seconds: u64,
@@ -322,8 +323,8 @@ impl Daemon {
                 )
             }
             "spawn_worker" | "start_orchestrator" => {
-                self.check_capacity()?;
                 let project = self.project(string(&params, "project_id")?)?;
+                self.check_capacity(&project.id)?;
                 let role = if method == "start_orchestrator" {
                     WorkerRole::Orchestrator
                 } else {
@@ -420,7 +421,7 @@ impl Daemon {
                         "previous process state is unknown; verify it stopped, then explicitly acknowledge_unknown before resuming"
                     );
                 }
-                self.check_capacity()?;
+                self.check_capacity(&worker.project_id)?;
                 let session = self.start_session(
                     &worker,
                     params["prompt"].as_str(),
@@ -563,19 +564,23 @@ impl Daemon {
             .collect();
         live.sort_by_key(|worker| worker.created_at);
         sigmadock_core::Capacity {
-            max_workers: self.max_workers,
+            per_project: self.berths_per_project,
             live: live.into_iter().map(|worker| worker.id.clone()).collect(),
         }
     }
-    fn check_capacity(&self) -> Result<()> {
-        if self
+    fn check_capacity(&self, project_id: &str) -> Result<()> {
+        let live = self
             .sessions
-            .values()
-            .filter(|s| s.facts().0 != SessionState::Exited)
-            .count()
-            >= self.max_workers
-        {
-            bail!("maximum concurrent workers reached");
+            .iter()
+            .filter(|(_, session)| session.facts().0 != SessionState::Exited)
+            .filter_map(|(id, _)| self.workers.get(id))
+            .filter(|worker| worker.project_id == project_id)
+            .count();
+        if live >= self.berths_per_project {
+            bail!(
+                "no free berth in this project ({live} of {} in use)",
+                self.berths_per_project
+            );
         }
         Ok(())
     }
@@ -773,8 +778,8 @@ fn main() -> Result<()> {
     if args.idle_seconds == 0 {
         bail!("idle-seconds must be positive");
     }
-    if args.max_workers == 0 {
-        bail!("max-workers must be positive");
+    if args.berths_per_project == 0 {
+        bail!("berths-per-project must be positive");
     }
     fs::create_dir_all(&args.state_dir)?;
     args.state_dir = args.state_dir.canonicalize()?;
@@ -834,7 +839,7 @@ fn main() -> Result<()> {
         ports,
         forges: HashMap::new(),
         state_dir: args.state_dir,
-        max_workers: args.max_workers,
+        berths_per_project: args.berths_per_project,
         mcp_binary: args.mcp_binary.unwrap_or(
             std::env::current_exe()?
                 .parent()

@@ -36,7 +36,7 @@ cargo run -p sigmadock-ui
 
 Build/install binaries with `cargo install --path crates/sigmadock-cli`, `cargo install --path crates/sigmadockd`, and `cargo install --path crates/sigmadock-ui`. Binaries are `sdk`, `sigmadockd`, and `sigma-dock`. Start the daemon separately before the UI. Use `--agent shell` to test without an agent subscription. Adapters also exist for `codex`, `gemini`, `opencode`, and `aider`; their current flags must be tested against your installed versions.
 
-Each worker gets a unique `sigma/UUID` branch, a worktree outside the source checkout, a PTY, and `PORT` and `SIGMA_DOCK_WORKER_ID` environment variables. At most five sessions run concurrently by default (`sigmadockd --max-workers N`). Ports 4200–4999 are assigned uniquely among active workers and checked for availability; they are best-effort leases, not OS reservations.
+Each worker gets a unique `sigma/UUID` branch, a worktree outside the source checkout, a PTY, and `PORT` and `SIGMA_DOCK_WORKER_ID` environment variables. Each project runs at most six sessions concurrently by default (`sigmadockd --berths-per-project N`). Ports 4200–4999 are assigned uniquely among active workers and checked for availability; they are best-effort leases, not OS reservations.
 
 `SIGMA_DOCK_STATE_DIR` overrides local state. Defaults: `~/Library/Application Support/SigmaDock` on macOS, `$XDG_STATE_HOME/sigma-dock` or `~/.local/state/sigma-dock` on Linux. `SIGMA_DOCK_SOCKET` overrides the socket for all binaries. Keep the daemon socket and database on a local filesystem. The state directory is mode 0700 and the socket and database are mode 0600.
 
@@ -86,7 +86,7 @@ GitHub feedback includes check output and annotations. Full GitHub job logs requ
 
 Automatic feedback is off by default and waits for an idle coding worker with failed CI. The daemon records an attempt before writing to the PTY to prevent duplicate delivery after partial writes or restarts; delivery errors remain visible in worker status. Idle is a heuristic. Forge content is untrusted task data and the harness retains its own permission controls. Conflict instructions do not run git or push changes automatically.
 
-The native window shows **berths**: one slot per live session, up to the daemon's `--max-workers` limit. A berth shows the task, harness, branch, port, a low-rate terminal preview and one contextual action (**Reply**, **Send CI to agent** or **Open PR**); click it for the full terminal. The project sidebar filters berths by repository, a needs-you strip lists blocked workers, and a side panel lists moored workers (session ended, not archived) and today's departures. Capacity is global: a project can show free berths while the overall limit is reached, in which case empty berths are disabled.
+The native window shows **berths**: each project has its own slots for live sessions, up to the daemon's `--berths-per-project` limit. A berth shows the task, harness, branch, port, a low-rate terminal preview and one contextual action (**Reply**, **Send CI to agent** or **Open PR**); click it for the full terminal. Selecting a project shows only its berths, with free slots to dock a new task; **All berths** lists every live berth, labelled by project, without free slots. A needs-you strip lists blocked workers, and a side panel lists moored workers (session ended, not archived) and today's departures. Capacity is per project: a full project does not limit the others.
 
 Each worker's status is computed, never set manually:
 

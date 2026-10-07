@@ -206,11 +206,13 @@ pub struct SessionContext {
     pub text: String,
     pub truncated: bool,
 }
-/// Global berth usage: the same live-session count `check_capacity` enforces.
+/// Berth usage: the same live-session counts `check_capacity` enforces per project.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Capacity {
-    pub max_workers: usize,
-    /// Workers holding a berth, oldest first.
+    /// Berths each project may hold; daemons before 0.1.3 reported a global `max_workers`.
+    #[serde(alias = "max_workers")]
+    pub per_project: usize,
+    /// Workers holding a berth across all projects, oldest first.
     pub live: Vec<String>,
 }
 pub fn unix_time() -> u64 {
