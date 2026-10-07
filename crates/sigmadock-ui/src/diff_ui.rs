@@ -313,9 +313,30 @@ pub(crate) struct DiffState {
     pub selected: Option<usize>,
     pub request: u64,
     pub viewed: crate::viewed::Viewed,
+    /// A refresh was clicked while another load was running; it runs when that one ends.
+    pub queued: bool,
+    /// The running load was asked for by the refresh button, so its result is confirmed.
+    pub manual: bool,
+    /// Briefly true after a clicked refresh finishes.
+    pub confirmed: bool,
 }
 
+/// How long the Changes header says "Updated" after a clicked refresh.
+const REFRESH_CONFIRMATION: std::time::Duration = std::time::Duration::from_secs(2);
+
 impl Workspace {
+    /// The refresh button: never dropped, even while the periodic refresh is loading.
+    pub(crate) fn refresh_changes(&mut self, cx: &mut Context<Self>) {
+        self.diff.manual = true;
+        self.diff.confirmed = false;
+        if self.diff.loading {
+            self.diff.queued = true;
+            cx.notify();
+            return;
+        }
+        self.load_changes(cx);
+        cx.notify();
+    }
     pub(crate) fn load_changes(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.selected.clone() else {
             return;
@@ -341,10 +362,35 @@ impl Workspace {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.selected.as_ref() != Some(&id) || this.diff.request != request {
+                // A newer request owns the loading state; this result is stale.
+                if this.diff.request != request {
                     return;
                 }
                 this.diff.loading = false;
+                if this.selected.as_ref() != Some(&id) {
+                    this.diff.queued = false;
+                    this.diff.manual = false;
+                    return;
+                }
+                if std::mem::take(&mut this.diff.queued) {
+                    // The click came during this load; show what changed after it.
+                    this.load_changes(cx);
+                    cx.notify();
+                    return;
+                }
+                if std::mem::take(&mut this.diff.manual) && result.is_ok() {
+                    this.diff.confirmed = true;
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(REFRESH_CONFIRMATION).await;
+                        let _ = this.update(cx, |this, cx| {
+                            if this.diff.request == request {
+                                this.diff.confirmed = false;
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
+                }
                 match result {
                     Ok((report, viewed)) => {
                         let changes = Changes::from_report(report, &id, &viewed);
@@ -595,6 +641,8 @@ impl Workspace {
 
     pub(crate) fn changes_pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
+        // Only clicked refreshes show progress; the periodic one stays quiet.
+        let refreshing = self.diff.manual && (self.diff.loading || self.diff.queued);
         let header = div()
             .h(px(56.))
             .flex_none()
@@ -608,12 +656,36 @@ impl Workspace {
             .child(
                 div()
                     .id("refresh-changes")
+                    .flex()
+                    .items_center()
+                    .gap_1()
                     .cursor_pointer()
                     .p_1()
                     .rounded_md()
                     .hover(|style| style.bg(rgb(theme.panel)))
-                    .child(icon(Icon::Refresh, px(13.), rgb(theme.muted)))
-                    .on_click(cx.listener(|this, _, _, cx| this.load_changes(cx))),
+                    .child(icon(
+                        Icon::Refresh,
+                        px(13.),
+                        rgb(if refreshing {
+                            theme.accent
+                        } else {
+                            theme.muted
+                        }),
+                    ))
+                    .when_some(
+                        if refreshing {
+                            Some("Refreshing…")
+                        } else if self.diff.confirmed {
+                            Some("Updated")
+                        } else {
+                            None
+                        },
+                        |button, label| {
+                            button.child(div().text_xs().text_color(rgb(theme.muted)).child(label))
+                        },
+                    )
+                    .tooltip(|_, cx| crate::keyboard_ui::tooltip("Refresh changes".into(), cx))
+                    .on_click(cx.listener(|this, _, _, cx| this.refresh_changes(cx))),
             );
         let mut pane = div()
             .id("changes-pane")
