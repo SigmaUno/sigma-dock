@@ -90,6 +90,7 @@ fn tools(allow_spawn: bool, scoped: bool) -> Value {
         spawn["title"] = json!({"type":"string"});
         spawn["agent"] = json!({"type":"string"});
         spawn["prompt"] = json!({"type":"string"});
+        spawn["base"] = json!({"type":"string", "description":"Explicit ref override; omitted uses the freshly fetched project base"});
         spawn["queue"] = json!({"type":"boolean"});
         let mut required = read_required;
         required.push("title");

@@ -249,12 +249,14 @@ mod tests {
     fn preserves_workers_and_marks_lost() {
         let store = Store::open(Path::new(":memory:")).unwrap();
         let project = Project {
+            base_branch: None,
             id: "p".into(),
             path: "/repo".into(),
             name: "repo".into(),
         };
         store.save_project(&project).unwrap();
         let worker = Worker {
+            base_warning: None,
             berth: None,
             id: "w".into(),
             project_id: project.id,
@@ -285,6 +287,7 @@ mod tests {
         let mut store = Store::open(Path::new(":memory:")).unwrap();
         store
             .save_project(&Project {
+                base_branch: None,
                 id: "p".into(),
                 path: "/p".into(),
                 name: "p".into(),
@@ -349,6 +352,7 @@ mod context_tests {
         let store = Store::open(Path::new(":memory:")).unwrap();
         store
             .save_project(&Project {
+                base_branch: None,
                 id: "p".into(),
                 path: "/p".into(),
                 name: "p".into(),
@@ -426,6 +430,7 @@ mod queue_tests {
     use super::*;
     fn task(id: &str, project_id: &str) -> QueuedTask {
         QueuedTask {
+            fetch_base: false,
             id: id.into(),
             project_id: project_id.into(),
             title: id.into(),
@@ -441,6 +446,7 @@ mod queue_tests {
     }
     fn project(id: &str) -> Project {
         Project {
+            base_branch: None,
             id: id.into(),
             path: format!("/{id}").into(),
             name: id.into(),

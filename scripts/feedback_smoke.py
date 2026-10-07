@@ -107,6 +107,11 @@ with open('received.txt','w') as out:
         repo = temp/name; repo.mkdir()
         for args in [('init','-b','main'),('config','user.name','Test'),('config','user.email','test@localhost'),('config','commit.gpgsign','false'),('commit','--allow-empty','-m','initial')]:
             subprocess.run(['git','-C',str(repo)]+list(args),check=True,capture_output=True)
+        remote = temp / (name + '.git')
+        subprocess.run(['git', 'clone', '--bare', str(repo), str(remote)], check=True, capture_output=True)
+        subprocess.run(['git', '-C', str(repo), 'remote', 'add', 'origin', str(remote)], check=True, capture_output=True)
+        subprocess.run(['git', '-C', str(repo), 'fetch', 'origin'], check=True, capture_output=True)
+        subprocess.run(['git', '-C', str(repo), 'remote', 'set-head', 'origin', '-a'], check=True, capture_output=True)
         return rpc('add_project', {'path': str(repo)})
     def mcp(scope, name, arguments, allow_spawn=False):
         request = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': name, 'arguments': arguments}}
@@ -147,11 +152,12 @@ with open('received.txt','w') as out:
         assert rpc('capacity')['in_use'] == 2
         denied = mcp(p['id'], 'spawn_worker', {'title': 'denied', 'agent': 'claude', 'queue': True})
         assert denied.get('isError') is True
-        queued = mcp(p['id'], 'spawn_worker', {'title': 'scoped waiting', 'agent': 'claude', 'queue': True}, allow_spawn=True)
+        queued = mcp(p['id'], 'spawn_worker', {'title': 'scoped waiting', 'agent': 'claude', 'queue': True, 'base': 'main'}, allow_spawn=True)
         queued_id = json.loads(queued['content'][0]['text'])['id']
         foreign = rpc('spawn_worker', {'project_id': other_project['id'], 'title': 'other waiting', 'agent': 'claude', 'queue': True})
         scoped_queue = json.loads(mcp(p['id'], 'list_queue', {})['content'][0]['text'])
         assert [task['id'] for task in scoped_queue] == [queued_id]
+        assert scoped_queue[0]['base'] == 'main' and scoped_queue[0]['fetch_base'] is False
         assert mcp(p['id'], 'cancel_queued', {'id': foreign['id']})['isError'] is True
         assert mcp(p['id'], 'cancel_queued', {'id': queued_id}).get('isError') is not True
         rpc('cancel_queued', {'id': foreign['id']})

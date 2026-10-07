@@ -18,6 +18,12 @@ The canonical homepage is https://sigmadock.dev. The [Homebrew preview tap](http
 
 Both distribution workflows verify the pushed release tag before long checks. This keeps the tested commit referenced if `main` advances and allows publication using `--verify-tag`, avoiding GitHub's [workflow-scoped release restriction](https://github.blog/changelog/2023-11-02-github-actions-enforcing-workflow-scope-when-creating-a-release/) without a new publishing token. An existing tag is never moved. Rerun failed jobs at the same tag for transient or credential failures. Code fixes require a new reviewed commit and version tag; never move an existing release tag.
 
+## Unreleased: fresh remote worker bases
+
+Projects now store their default branch on `origin`; new and queued workers fetch that branch at launch rather than using a local branch or checkout `HEAD`. Edit the preference with `sdk project-base PROJECT_ID BRANCH`. An explicit spawn `--base` (or task-form/MCP base override) keeps its existing local-ref behavior and bypasses fetching. Repositories without a known remote default must configure a project branch or supply an explicit base.
+
+Fetches time out after eight seconds. A cached remote commit can be used on failure, with a persisted berth warning; missing cached commits fail visibly. Existing project and worker JSON records load with absent preferences/warnings, and pre-upgrade queued records retain their recorded base as an explicit override.
+
 ## Unreleased: worker status terminology
 
 The Rust API exposes `sigmadock_core::Status` and `status(&Facts)` for deriving a worker's status. Downstream Rust callers must migrate to these names. The four states (Working, Needs you, In review, Ready to merge), their precedence and their serialized snake_case values are unchanged; they describe workers displayed in berths.
