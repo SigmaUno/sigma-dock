@@ -54,6 +54,8 @@ sdk archive WORKER_ID             # preserves files and branch
 sdk archive WORKER_ID --cleanup   # removes a clean worktree, preserves branch
 sdk prune PROJECT_ID              # prunes stale git worktree registrations
 sdk spawn PROJECT_ID --title "Next task" --agent codex --queue
+sdk fork WORKER_ID --title "Explore another approach" --prompt "Try the alternative"
+sdk fork WORKER_ID --title "Continue local work" --include-uncommitted --queue
 sdk queue                         # waiting tasks in FIFO order
 sdk queue cancel TASK_ID
 sdk queue retry TASK_ID --acknowledge-unknown  # after inspecting an interrupted/failed start
@@ -61,6 +63,10 @@ sdk remove-project PROJECT_ID     # requires no unarchived workers or waiting ta
 ```
 
 `sdk summary` and the **Summary** button (or **Copy summary** on a departed worker) build a Markdown note without any model: YAML frontmatter, the recorded outcome (status, PR, checks, review, session exit), the original instruction, commit subjects since the worker forked, and per-folder diff stats. It reads the live worktree when present, so uncommitted edits count, and the branch after `--cleanup`. Times are UTC. Workers created before this version have no recorded instruction or finish time.
+
+Use **Fork…** on an agent row or in its **More** menu to start another worker from that worker's current branch HEAD. The agent is inherited unless you choose another harness, and you can supply a new title and instruction. **Include uncommitted changes** copies staged and unstaged tracked edits plus untracked files, retaining the staged/unstaged split. Ignored files are excluded unless already staged. The source's HEAD, index, working files and stash are untouched. Both the CLI and UI can queue a fork when a project is full; HEAD and local changes are captured when requested, so later source edits do not change the queued fork. Forks show their source on the agent list and terminal header. A HEAD-only fork also works after the source worktree has been cleaned up, while its branch remains.
+
+Local-change snapshots are limited to 128 MiB of changed files and patches. Resolve merge conflicts first; sparse checkouts, changed submodules, embedded repositories and special files require committing the changes or choosing HEAD only. Snapshots use Git's normal clean filters. Repository scripts in a copied `.sigmadock.toml` still require the normal approval before execution.
 
 The native UI includes a task-creation form, harness picker, worker controls, a unified diff viewer, and PR links. When all of a project's berths are occupied, the form explains the per-project limit and disables creation in that project until one of its sessions ends. It keeps your task details; the native waiting-list flow remains pending. The CLI and opt-in MCP spawning support persistent queuing with `--queue` / `queue: true`. Click **Choose repository…** in the task form to open the native folder picker. Form input currently supports typing at the end, backspace, tab and clipboard paste; full text editing and IME support are pending.
 

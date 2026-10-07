@@ -5432,6 +5432,7 @@ dependencies = [
  "anyhow",
  "libc",
  "sigmadock-core",
+ "uuid",
 ]
 
 [[package]]

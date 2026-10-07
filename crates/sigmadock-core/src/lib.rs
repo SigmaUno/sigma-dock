@@ -157,6 +157,8 @@ pub struct Project {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Worker {
     #[serde(default)]
+    pub forked_from: Option<String>,
+    #[serde(default)]
     pub workspace_scripts: workspace_scripts::WorkspaceScripts,
     /// Base ref recorded at launch, independent of the source checkout's HEAD.
     #[serde(default)]
@@ -378,9 +380,20 @@ pub struct ProjectCapacity {
     pub in_use: usize,
     pub queued: usize,
 }
+/// Immutable fork request snapshot. Objects are pinned by a private ref while queued.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForkSnapshot {
+    pub head: String,
+    pub index: Option<String>,
+    pub worktree: Option<String>,
+}
 /// Local durable task data, not a worker until its session starts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueuedTask {
+    #[serde(default)]
+    pub forked_from: Option<String>,
+    #[serde(default)]
+    pub fork_snapshot: Option<ForkSnapshot>,
     /// Fetch the recorded project branch when this task starts.
     #[serde(default)]
     pub fetch_base: bool,

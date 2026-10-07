@@ -90,6 +90,20 @@ enum Commands {
         #[arg(long)]
         queue: bool,
     },
+    /// Fork from this worker's current HEAD, optionally carrying local changes.
+    Fork {
+        worker_id: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        prompt: Option<String>,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        include_uncommitted: bool,
+        #[arg(long)]
+        queue: bool,
+    },
     Ls {
         #[arg(long)]
         archived: bool,
@@ -364,6 +378,17 @@ fn main() -> Result<()> {
         } => (
             "spawn_worker",
             json!({"project_id":project_id,"title":title,"agent":agent,"prompt":prompt,"base":base,"queue":queue}),
+        ),
+        Commands::Fork {
+            worker_id,
+            title,
+            prompt,
+            agent,
+            include_uncommitted,
+            queue,
+        } => (
+            "fork_worker",
+            json!({"worker_id":worker_id,"title":title,"prompt":prompt,"agent":agent,"include_uncommitted":include_uncommitted,"queue":queue}),
         ),
         Commands::Ls {
             archived,

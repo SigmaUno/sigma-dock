@@ -196,6 +196,10 @@ struct Workspace {
     terminal: Option<Entity<TerminalView>>,
     selected: Option<String>,
     form_open: bool,
+    fork_source: Option<String>,
+    task_notice: Option<String>,
+    fork_include_changes: bool,
+    fork_queue: bool,
     fields: [String; 4],
     active_field: usize,
     agent: String,
@@ -373,6 +377,10 @@ impl Workspace {
             terminal: None,
             selected: None,
             form_open: false,
+            fork_source: None,
+            task_notice: None,
+            fork_include_changes: false,
+            fork_queue: false,
             fields: [String::new(), String::new(), String::new(), String::new()],
             active_field: 0,
             agent: "claude".into(),
@@ -536,13 +544,21 @@ impl Workspace {
     fn creation_blocked_reason(&self) -> Option<String> {
         if !self.daemon_connected {
             Some("Connect to the daemon before creating a task.".into())
-        } else if self
-            .projects
-            .iter()
-            .find(|project| project.path.to_string_lossy() == self.fields[0].trim())
-            .is_some_and(|project| self.project_full(&project.id))
+        } else if !(self.fork_source.is_some() && self.fork_queue)
+            && self
+                .projects
+                .iter()
+                .find(|project| project.path.to_string_lossy() == self.fields[0].trim())
+                .is_some_and(|project| self.project_full(&project.id))
         {
-            Some(full_capacity_message(self.capacity.max_workers))
+            Some(if self.fork_source.is_some() {
+                format!(
+                    "All {} berths in this project are occupied. Enable ‘Queue if no berth is free’ to capture a fork now and start it when a berth opens.",
+                    self.capacity.max_workers
+                )
+            } else {
+                full_capacity_message(self.capacity.max_workers)
+            })
         } else {
             None
         }
@@ -561,6 +577,7 @@ impl Workspace {
             cx.notify();
             return;
         }
+        self.task_notice = None;
         self.busy = true;
         self.error = None;
         let client = self.client.clone();
@@ -570,8 +587,15 @@ impl Workspace {
         let base = self.fields[3].trim().to_owned();
         let agent = self.agent.clone();
         let last_capacity = self.capacity.clone();
+        let fork_source = self.fork_source.clone();
+        let include_changes = self.fork_include_changes;
+        let queue = self.fork_queue;
         cx.spawn(async move |this, cx| {
             let result = cx.background_executor().spawn(async move {
+                if let Some(source) = fork_source {
+                    let value = client.call("fork_worker", json!({"worker_id":source,"title":title,"prompt":if prompt.is_empty() { None } else { Some(prompt) },"agent":agent,"include_uncommitted":include_changes,"queue":queue}))?;
+                    return Ok((None, value));
+                }
                 let project = client.call("add_project", json!({"path":path}))?;
                 // Recheck the project's berths: the form snapshot may be up to two seconds old.
                 let capacity: Capacity = match client.call("capacity", json!({})) {
@@ -605,10 +629,12 @@ impl Workspace {
                             this.selected_project = Some(project.id.clone());
                             if !this.projects.iter().any(|known| known.id == project.id) { this.projects.push(project); }
                         }
+                        this.task_notice = (value["queued"] == true).then(|| format!("Fork queued. It will start when a berth opens. Task {}", value["id"].as_str().unwrap_or_default()));
                         if let Ok(worker) = serde_json::from_value::<Worker>(value) {
                             if !this.capacity.live.contains(&worker.id) { this.capacity.live.push(worker.id.clone()); }
                             this.workers.push(worker);
                         }
+                        this.fork_source = None;
                         this.form_open = false; this.fields[1].clear(); this.fields[2].clear(); this.fields[3].clear();
                     }
                     Err(error) => this.error = Some(error.to_string()),
@@ -627,7 +653,11 @@ impl Workspace {
         if event.keystroke.key == "backspace" {
             field.pop();
         } else if event.keystroke.key == "tab" {
-            self.active_field = (self.active_field + 1) % 4;
+            self.active_field = if self.fork_source.is_some() {
+                if self.active_field == 1 { 2 } else { 1 }
+            } else {
+                (self.active_field + 1) % 4
+            };
         } else if event.keystroke.key == "v"
             && (event.keystroke.modifiers.platform || event.keystroke.modifiers.control)
         {
@@ -747,11 +777,43 @@ impl Workspace {
                 div()
                     .flex()
                     .gap_2()
-                    .child(self.field(0, "Choose repository…", cx))
+                    .when(self.fork_source.is_none(), |row| {
+                        row.child(self.field(0, "Choose repository…", cx))
+                    })
                     .child(self.field(1, "Task title", cx)),
             )
             .child(self.field(2, "Initial instruction (optional)", cx))
-            .child(self.field(3, "Base ref override (optional)", cx));
+            .when(self.fork_source.is_none(), |form| {
+                form.child(self.field(3, "Base ref override (optional)", cx))
+            });
+        if let Some(source) = &self.fork_source {
+            form = form.child(div().text_sm().child(self.fork_lineage(source)));
+            for (key, label, checked) in [
+                (
+                    "fork-local",
+                    "Include uncommitted changes",
+                    self.fork_include_changes,
+                ),
+                ("fork-queue", "Queue if no berth is free", self.fork_queue),
+            ] {
+                form = form.child(
+                    div()
+                        .id(key)
+                        .cursor_pointer()
+                        .p_2()
+                        .bg(rgb(self.theme.button))
+                        .child(format!("{} {label}", if checked { "☑" } else { "☐" }))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if key == "fork-local" {
+                                this.fork_include_changes = !this.fork_include_changes;
+                            } else {
+                                this.fork_queue = !this.fork_queue;
+                            }
+                            cx.notify();
+                        })),
+                );
+            }
+        }
         let mut agents = div().flex().gap_2();
         for name in ["claude", "codex", "gemini", "opencode", "aider", "shell"] {
             agents = agents.child(
@@ -798,6 +860,8 @@ impl Workspace {
                     "Creating…"
                 } else if blocked.is_some() {
                     "Creation unavailable"
+                } else if self.fork_source.is_some() {
+                    "Fork worker"
                 } else {
                     "Create isolated worker"
                 })
@@ -820,7 +884,15 @@ impl Workspace {
             .px_8()
             .py_6()
             .child(self.header(cx))
-            .children(self.error_banner());
+            .children(self.error_banner())
+            .when_some(self.task_notice.clone(), |content, notice| {
+                content.child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(self.theme.muted))
+                        .child(notice),
+                )
+            });
         if let Some(update) = &self.available_update {
             content = content.child(self.update_notice(update, cx));
         }

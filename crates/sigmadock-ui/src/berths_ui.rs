@@ -465,7 +465,59 @@ impl Workspace {
         }
     }
 
+    pub(crate) fn fork_lineage(&self, source: &str) -> String {
+        let title = self
+            .workers
+            .iter()
+            .chain(self.departed.iter())
+            .find(|worker| worker.id == source)
+            .map(|worker| worker.title.as_str())
+            .unwrap_or(source);
+        format!("Fork of {title}")
+    }
+    pub(crate) fn open_fork(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(worker) = self
+            .workers
+            .iter()
+            .chain(self.departed.iter())
+            .find(|worker| worker.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(project) = self
+            .projects
+            .iter()
+            .find(|project| project.id == worker.project_id)
+        else {
+            return;
+        };
+        self.fields = [
+            project.path.to_string_lossy().into_owned(),
+            format!("Fork of {}", worker.title),
+            String::new(),
+            String::new(),
+        ];
+        self.selected_project = Some(worker.project_id);
+        self.agent = worker.agent;
+        self.fork_source = Some(id);
+        self.fork_include_changes = false;
+        self.fork_queue = false;
+        if self.terminal.is_some() {
+            self.close_terminal(window, cx);
+        }
+        self.view = crate::View::Berths;
+        self.menu = None;
+        self.form_open = true;
+        self.active_field = 1;
+        self.form_focus.focus(window);
+        cx.notify();
+    }
+
     pub(crate) fn open_new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.fork_source = None;
+        self.fork_include_changes = false;
+        self.fork_queue = false;
         self.form_open = !self.form_open;
         self.active_field = 0;
         if let Some(project) = self.current_project()
@@ -1154,6 +1206,7 @@ impl Workspace {
                 }))
         });
         let checks_id = worker.id.clone();
+        let fork_id = worker.id.clone();
         div()
             .id(SharedString::from(focus_key.clone()))
             .tab_index(0)
@@ -1198,6 +1251,14 @@ impl Workspace {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(worker.title.clone()),
                             )
+                            .when_some(worker.forked_from.as_deref(), |row, source| {
+                                row.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(theme.muted))
+                                        .child(self.fork_lineage(source)),
+                                )
+                            })
                             .when_some(project, |row, name| {
                                 row.child(
                                     div()
@@ -1252,6 +1313,21 @@ impl Workspace {
                     .child(role.to_owned()),
             )
             .child(self.berth_script_actions(worker, cx))
+            .child(
+                div()
+                    .id(SharedString::from(format!("fork-{fork_id}")))
+                    .cursor_pointer()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .bg(rgb(theme.button))
+                    .child("Fork…")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_fork(fork_id.clone(), window, cx);
+                    })),
+            )
             .child(
                 div()
                     .flex()
