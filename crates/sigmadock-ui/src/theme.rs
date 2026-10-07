@@ -19,7 +19,7 @@ pub struct Theme {
     pub error: u32,
     pub focus: u32,
     pub link: u32,
-    /// Board card background.
+    /// Berth background.
     pub surface: u32,
     /// Agent badge background.
     pub chip: u32,
@@ -165,8 +165,8 @@ mod tests {
             assert!(contrast(theme.muted, theme.panel) >= 4.5);
             assert!(contrast(theme.base, theme.accent) >= 4.5);
             assert!(contrast(theme.muted, theme.surface) >= 4.5);
-            for lane in [theme.link, theme.attention, theme.review, theme.success] {
-                assert!(contrast(lane, theme.surface) >= 3.0);
+            for status_color in [theme.link, theme.attention, theme.review, theme.success] {
+                assert!(contrast(status_color, theme.surface) >= 3.0);
             }
         }
     }

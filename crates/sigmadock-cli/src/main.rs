@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
-use sigmadock_core::{Client, Output, column, socket_path};
+use sigmadock_core::{Client, Output, socket_path, status};
 use std::{
     io::{Read, Write},
     path::PathBuf,
@@ -266,7 +266,7 @@ fn main() -> Result<()> {
                     println!(
                         "{}  {:<15}  {:<10}  {}",
                         worker.id,
-                        column(&worker.facts).label(),
+                        status(&worker.facts).label(),
                         worker.agent,
                         worker.title
                     );
