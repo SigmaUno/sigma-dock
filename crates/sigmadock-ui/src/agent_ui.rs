@@ -1,4 +1,5 @@
 //! Agent view: the worker's terminal session in the middle and its changes on the right.
+use crate::ellipsis::Ellipsis;
 use crate::{
     Menu, Workspace,
     berths_ui::{Action, status},
@@ -238,7 +239,7 @@ impl Workspace {
                     .id("agent-title")
                     .min_w(px(TITLE_MIN_WIDTH))
                     .flex_shrink()
-                    .truncate()
+                    .ellipsis()
                     .text_lg()
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(worker.title.clone())
@@ -280,7 +281,7 @@ impl Workspace {
                         .font_family(MONO)
                         .text_color(rgb(theme.muted))
                         .child(icon(Icon::GitBranch, px(12.), rgb(theme.muted)))
-                        .child(div().truncate().child(worker.branch.clone())),
+                        .child(div().ellipsis().child(worker.branch.clone())),
                 )
             })
             .child(div().flex_1());

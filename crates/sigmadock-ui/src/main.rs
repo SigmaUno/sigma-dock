@@ -7,6 +7,7 @@ mod checks_ui;
 mod ci_ui;
 mod diff_ui;
 mod editor;
+mod ellipsis;
 mod events;
 mod icons;
 mod inbox_ui;
@@ -230,6 +231,8 @@ struct Workspace {
     ci_error: Option<String>,
     ci_expanded: Option<String>,
     recovery_open: bool,
+    /// The panel already opened itself for sessions in an unknown state.
+    recovery_prompted: bool,
     recovery_entries: Vec<serde_json::Value>,
     recovery_error: Option<String>,
     recovery_selected: Option<String>,
@@ -343,7 +346,8 @@ impl Workspace {
             ci_loading: false,
             ci_error: None,
             ci_expanded: None,
-            recovery_open: true,
+            recovery_open: false,
+            recovery_prompted: false,
             recovery_entries: Vec::new(),
             recovery_error: None,
             recovery_selected: None,

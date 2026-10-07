@@ -1,4 +1,5 @@
 //! Changes pane: the worker's patch since it forked, with open-in-editor actions.
+use crate::ellipsis::Ellipsis;
 use crate::{
     Workspace,
     editor::Target,
@@ -509,7 +510,7 @@ impl Workspace {
                     .bg(rgb(theme.card))
                     .text_size(px(12.))
                     .text_color(rgb(theme.muted))
-                    .child(div().flex_1().min_w(px(0.)).truncate().child(path.clone()))
+                    .child(div().flex_1().min_w(px(0.)).ellipsis().child(path.clone()))
                     .when(file.change != Change::Deleted, |row| {
                         row.child(
                             self.open_button(
@@ -811,7 +812,7 @@ impl Workspace {
                         div()
                             .flex_1()
                             .min_w(px(0.))
-                            .truncate()
+                            .ellipsis()
                             .text_color(rgb(if selected { theme.text } else { theme.muted }))
                             .child(file.path.clone()),
                     )

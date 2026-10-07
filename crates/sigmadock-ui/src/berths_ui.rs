@@ -1,5 +1,6 @@
 //! Berths: one fixed slot per live session, a project sidebar and a needs-you strip.
 use crate::Workspace;
+use crate::ellipsis::Ellipsis;
 use crate::icons::{Icon, icon};
 use anyhow::Result;
 use gpui::{Context, FontWeight, SharedString, Window, div, prelude::*, px, rgb};
@@ -235,12 +236,27 @@ impl Preview {
             .screen
             .screen_text()
             .into_iter()
+            .map(|line| chrome_text(&line))
             .filter(|line| !line.trim().is_empty())
             .collect();
         let skip = lines.len().saturating_sub(PREVIEW_LINES);
         self.lines = lines.split_off(skip);
         true
     }
+}
+
+/// Drop private-use code points (Nerd Font and Powerline prompt icons) that the UI font
+/// cannot draw, so previews show text instead of placeholder boxes.
+pub(crate) fn chrome_text(line: &str) -> String {
+    let private = |c: char| matches!(c, '\u{E000}'..='\u{F8FF}' | '\u{F0000}'..='\u{FFFFD}' | '\u{100000}'..='\u{10FFFD}');
+    if !line.chars().any(private) {
+        return line.to_owned();
+    }
+    line.split(private)
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn fetch_output(client: &Client, worker: &str, mut cursor: u64) -> Result<Vec<Output>> {
@@ -305,6 +321,17 @@ impl Workspace {
             Ok(value) => {
                 self.recovery_entries = serde_json::from_value(value).unwrap_or_default();
                 self.recovery_error = None;
+                // Surface sessions whose process state is unknown once; the rest wait in
+                // the sidebar's Unfinished sessions entry.
+                if !self.recovery_prompted
+                    && self
+                        .recovery_entries
+                        .iter()
+                        .any(|entry| entry["runtime"] == "unknown")
+                {
+                    self.recovery_prompted = true;
+                    self.recovery_open = true;
+                }
             }
             Err(error) => self.recovery_error = Some(error.to_string()),
         }
@@ -448,7 +475,7 @@ impl Workspace {
         self.berths(Some(project)).len() >= self.capacity.max_workers
     }
 
-    fn project_name(&self, id: &str) -> Option<&str> {
+    pub(crate) fn project_name(&self, id: &str) -> Option<&str> {
         self.projects
             .iter()
             .find(|project| project.id == id)
@@ -602,7 +629,7 @@ impl Workspace {
                 div()
                     .flex_1()
                     .min_w(px(0.))
-                    .truncate()
+                    .ellipsis()
                     .text_sm()
                     .text_color(rgb(if active { theme.text } else { theme.muted }))
                     .child(worker.title.clone()),
@@ -694,7 +721,7 @@ impl Workspace {
                     div()
                         .flex_1()
                         .min_w(px(0.))
-                        .truncate()
+                        .ellipsis()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_sm()
                         .child(project.name.clone()),
@@ -950,7 +977,7 @@ impl Workspace {
                             .gap_1()
                             .text_xs()
                             .text_color(rgb(theme.muted))
-                            .child(div().truncate().child(match scope {
+                            .child(div().ellipsis().child(match scope {
                                 Some(id) => {
                                     format!(
                                         "Agents · {} of {max} running",
@@ -1195,7 +1222,7 @@ impl Workspace {
                             .child(
                                 div()
                                     .min_w(px(0.))
-                                    .truncate()
+                                    .ellipsis()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(worker.title.clone()),
                             )
@@ -1230,7 +1257,7 @@ impl Workspace {
                     )
                     .child(
                         div()
-                            .truncate()
+                            .ellipsis()
                             .text_xs()
                             .font_family(MONO)
                             .text_color(rgb(theme.muted))
@@ -1264,7 +1291,7 @@ impl Workspace {
                     .font_family(MONO)
                     .text_color(rgb(theme.muted))
                     .child(icon(Icon::GitBranch, px(12.), rgb(theme.muted)))
-                    .child(div().min_w(px(0.)).truncate().child(worker.branch.clone())),
+                    .child(div().min_w(px(0.)).ellipsis().child(worker.branch.clone())),
             )
             .child(
                 div()
@@ -1387,7 +1414,7 @@ impl Workspace {
                             div()
                                 .flex_1()
                                 .min_w(px(0.))
-                                .truncate()
+                                .ellipsis()
                                 .child(worker.title.clone()),
                         )
                         .child(div().flex_none().text_xs().child(text)),
@@ -1548,6 +1575,16 @@ mod tests {
         }));
         assert_eq!((review.tone, review.action), (Tone::Review, None));
         assert_eq!(status(&worker(Facts::default())).tone, Tone::Working);
+    }
+
+    #[test]
+    fn chrome_text_drops_prompt_icons_the_font_cannot_draw() {
+        assert_eq!(chrome_text("plain text"), "plain text");
+        assert_eq!(
+            chrome_text("c4af235e \u{E0A0} \u{F07B}sigma/c4af ❯"),
+            "c4af235e sigma/c4af ❯"
+        );
+        assert_eq!(chrome_text("\u{F0001}"), "");
     }
 
     #[test]
