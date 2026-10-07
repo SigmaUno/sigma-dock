@@ -66,6 +66,14 @@ Closing the UI does not stop workers. Normal daemon shutdown stops its sessions 
 
 Live output replay is bounded to the latest 1 MiB per session and held in memory. A plain-text recovery tail of up to 16 KiB per worker is also saved locally in SQLite, with recorded state, activity/checkpoint times and PID; it does not recover a live PTY. Recovery retention is capped at seven days and 512 contexts. Use **Unfinished sessions** to inspect/copy context, attach a live session, start a fresh process or continue a supported harness, archive, or clear saved context. `sdk unfinished` and `sdk context WORKER_ID [--clear]` expose the same data. Reconnecting after that limit resets the terminal and replays the retained tail; terminal state may be incomplete. BEL and OSC 9/777 notifications flag `Needs you`; sixty seconds without I/O means `idle`, which remains `Working`. These are heuristics, not reliable inference of every harness's intent.
 
+## Worker base branches
+
+New workers start from a freshly fetched branch on `origin`, independent of the source checkout's current branch or local commits. SigmaDock detects and stores the default from `refs/remotes/origin/HEAD` when a project is added; edit it with `sdk project-base PROJECT_ID release` (use the branch name without `origin/`). Existing projects are detected on first use. If the remote default is unknown, configure the branch explicitly or run `git remote set-head origin -a` first.
+
+Each launch fetches only that branch with an eight-second timeout. A failed fetch uses the last cached remote commit and shows a warning on the berth; without a cached commit, creation fails. The user's checkout and local branches remain untouched. Queued tasks record the project branch at submission and fetch its latest commit when they start.
+
+`sdk spawn PROJECT_ID --title "Stacked task" --base sigma/OTHER_WORKER_ID` overrides the project default and skips fetching. The task form's **Base ref override** field and MCP `spawn_worker`'s `base` argument provide the same override. Local-only repositories require an explicit base ref.
+
 ## Forge facts and feedback
 
 Export a forge token into the daemon's environment before starting it. Configuration stores **the environment variable name**, never the token. For example:

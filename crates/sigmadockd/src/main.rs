@@ -178,11 +178,19 @@ impl Daemon {
             .context("no live session; resume the worker")
     }
     fn project(&self, id: &str) -> Result<Project> {
-        self.store
+        let mut project = self
+            .store
             .projects()?
             .into_iter()
             .find(|p| p.id == id)
-            .context("project not found")
+            .context("project not found")?;
+        if project.base_branch.is_none() {
+            project.base_branch = sigmadock_git::default_base(&project.path).ok();
+            if project.base_branch.is_some() {
+                self.store.save_project(&project)?;
+            }
+        }
+        Ok(project)
     }
     fn start_session(
         &self,
@@ -277,11 +285,15 @@ impl Daemon {
             }
             "add_project" => {
                 let path = sigmadock_git::root(&PathBuf::from(string(&params, "path")?))?;
-                if let Some(project) = self.store.project_at(&path)? {
+                if let Some(mut project) = self.store.project_at(&path)? {
+                    if project.base_branch.is_none() {
+                        project.base_branch = sigmadock_git::default_base(&path).ok();
+                    }
                     self.store.save_project(&project)?;
                     return Ok(serde_json::to_value(project)?);
                 }
                 let project = Project {
+                    base_branch: sigmadock_git::default_base(&path).ok(),
                     id: Uuid::new_v4().to_string(),
                     name: path
                         .file_name()
@@ -290,6 +302,14 @@ impl Daemon {
                         .into(),
                     path,
                 };
+                self.store.save_project(&project)?;
+                Ok(serde_json::to_value(project)?)
+            }
+            "configure_project" => {
+                let mut project = self.project(string(&params, "project_id")?)?;
+                let branch = string(&params, "base_branch")?;
+                sigmadock_git::validate_base_branch(&project.path, branch)?;
+                project.base_branch = Some(branch.to_owned());
                 self.store.save_project(&project)?;
                 Ok(serde_json::to_value(project)?)
             }
@@ -415,10 +435,10 @@ impl Daemon {
                     self.store.save_queued(&task)?;
                     Ok(json!({"queued": true, "id": task.id, "position": position}))
                 } else {
-                    self.spawn("spawn_worker", &params, None)
+                    self.spawn("spawn_worker", &params, None, task.fetch_base)
                 }
             }
-            "start_orchestrator" => self.spawn(method, &params, None),
+            "start_orchestrator" => self.spawn(method, &params, None, params["base"].is_null()),
             "list_queue" => {
                 let limit = params["limit"].as_u64().unwrap_or(100);
                 let offset = params["offset"].as_u64().unwrap_or(0);
@@ -664,7 +684,13 @@ impl Daemon {
             _ => bail!("unknown method {method}"),
         }
     }
-    fn spawn(&mut self, method: &str, params: &Value, queued_id: Option<&str>) -> Result<Value> {
+    fn spawn(
+        &mut self,
+        method: &str,
+        params: &Value,
+        queued_id: Option<&str>,
+        fetch_base: bool,
+    ) -> Result<Value> {
         let project = self.project(string(params, "project_id")?)?;
         let role = if method == "start_orchestrator" {
             WorkerRole::Orchestrator
@@ -707,8 +733,20 @@ impl Daemon {
             .map(RestForge::new)
             .transpose()?
             .map(Arc::new);
+        let (base, base_warning) = if fetch_base {
+            let branch = params["base"]
+                .as_str()
+                .map(str::to_owned)
+                .or(project.base_branch.clone())
+                .map(Ok)
+                .unwrap_or_else(|| sigmadock_git::default_base(&project.path))?;
+            sigmadock_git::fresh_base(&project.path, &branch)?
+        } else {
+            (string(params, "base")?.to_owned(), None)
+        };
         let port = self.ports.allocate()?;
         let worker = Worker {
+            base_warning,
             berth,
             id: id.clone(),
             project_id: project.id,
@@ -727,12 +765,9 @@ impl Daemon {
             orchestrator_spawn: method == "start_orchestrator" && params["allow_spawn"] == true,
             archived_at: None,
         };
-        if let Err(error) = sigmadock_git::create(
-            &project.path,
-            &worker.worktree,
-            &worker.branch,
-            params["base"].as_str().unwrap_or("HEAD"),
-        ) {
+        if let Err(error) =
+            sigmadock_git::create(&project.path, &worker.worktree, &worker.branch, &base)
+        {
             self.ports.release(port);
             return Err(error);
         }
@@ -782,14 +817,21 @@ impl Daemon {
         if let Some(config) = &forge {
             RestForge::new(config.clone())?;
         }
-        let base = params["base"]
-            .as_str()
-            .map(str::to_owned)
-            .unwrap_or(sigmadock_git::default_base(&project.path)?);
+        let fetch_base = params["base"].is_null();
+        let base = match params["base"].as_str() {
+            Some(base) => base.to_owned(),
+            None if fetch_base => project
+                .base_branch
+                .clone()
+                .map(Ok)
+                .unwrap_or_else(|| sigmadock_git::default_base(&project.path))?,
+            None => bail!("base must be a string"),
+        };
         if base.is_empty() || base.len() > 4096 || base.starts_with('-') {
             bail!("invalid base ref");
         }
         Ok(QueuedTask {
+            fetch_base,
             id: Uuid::new_v4().to_string(),
             project_id: project.id,
             title,
@@ -814,7 +856,8 @@ impl Daemon {
             task.starting = true;
             self.store.save_queued(&task)?;
             let params = json!({"project_id": task.project_id, "title": task.title, "agent": task.agent, "prompt": task.prompt, "base": task.base, "forge": task.forge, "usage_reporting": task.usage_reporting});
-            if let Err(error) = self.spawn("spawn_worker", &params, Some(&task.id)) {
+            if let Err(error) = self.spawn("spawn_worker", &params, Some(&task.id), task.fetch_base)
+            {
                 task.starting = false;
                 task.last_error = Some(task_text(&error.to_string(), 4096));
                 self.store.save_queued(&task)?;

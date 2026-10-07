@@ -1054,6 +1054,16 @@ impl Workspace {
                             .child(worker.branch.clone()),
                     ),
             )
+            .when_some(worker.base_warning.clone(), |berth, warning| {
+                berth.child(
+                    div()
+                        .id(SharedString::from(format!("base-warning-{}", worker.id)))
+                        .text_sm()
+                        .text_color(rgb(theme.warning))
+                        .child("Using cached remote base")
+                        .tooltip(move |_, cx| crate::keyboard_ui::tooltip(warning.clone(), cx)),
+                )
+            })
             .child(preview)
             .child(
                 div()

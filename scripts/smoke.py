@@ -34,6 +34,25 @@ with tempfile.TemporaryDirectory(prefix='sigma-smoke-', dir='/tmp') as temp:
     (repo / 'README').write_text('test\n')
     run('git', '-C', str(repo), 'add', '.')
     run('git', '-C', str(repo), 'commit', '-m', 'initial')
+    # A local bare origin makes freshness/offline tests deterministic without network access.
+    origin, publisher = temp / 'origin.git', temp / 'publisher'
+    run('git', 'init', '--bare', '-b', 'main', str(origin))
+    run('git', '-C', str(repo), 'remote', 'add', 'origin', str(origin))
+    run('git', '-C', str(repo), 'push', '-u', 'origin', 'main')
+    run('git', '-C', str(repo), 'remote', 'set-head', 'origin', '-a')
+    run('git', 'clone', str(origin), str(publisher))
+    for key, value in [('user.email', 'test@localhost'), ('user.name', 'Test'), ('commit.gpgsign', 'false')]:
+        run('git', '-C', str(publisher), 'config', key, value)
+    run('git', '-C', str(repo), 'checkout', '-b', 'feature')
+    (repo / 'feature-only').write_text('unrelated feature work\n')
+    run('git', '-C', str(repo), 'add', '.')
+    run('git', '-C', str(repo), 'commit', '-m', 'unrelated feature')
+    checkout_head = run('git', '-C', str(repo), 'rev-parse', 'HEAD').strip()
+    (repo / 'local-dirty').write_text('preserve this untracked file\n')
+    (publisher / 'README').write_text('remote advanced before spawn\n')
+    run('git', '-C', str(publisher), 'commit', '-am', 'advance remote')
+    run('git', '-C', str(publisher), 'push')
+    remote_head = run('git', '-C', str(publisher), 'rev-parse', 'HEAD').strip()
     sock = str(state / 'daemon.sock')
     env = dict(os.environ, SHELL='/bin/sh', SIGMA_DOCK_SOCKET=sock)
     log = open(temp / 'daemon.log', 'w')
@@ -71,6 +90,14 @@ with tempfile.TemporaryDirectory(prefix='sigma-smoke-', dir='/tmp') as temp:
         daemon = start()
         project = rpc('add_project', {'path': str(repo)})
         assert rpc('add_project', {'path': str(repo)})['id'] == project['id']
+        assert project['base_branch'] == 'main'
+        # Explicit bases bypass remote fetching, including feature stacks and local-only repos.
+        override = json.loads(subprocess.run([str(BIN / 'sdk'), 'spawn', project['id'], '--title', 'stacked', '--agent', 'shell', '--base', 'feature'], env=env, check=True, capture_output=True, text=True).stdout)
+        assert run('git', '-C', override['worktree'], 'rev-parse', 'HEAD').strip() == checkout_head
+        assert override['base_warning'] is None
+        rpc('stop_worker', {'worker_id': override['id']})
+        rpc('archive_worker', {'worker_id': override['id']})
+
         # Invalid creation must not reserve a worktree or break subsequent requests.
         rpc('spawn_worker', {'project_id': project['id'], 'title': 'invalid', 'agent': 'unknown'}, error=True)
         for title in ['one', 'two', 'three', 'four', 'five']:
@@ -79,6 +106,11 @@ with tempfile.TemporaryDirectory(prefix='sigma-smoke-', dir='/tmp') as temp:
         assert len({w['port'] for w in workers}) == 5
         assert len({w['worktree'] for w in workers}) == 5
         assert all(Path(w['worktree']).exists() for w in workers)
+        assert all(run('git', '-C', w['worktree'], 'rev-parse', 'HEAD').strip() == remote_head for w in workers)
+        assert all(w['base_warning'] is None for w in workers)
+        assert run('git', '-C', str(repo), 'rev-parse', 'HEAD').strip() == checkout_head
+        assert (repo / 'local-dirty').read_text() == 'preserve this untracked file\n'
+
         rpc('spawn_worker', {'project_id': project['id'], 'title': 'overflow', 'agent': 'shell'}, error=True)
         assert [worker['berth'] for worker in workers] == [1, 2, 3, 4, 5]
         status = rpc('get_worker_status', {'worker_id': workers[0]['id']})
@@ -116,9 +148,10 @@ with tempfile.TemporaryDirectory(prefix='sigma-smoke-', dir='/tmp') as temp:
         rpc('remove_project', {'project_id': other_project['id']}, error=True)
         rpc('cancel_queued', {'id': second['id'], 'project_id': project['id']}, error=True)
         # Queued tasks resolve main when they start, rather than freezing the old commit.
-        (repo / 'README').write_text('advanced while waiting\n')
-        run('git', '-C', str(repo), 'commit', '-am', 'advance main')
-        fresh_head = run('git', '-C', str(repo), 'rev-parse', 'HEAD').strip()
+        (publisher / 'README').write_text('advanced while waiting\n')
+        run('git', '-C', str(publisher), 'commit', '-am', 'advance main')
+        run('git', '-C', str(publisher), 'push')
+        fresh_head = run('git', '-C', str(publisher), 'rev-parse', 'HEAD').strip()
         released = workers[4]
         rpc('stop_worker', {'worker_id': released['id']})
         wait_for(lambda: any(worker['id'] == first['id'] for worker in rpc('list_workers')))
@@ -250,7 +283,33 @@ with tempfile.TemporaryDirectory(prefix='sigma-smoke-', dir='/tmp') as temp:
         assert pending_worker['berth'] == 1 and not rpc('list_queue')
         with sqlite3.connect(state / 'state.sqlite') as database:
             assert database.execute('PRAGMA user_version').fetchone()[0] == 4
-        print('PASS: stable berths, lowered capacity, global FIFO, fresh bases, cancellation, queue restart, PTY I/O, recovery, project safety, CLI and MCP')
+        # Project preference persists and overrides the remote default branch.
+        run('git', '-C', str(publisher), 'checkout', '-b', 'release')
+        run('git', '-C', str(publisher), 'commit', '--allow-empty', '-m', 'release base')
+        run('git', '-C', str(publisher), 'push', 'origin', 'release')
+        release_head = run('git', '-C', str(publisher), 'rev-parse', 'HEAD').strip()
+        configured = json.loads(subprocess.run([str(BIN / 'sdk'), 'project-base', project['id'], 'release'], env=env, check=True, capture_output=True, text=True).stdout)
+        assert configured['base_branch'] == 'release'
+        rpc('set_max_workers', {'max_workers': 20})
+        release_worker = rpc('spawn_worker', {'project_id': project['id'], 'title': 'release', 'agent': 'shell'})
+        assert run('git', '-C', release_worker['worktree'], 'rev-parse', 'HEAD').strip() == release_head
+        rpc('stop_worker', {'worker_id': release_worker['id']})
+        rpc('archive_worker', {'worker_id': release_worker['id']})
+        run('git', '-C', str(repo), 'remote', 'set-url', 'origin', str(temp / 'offline.git'))
+        offline = rpc('spawn_worker', {'project_id': project['id'], 'title': 'offline', 'agent': 'shell'})
+        assert 'cached remote base' in offline['base_warning']
+        assert run('git', '-C', offline['worktree'], 'rev-parse', 'HEAD').strip() == release_head
+        rpc('stop_worker', {'worker_id': offline['id']})
+        rpc('archive_worker', {'worker_id': offline['id']})
+        rpc('configure_project', {'project_id': project['id'], 'base_branch': 'never-fetched'})
+        rpc('spawn_worker', {'project_id': project['id'], 'title': 'no cache', 'agent': 'shell'}, error=True)
+        rpc('configure_project', {'project_id': project['id'], 'base_branch': 'release'})
+        daemon.terminate(); daemon.wait(timeout=10)
+        daemon = start()
+        assert next(p for p in rpc('list_projects') if p['id'] == project['id'])['base_branch'] == 'release'
+        assert 'cached remote base' in rpc('get_worker_status', {'worker_id': offline['id']})['worker']['base_warning']
+        assert run('git', '-C', str(repo), 'rev-parse', 'HEAD').strip() == checkout_head
+        print('PASS: stable berths, lowered capacity, global FIFO, fresh remote bases, explicit overrides, offline warnings, cancellation, queue restart, PTY I/O, recovery, project safety, CLI and MCP')
     finally:
         if daemon is not None and daemon.poll() is None:
             for worker in workers:

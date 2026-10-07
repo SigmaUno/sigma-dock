@@ -427,6 +427,7 @@ impl Workspace {
         let path = self.fields[0].clone();
         let title = self.fields[1].clone();
         let prompt = self.fields[2].clone();
+        let base = self.fields[3].trim().to_owned();
         let agent = self.agent.clone();
         let last_capacity = self.capacity.clone();
         cx.spawn(async move |this, cx| {
@@ -442,7 +443,7 @@ impl Workspace {
                     anyhow::bail!("{}", full_capacity_message(capacity.max_workers));
                 }
                 let project = client.call("add_project", json!({"path":path}))?;
-                let worker = client.call("spawn_worker", json!({"project_id":project["id"],"title":title,"agent":agent,"prompt":if prompt.is_empty() { None } else { Some(prompt) }})).map_err(|error| {
+                let worker = client.call("spawn_worker", json!({"project_id":project["id"],"title":title,"agent":agent,"base":if base.is_empty() { None } else { Some(base) },"prompt":if prompt.is_empty() { None } else { Some(prompt) }})).map_err(|error| {
                     // Another client can take the final berth after the capacity check.
                     if error.to_string().contains("maximum concurrent workers reached") {
                         anyhow::anyhow!(full_capacity_message(capacity.max_workers))
@@ -464,7 +465,7 @@ impl Workspace {
                             if !this.capacity.live.contains(&worker.id) { this.capacity.live.push(worker.id.clone()); }
                             this.workers.push(worker);
                         }
-                        this.form_open = false; this.fields[1].clear(); this.fields[2].clear();
+                        this.form_open = false; this.fields[1].clear(); this.fields[2].clear(); this.fields[3].clear();
                     }
                     Err(error) => this.error = Some(error.to_string()),
                 }
@@ -482,7 +483,7 @@ impl Workspace {
         if event.keystroke.key == "backspace" {
             field.pop();
         } else if event.keystroke.key == "tab" {
-            self.active_field = (self.active_field + 1) % 3;
+            self.active_field = (self.active_field + 1) % 4;
         } else if event.keystroke.key == "v"
             && (event.keystroke.modifiers.platform || event.keystroke.modifiers.control)
         {
@@ -680,7 +681,8 @@ impl Render for Workspace {
                         .child(self.field(0, "Choose repository…", cx))
                         .child(self.field(1, "Task title", cx)),
                 )
-                .child(self.field(2, "Initial instruction (optional)", cx));
+                .child(self.field(2, "Initial instruction (optional)", cx))
+                .child(self.field(3, "Base ref override (optional)", cx));
             let mut agents = div().flex().gap_2();
             for name in ["claude", "codex", "gemini", "opencode", "aider", "shell"] {
                 agents = agents.child(

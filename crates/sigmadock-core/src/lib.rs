@@ -130,12 +130,18 @@ pub fn status(f: &Facts) -> Status {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
+    /// Branch on origin used by default; absent in legacy/local-only projects.
+    #[serde(default)]
+    pub base_branch: Option<String>,
     pub id: String,
     pub path: PathBuf,
     pub name: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Worker {
+    /// Fetch failed and this worker started from a cached remote commit.
+    #[serde(default)]
+    pub base_warning: Option<String>,
     /// Last assigned slot; only a live worker session occupies it.
     #[serde(default)]
     pub berth: Option<u8>,
@@ -230,6 +236,9 @@ pub struct ProjectCapacity {
 /// Local durable task data, not a worker until its session starts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueuedTask {
+    /// Fetch the recorded project branch when this task starts.
+    #[serde(default)]
+    pub fetch_base: bool,
     pub id: String,
     pub project_id: String,
     pub title: String,

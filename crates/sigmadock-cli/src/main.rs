@@ -68,6 +68,11 @@ enum Commands {
     Project {
         path: PathBuf,
     },
+    /// Set the origin branch used by new workers.
+    ProjectBase {
+        project_id: String,
+        branch: String,
+    },
     Projects,
     Spawn {
         project_id: String,
@@ -296,6 +301,10 @@ fn main() -> Result<()> {
             return Ok(());
         }
         Commands::Project { path } => ("add_project", json!({"path":path.canonicalize()?})),
+        Commands::ProjectBase { project_id, branch } => (
+            "configure_project",
+            json!({"project_id":project_id,"base_branch":branch}),
+        ),
         Commands::Projects => ("list_projects", json!({})),
         Commands::Spawn {
             project_id,

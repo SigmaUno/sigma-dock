@@ -100,7 +100,7 @@ with tempfile.TemporaryDirectory(prefix='sigmadock-events-', dir='/tmp') as fold
         subscription = subscribe()
         project = rpc('add_project', {'path': str(repo)})
         wait_event('projects_changed')
-        workers = [rpc('spawn_worker', {'project_id': project['id'], 'title': str(index), 'agent': 'shell'}) for index in range(6)]
+        workers = [rpc('spawn_worker', {'project_id': project['id'], 'title': str(index), 'agent': 'shell', 'base': 'main'}) for index in range(6)]
         wait_event('capacity_changed')
         time.sleep(0.5)
         # Old UI pattern: snapshot every 2s, six previews every 750ms, open terminal every 25ms.
