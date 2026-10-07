@@ -8,13 +8,13 @@ Finder does not inherit terminal shell configuration. The bundled daemon receive
 
 ## Build and download
 
-Run **Build macOS installer** manually on the desired branch. It creates a GitHub prerelease named `macos-COMMIT` and uploads the DMG and SHA-256 checksum. These are source snapshots, separate from immutable published crate versions. Pushing a version tag also builds a DMG and attaches it to that version's release. Existing version tags must stay on the matching source commit.
+Run **Build macOS installer** manually on the desired branch. It creates a GitHub prerelease named `macos-COMMIT` and uploads the DMG and SHA-256 checksum. These are source snapshots, separate from immutable published crate versions. Pushing a version tag requires production signing and notarization, builds a DMG, and attaches it to that version's release. Manual dispatch remains an explicitly labeled test-build path unless **production** is selected. Existing version tags must stay on the matching source commit.
 
 The build targets macOS 13 or later; rendered terminal behavior and older macOS versions still need manual qualification. Build jobs test both native architectures. Packaging rejects non-system dynamic-library dependencies and verifies signatures and disk-image integrity.
 
 ## Developer ID signing and notarization
 
-Without Apple credentials the job creates an ad-hoc signed **test** DMG. It is not notarized and macOS Gatekeeper may block a downloaded copy. A normal public download needs Developer ID signing and Apple notarization: see [Apple's distribution guide](https://developer.apple.com/macos/distribution/).
+Without Apple credentials a non-production manual build creates an ad-hoc signed **test** DMG. Version tags and manual **production** builds fail before compilation if any required credentials are missing. It is not notarized and macOS Gatekeeper may block a downloaded copy. A normal public download needs Developer ID signing and Apple notarization: see [Apple's distribution guide](https://developer.apple.com/macos/distribution/).
 
 Add repository Actions secrets:
 
@@ -37,3 +37,7 @@ python3 scripts/macos_bundle_smoke.py /tmp/sigmadock-bundle/SigmaDock.app
 ```
 
 Use your actual commit ID and native architecture. Omit `--app-only` to make a DMG. Packaging requires macOS command-line tools; macOS GitHub runners provide the full toolchain.
+
+Production packaging requires an explicit Apple `Accepted` result, retains JSON notarization diagnostics as a CI artifact, validates the stapled DMG, then mounts the final image and verifies the copied app’s Developer ID identity, hardened runtime, Gatekeeper assessment, and bundled daemon/PTY smoke test. Checksums are generated after these checks. Production publication has no ad-hoc fallback. These checks do not replace browser-download qualification on clean Apple Silicon and Intel Macs.
+
+The certificate owner should document the Apple team ID, certificate expiry and renewal schedule outside this repository, rotate the exported certificate/password and notarization key together, and limit who can change production release workflows and secrets. Credential values and private keys must never be committed. Current production qualification is pending credential setup and clean-Mac testing.
