@@ -8,6 +8,7 @@ use gpui::{
     Context, FontWeight, ScrollStrategy, SharedString, UniformListScrollHandle, div, prelude::*,
     px, rgb, rgba, uniform_list,
 };
+use sigmadock_core::diff::{DiffReport, DiffSectionKind};
 use std::path::PathBuf;
 
 const MONO: &str = "Menlo";
@@ -44,6 +45,10 @@ pub(crate) struct Hunk {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FileDiff {
+    pub section: DiffSectionKind,
+    pub blob_id: String,
+    pub viewed: bool,
+    pub truncated: bool,
     pub path: String,
     pub change: Change,
     pub added: usize,
@@ -106,6 +111,10 @@ pub(crate) fn parse(text: &str) -> Vec<FileDiff> {
                 .rsplit_once(" b/")
                 .map_or(rest.to_owned(), |(_, b)| unquote(b));
             files.push(FileDiff {
+                section: DiffSectionKind::Committed,
+                blob_id: String::new(),
+                viewed: false,
+                truncated: false,
                 path,
                 change: Change::Modified,
                 added: 0,
@@ -188,6 +197,7 @@ pub(crate) fn parse(text: &str) -> Vec<FileDiff> {
 /// One virtual-list row of the changes pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Row {
+    Section(DiffSectionKind),
     File(usize),
     Hunk(usize, usize),
     Line(usize, usize, usize),
@@ -196,6 +206,9 @@ enum Row {
 
 /// The worker's parsed patch and where each file starts in the row list.
 pub(crate) struct Changes {
+    pub base_ref: String,
+    pub merge_base: String,
+    pub warnings: Vec<String>,
     pub files: Vec<FileDiff>,
     pub truncated: bool,
     rows: Vec<Row>,
@@ -203,11 +216,65 @@ pub(crate) struct Changes {
 }
 
 impl Changes {
+    #[cfg(test)]
     pub(crate) fn new(text: &str, truncated: bool) -> Self {
-        let files = parse(text);
+        Self::from_files(
+            parse(text),
+            truncated,
+            String::new(),
+            String::new(),
+            Vec::new(),
+        )
+    }
+    fn from_report(report: DiffReport, worker: &str, viewed: &crate::viewed::Viewed) -> Self {
+        let mut files = Vec::new();
+        for section in report.sections {
+            for item in section.files {
+                let parsed = parse(&item.patch);
+                let hunks = parsed.into_iter().flat_map(|file| file.hunks).collect();
+                files.push(FileDiff {
+                    section: section.kind,
+                    viewed: !item.truncated
+                        && viewed.contains(worker, section.kind.key(), &item.path, &item.blob_id),
+                    path: item.path,
+                    blob_id: item.blob_id,
+                    truncated: item.truncated,
+                    change: match item.status.as_str() {
+                        "A" => Change::Added,
+                        "D" => Change::Deleted,
+                        "R" => Change::Renamed,
+                        _ => Change::Modified,
+                    },
+                    added: item.added.unwrap_or(0) as usize,
+                    removed: item.removed.unwrap_or(0) as usize,
+                    binary: item.binary,
+                    hunks,
+                });
+            }
+        }
+        Self::from_files(
+            files,
+            report.truncated,
+            report.base_ref,
+            report.merge_base,
+            report.warnings,
+        )
+    }
+    fn from_files(
+        files: Vec<FileDiff>,
+        truncated: bool,
+        base_ref: String,
+        merge_base: String,
+        warnings: Vec<String>,
+    ) -> Self {
         let mut rows = Vec::new();
         let mut file_rows = Vec::new();
+        let mut section = None;
         for (f, file) in files.iter().enumerate() {
+            if section != Some(file.section) {
+                rows.push(Row::Section(file.section));
+                section = Some(file.section);
+            }
             file_rows.push(rows.len());
             rows.push(Row::File(f));
             if file.binary {
@@ -219,6 +286,9 @@ impl Changes {
             }
         }
         Self {
+            base_ref,
+            merge_base,
+            warnings,
             files,
             truncated,
             rows,
@@ -240,6 +310,8 @@ pub(crate) struct DiffState {
     pub error: Option<String>,
     pub scroll: UniformListScrollHandle,
     pub selected: Option<usize>,
+    pub request: u64,
+    pub viewed: crate::viewed::Viewed,
 }
 
 impl Workspace {
@@ -251,6 +323,9 @@ impl Workspace {
             return;
         }
         self.diff.loading = true;
+        self.diff.request += 1;
+        let request = self.diff.request;
+        let viewed_path = self.preferences_path.with_file_name("viewed-diffs.json");
         let client = self.client.clone();
         cx.spawn(async move |this, cx| {
             let worker = id.clone();
@@ -259,18 +334,20 @@ impl Workspace {
                 .spawn(async move {
                     let value =
                         client.call("diff_patch", serde_json::json!({"worker_id": worker}))?;
-                    let text = value["text"].as_str().unwrap_or_default().to_owned();
-                    Ok::<_, anyhow::Error>((text, value["truncated"] == true))
+                    let report = serde_json::from_value::<DiffReport>(value)?;
+                    let viewed = crate::viewed::Viewed::load(&viewed_path)?;
+                    Ok::<_, anyhow::Error>((report, viewed))
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.diff.loading = false;
-                if this.selected.as_ref() != Some(&id) {
+                if this.selected.as_ref() != Some(&id) || this.diff.request != request {
                     return;
                 }
+                this.diff.loading = false;
                 match result {
-                    Ok((text, truncated)) => {
-                        let changes = Changes::new(&text, truncated);
+                    Ok((report, viewed)) => {
+                        let changes = Changes::from_report(report, &id, &viewed);
+                        this.diff.viewed = viewed;
                         this.diff.selected =
                             this.diff.selected.filter(|&f| f < changes.files.len());
                         this.diff.changes = Some(changes);
@@ -288,6 +365,51 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    fn mark_viewed(
+        &mut self,
+        worker: &str,
+        section: DiffSectionKind,
+        path: &str,
+        blob: &str,
+        viewed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected.as_deref() != Some(worker)
+            || self.diff.changes.as_ref().is_none_or(|changes| {
+                !changes.files.iter().any(|file| {
+                    file.path == path
+                        && file.section == section
+                        && file.blob_id == blob
+                        && !file.truncated
+                })
+            })
+        {
+            return;
+        }
+        let mut state = self.diff.viewed.clone();
+        state.set(worker, section.key(), path, blob, viewed);
+        match state.save(&self.preferences_path.with_file_name("viewed-diffs.json")) {
+            Ok(()) => {
+                // Discard a refresh that read the markers before this click.
+                self.diff.request += 1;
+                self.diff.loading = false;
+                self.diff.viewed = state;
+                if let Some(changes) = &mut self.diff.changes {
+                    for file in &mut changes.files {
+                        if file.path == path && file.section == section && file.blob_id == blob {
+                            file.viewed = viewed;
+                        }
+                    }
+                }
+                self.diff.error = None;
+            }
+            Err(error) => {
+                self.diff.error = Some(format!("Viewed state could not be saved: {error}"))
+            }
+        }
+        cx.notify();
     }
 
     pub(crate) fn open_in_editor(&mut self, file: Option<(String, u32)>, cx: &mut Context<Self>) {
@@ -371,6 +493,12 @@ impl Workspace {
             .whitespace_nowrap()
             .overflow_hidden();
         match row {
+            Row::Section(kind) => base
+                .px_3()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(theme.link))
+                .child(kind.label())
+                .into_any_element(),
             Row::File(f) => {
                 let file = &changes.files[f];
                 let path = file.path.clone();
@@ -550,7 +678,29 @@ impl Workspace {
                             .child(format!("−{removed}")),
                     ),
             );
-        pane = pane.child(header);
+        pane = pane.child(header).child(
+            div()
+                .px_4()
+                .py_1()
+                .text_xs()
+                .text_color(rgb(theme.muted))
+                .child(format!(
+                    "Base {} · merge base {}",
+                    changes.base_ref, changes.merge_base
+                )),
+        );
+        if let Some(error) = &self.diff.error {
+            pane = pane.child(div().text_color(rgb(theme.error)).child(error.clone()));
+        }
+        for warning in &changes.warnings {
+            pane = pane.child(
+                div()
+                    .px_4()
+                    .text_xs()
+                    .text_color(rgb(theme.warning))
+                    .child(warning.clone()),
+            );
+        }
         if changes.files.is_empty() {
             return pane
                 .child(
@@ -558,7 +708,7 @@ impl Workspace {
                         .p_4()
                         .text_sm()
                         .text_color(rgb(theme.muted))
-                        .child("No changes since this worker started"),
+                        .child("No changes against the merge base"),
                 )
                 .into_any_element();
         }
@@ -573,7 +723,18 @@ impl Workspace {
             .p_2()
             .border_b_1()
             .border_color(rgb(theme.border));
+        let mut section = None;
         for (f, file) in changes.files.iter().enumerate() {
+            if section != Some(file.section) {
+                list = list.child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme.link))
+                        .child(file.section.label()),
+                );
+                section = Some(file.section);
+            }
             let selected = self.diff.selected == Some(f);
             let path = file.path.clone();
             let line = file.first_change();
@@ -593,6 +754,59 @@ impl Workspace {
                     .font_family(MONO)
                     .text_size(px(12.5))
                     .child(self.change_badge(file.change))
+                    .child({
+                        let blob = file.blob_id.clone();
+                        let path = file.path.clone();
+                        let section = file.section;
+                        let worker = self.selected.clone();
+                        let viewed = file.viewed;
+                        let truncated = file.truncated;
+                        div()
+                            .id(SharedString::from(format!("viewed-{f}")))
+                            .tab_index(0)
+                            .border_1()
+                            .border_color(gpui::transparent_black())
+                            .focus(|style| style.border_color(rgb(theme.focus)))
+                            .cursor_pointer()
+                            .child(if truncated {
+                                "—"
+                            } else if viewed {
+                                "☑"
+                            } else {
+                                "☐"
+                            })
+                            .tooltip(move |_, cx| {
+                                crate::keyboard_ui::tooltip(
+                                    if truncated {
+                                        "Patch truncated; cannot mark as viewed".into()
+                                    } else {
+                                        "Mark file as viewed".into()
+                                    },
+                                    cx,
+                                )
+                            })
+                            .on_key_down(cx.listener({
+                                let worker = worker.clone();
+                                let path = path.clone();
+                                let blob = blob.clone();
+                                move |this, event: &gpui::KeyDownEvent, _, cx| {
+                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        cx.stop_propagation();
+                                        if !truncated && let Some(worker) = &worker {
+                                            this.mark_viewed(
+                                                worker, section, &path, &blob, !viewed, cx,
+                                            );
+                                        }
+                                    }
+                                }
+                            }))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                if !truncated && let Some(worker) = &worker {
+                                    this.mark_viewed(worker, section, &path, &blob, !viewed, cx);
+                                }
+                            }))
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -648,7 +862,7 @@ impl Workspace {
                     .py_1()
                     .text_xs()
                     .text_color(rgb(theme.warning))
-                    .child("Diff truncated at 1 MiB; open the worktree for the rest"),
+                    .child("Diff truncated; open the worktree for the remainder"),
             );
         }
         let count = changes.rows.len();
@@ -699,6 +913,46 @@ deleted file mode 100644
 diff --git a/img.png b/img.png
 Binary files a/img.png and b/img.png differ
 ";
+
+    #[test]
+    fn structured_metadata_preserves_paths_sections_and_viewed_identity() {
+        use sigmadock_core::diff::{DiffFile, DiffSection};
+        let mut viewed = crate::viewed::Viewed::default();
+        viewed.set("worker", "committed", "quoted\tfile", "blob", true);
+        let make_report = |blob: &str, truncated| DiffReport {
+            base_ref: "refs/heads/main".into(),
+            merge_base: "base".into(),
+            head: "head".into(),
+            warnings: vec![],
+            truncated,
+            sections: vec![DiffSection {
+                kind: DiffSectionKind::Committed,
+                files: vec![DiffFile {
+                    path: "quoted\tfile".into(),
+                    status: "M".into(),
+                    added: Some(2),
+                    removed: Some(1),
+                    binary: false,
+                    blob_id: blob.into(),
+                    patch: PATCH.into(),
+                    truncated,
+                }],
+            }],
+        };
+        let changes = Changes::from_report(make_report("blob", false), "worker", &viewed);
+        assert_eq!(changes.files[0].path, "quoted\tfile");
+        assert!(changes.files[0].viewed);
+        assert_eq!(changes.rows[0], Row::Section(DiffSectionKind::Committed));
+        assert!(
+            !Changes::from_report(make_report("new", false), "worker", &viewed).files[0].viewed
+        );
+        assert!(
+            !Changes::from_report(make_report("blob", true), "worker", &viewed).files[0].viewed
+        );
+        assert!(
+            !Changes::from_report(make_report("blob", false), "other", &viewed).files[0].viewed
+        );
+    }
 
     #[test]
     fn parses_files_hunks_and_line_numbers() {

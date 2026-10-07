@@ -95,6 +95,26 @@ with tempfile.TemporaryDirectory(prefix='sigma-smoke-', dir='/tmp') as temp:
         override = json.loads(subprocess.run([str(BIN / 'sdk'), 'spawn', project['id'], '--title', 'stacked', '--agent', 'shell', '--base', 'feature'], env=env, check=True, capture_output=True, text=True).stdout)
         assert run('git', '-C', override['worktree'], 'rev-parse', 'HEAD').strip() == checkout_head
         assert override['base_warning'] is None
+        assert override['base_ref'] == 'refs/heads/feature'
+        wt = Path(override['worktree'])
+        (wt / 'README').write_text('committed worker output\n')
+        run('git', '-C', str(wt), 'commit', '-am', 'worker output')
+        report = rpc('diff_patch', {'worker_id': override['id']})
+        assert report['sections'][0]['kind'] == 'committed'
+        assert '+committed worker output' in report['sections'][0]['files'][0]['patch']
+        (wt / 'README').write_text('committed worker output\nlocal edit\n')
+        run('git', '-C', str(wt), 'add', 'README')
+        (wt / 'new file').write_text('new content\n')
+        report = rpc('diff_patch', {'worker_id': override['id']})
+        assert '+local edit' in report['sections'][1]['files'][0]['patch']
+        assert report['sections'][2]['files'][0]['path'] == 'new file'
+        full = run(str(BIN / 'sdk'), '--socket', sock, 'diff', override['id'])
+        stat = run(str(BIN / 'sdk'), '--socket', sock, 'diff', override['id'], '--stat')
+        assert '+committed worker output' in full and 'Untracked changes' in full
+        assert 'M README |' in stat and '@@' not in stat
+        # Restore local files so subsequent lifecycle assertions remain independent.
+        run('git', '-C', str(wt), 'reset', '--hard', 'HEAD')
+        (wt / 'new file').unlink()
         rpc('stop_worker', {'worker_id': override['id']})
         rpc('archive_worker', {'worker_id': override['id']})
 

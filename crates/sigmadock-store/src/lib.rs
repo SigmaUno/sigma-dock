@@ -257,6 +257,7 @@ mod tests {
         };
         store.save_project(&project).unwrap();
         let worker = Worker {
+            base_ref: None,
             base_warning: None,
             berth: None,
             id: "w".into(),

@@ -19,6 +19,7 @@ mod theme;
 mod update_ui;
 mod updates;
 mod usage_ui;
+mod viewed;
 
 use anyhow::Result;
 use clap::Parser;
@@ -420,7 +421,9 @@ impl Workspace {
         terminal.read(cx).focus_handle().focus(window);
         self.terminal = Some(terminal);
         if self.selected.as_ref() != Some(&id) {
+            let request = self.diff.request + 1;
             self.diff = Default::default();
+            self.diff.request = request;
         }
         self.selected = Some(id);
         self.load_changes(cx);

@@ -145,6 +145,9 @@ enum Commands {
     },
     Diff {
         worker_id: String,
+        /// Show file counts instead of unified hunks.
+        #[arg(long)]
+        stat: bool,
     },
     /// Print a Markdown session summary from recorded facts and git history.
     Summary {
@@ -376,7 +379,7 @@ fn main() -> Result<()> {
             "archive_worker",
             json!({"worker_id":worker_id,"cleanup":cleanup}),
         ),
-        Commands::Diff { worker_id } => ("diff", json!({"worker_id":worker_id})),
+        Commands::Diff { worker_id, stat } => ("diff", json!({"worker_id":worker_id,"stat":stat})),
         Commands::Summary { worker_id } => ("session_summary", json!({"worker_id":worker_id})),
         Commands::Prune { project_id } => ("prune", json!({"project_id":project_id})),
         Commands::Forge {

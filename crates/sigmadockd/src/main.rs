@@ -673,7 +673,6 @@ impl Daemon {
                 self.workers.insert(worker.id.clone(), worker);
                 Ok(json!(true))
             }
-            "diff" => Ok(json!(sigmadock_git::diff(&self.worker(&params)?.worktree)?)),
             "prune" => Ok(json!(sigmadock_git::prune(
                 &self.project(string(&params, "project_id")?)?.path
             )?)),
@@ -783,19 +782,23 @@ impl Daemon {
             .map(RestForge::new)
             .transpose()?
             .map(Arc::new);
-        let (base, base_warning) = if fetch_base {
+        let (base, base_warning, base_ref) = if fetch_base {
             let branch = params["base"]
                 .as_str()
                 .map(str::to_owned)
                 .or(project.base_branch.clone())
                 .map(Ok)
                 .unwrap_or_else(|| sigmadock_git::default_base(&project.path))?;
-            sigmadock_git::fresh_base(&project.path, &branch)?
+            let (commit, warning) = sigmadock_git::fresh_base(&project.path, &branch)?;
+            (commit, warning, format!("refs/remotes/origin/{branch}"))
         } else {
-            (string(params, "base")?.to_owned(), None)
+            let base = string(params, "base")?;
+            let reference = sigmadock_git::recorded_base(&project.path, base)?;
+            (base.to_owned(), None, reference)
         };
         let port = self.ports.allocate()?;
         let worker = Worker {
+            base_ref: Some(base_ref),
             base_warning,
             berth,
             id: id.clone(),
@@ -1196,11 +1199,36 @@ fn external_call(state: &Arc<Mutex<Daemon>>, method: &str, params: &Value) -> Re
     if method == "inbox" {
         return inbox(state, params["refresh"] == true);
     }
-    if method == "diff_patch" {
-        // Untracked files make this slow on large worktrees; run git outside the state lock.
-        let worktree = state.lock().unwrap().worker(params)?.worktree.clone();
-        let (text, truncated) = sigmadock_git::patch(&worktree)?;
-        return Ok(json!({"text": text, "truncated": truncated}));
+    if method == "diff_patch" || method == "diff" {
+        // Read Git outside the state lock; creation records the worker's base ref.
+        let (worker, project) = {
+            let daemon = state.lock().unwrap();
+            let worker = daemon.worker(params)?.clone();
+            let project = daemon.project(&worker.project_id)?;
+            (worker, project)
+        };
+        let base = worker
+            .base_ref
+            .clone()
+            .or_else(|| {
+                project
+                    .base_branch
+                    .map(|branch| format!("refs/remotes/origin/{branch}"))
+            })
+            .or_else(|| {
+                sigmadock_git::default_base(&worker.worktree)
+                    .ok()
+                    .map(|branch| format!("refs/remotes/origin/{branch}"))
+            })
+            .context("worker base is unknown; configure a project base branch")?;
+        let report = sigmadock_git::diff_report(&worker.worktree, &base)?;
+        if method == "diff" {
+            return Ok(json!(report.text(params["stat"] == true)));
+        }
+        let mut value = serde_json::to_value(&report)?;
+        // Keep the text field for older UI clients; new clients use structured files.
+        value["text"] = json!(report.text(false));
+        return Ok(value);
     }
     if method == "agent_usage" {
         let (worker, cwd, cached) = {
@@ -1399,6 +1427,7 @@ fn serve(mut stream: UnixStream, state: Arc<Mutex<Daemon>>) -> Result<()> {
                 | "worker_checks"
                 | "session_summary"
                 | "diff_patch"
+                | "diff"
                 | "inbox"
                 | "configure_project_forge"
                 | "check_forge"
