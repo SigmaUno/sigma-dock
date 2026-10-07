@@ -12,16 +12,28 @@ impl Store {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 4 {
+        if version > 5 {
             bail!("database is newer than this daemon");
         }
         connection.execute_batch("BEGIN; CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS workers (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), data TEXT NOT NULL); COMMIT; PRAGMA foreign_keys=ON;")?;
         connection.execute_batch("BEGIN; CREATE TABLE IF NOT EXISTS planning_notes (project_id TEXT PRIMARY KEY REFERENCES projects(id), text TEXT NOT NULL, revision INTEGER NOT NULL); PRAGMA user_version=2; COMMIT;")?;
         connection.execute_batch("BEGIN; CREATE TABLE IF NOT EXISTS session_context (worker_id TEXT PRIMARY KEY REFERENCES workers(id), recorded_at INTEGER NOT NULL, data TEXT NOT NULL); PRAGMA user_version=3; COMMIT;")?;
         connection.execute_batch("BEGIN; CREATE TABLE IF NOT EXISTS task_queue (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, project_id TEXT NOT NULL REFERENCES projects(id), data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS hidden_projects (id TEXT PRIMARY KEY REFERENCES projects(id)); PRAGMA user_version=4; COMMIT;")?;
+        connection.execute_batch("BEGIN; CREATE TABLE IF NOT EXISTS script_approvals (project_id TEXT PRIMARY KEY REFERENCES projects(id), hash TEXT NOT NULL); PRAGMA user_version=5; COMMIT;")?;
         let store = Self(connection);
         store.prune_context()?;
         Ok(store)
+    }
+    pub fn scripts_approved(&self, project: &str, hash: &str) -> Result<bool> {
+        Ok(self.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM script_approvals WHERE project_id=?1 AND hash=?2)",
+            params![project, hash],
+            |row| row.get(0),
+        )?)
+    }
+    pub fn approve_scripts(&self, project: &str, hash: &str) -> Result<()> {
+        self.0.execute("INSERT INTO script_approvals(project_id,hash) VALUES (?1,?2) ON CONFLICT(project_id) DO UPDATE SET hash=excluded.hash", params![project, hash])?;
+        Ok(())
     }
     pub fn queue(&self) -> Result<Vec<QueuedTask>> {
         let mut stmt = self
@@ -228,16 +240,37 @@ impl Store {
         })
     }
     pub fn mark_disconnected(&self) -> Result<()> {
+        use sigmadock_core::workspace_scripts::Phase;
         for mut worker in self.workers()? {
-            if !worker.archived
-                && matches!(
-                    worker.facts.session,
-                    SessionState::Running | SessionState::Idle | SessionState::NeedsInput
-                )
-            {
-                worker.facts.session = SessionState::Lost;
-                self.save_worker(&worker)?;
+            if worker.archived {
+                continue;
             }
+            let interrupted = matches!(
+                worker.facts.session,
+                SessionState::Running | SessionState::Idle | SessionState::NeedsInput
+            ) || worker
+                .workspace_scripts
+                .runs
+                .values()
+                .any(|run| run.running)
+                || worker.workspace_scripts.pending_run.is_some();
+            match worker.workspace_scripts.phase {
+                Phase::SettingUp => worker.workspace_scripts.phase = Phase::SetupFailed,
+                Phase::Archiving => worker.workspace_scripts.phase = Phase::ArchiveFailed,
+                _ => {}
+            }
+            worker.workspace_scripts.pending_run = None;
+            for run in worker.workspace_scripts.runs.values_mut() {
+                run.running = false;
+                run.exit_code = None;
+            }
+            if interrupted && worker.workspace_scripts.phase != Phase::AwaitingApproval {
+                worker.facts.session = SessionState::Lost;
+                worker.workspace_scripts.error = Some(
+                    "Session interrupted; inspect surviving processes before retrying.".into(),
+                );
+            }
+            self.save_worker(&worker)?;
         }
         Ok(())
     }
@@ -257,6 +290,7 @@ mod tests {
         };
         store.save_project(&project).unwrap();
         let worker = Worker {
+            workspace_scripts: Default::default(),
             base_ref: None,
             base_warning: None,
             berth: None,
@@ -344,7 +378,7 @@ mod tests {
                 .0
                 .pragma_query_value(None, "user_version", |row| row.get(0))
                 .unwrap();
-            assert_eq!(version, 4);
+            assert_eq!(version, 5);
         }
         std::fs::remove_file(path).unwrap();
     }
@@ -367,6 +401,53 @@ mod context_tests {
         let worker: Worker = serde_json::from_value(serde_json::json!({"id":"w","project_id":"p","title":"task","agent":"shell","branch":"sigma/w","worktree":"/w","port":4200,"created_at":0,"archived":false,"facts":{"session":"running","pr":"none","checks":"unknown","review":"unknown","mergeable":null,"forge_error":null,"pr_url":null,"exit_code":null},"forge":null})).unwrap();
         store.save_worker(&worker).unwrap();
         (store, worker)
+    }
+    #[test]
+    fn interrupted_hooks_and_runs_require_explicit_recovery() {
+        use sigmadock_core::workspace_scripts::{Phase, ScriptStatus};
+        let (store, mut worker) = fixture();
+        worker.workspace_scripts.phase = Phase::SettingUp;
+        store.save_worker(&worker).unwrap();
+        store.mark_disconnected().unwrap();
+        let recovered = store.workers().unwrap().remove(0);
+        assert_eq!(recovered.workspace_scripts.phase, Phase::SetupFailed);
+        assert_eq!(recovered.facts.session, SessionState::Lost);
+        worker.workspace_scripts.phase = Phase::Archiving;
+        store.save_worker(&worker).unwrap();
+        store.mark_disconnected().unwrap();
+        assert_eq!(
+            store.workers().unwrap()[0].workspace_scripts.phase,
+            Phase::ArchiveFailed
+        );
+        worker.workspace_scripts.phase = Phase::Ready;
+        worker.facts.session = SessionState::Exited;
+        worker.workspace_scripts.runs.insert(
+            "web".into(),
+            ScriptStatus {
+                running: true,
+                exit_code: None,
+            },
+        );
+        store.save_worker(&worker).unwrap();
+        store.mark_disconnected().unwrap();
+        let recovered = store.workers().unwrap().remove(0);
+        assert_eq!(recovered.facts.session, SessionState::Lost);
+        assert!(!recovered.workspace_scripts.runs["web"].running);
+        worker.workspace_scripts.phase = Phase::AwaitingApproval;
+        worker.workspace_scripts.runs.clear();
+        worker.facts.session = SessionState::NeedsInput;
+        store.save_worker(&worker).unwrap();
+        store.mark_disconnected().unwrap();
+        assert_eq!(
+            store.workers().unwrap()[0].facts.session,
+            SessionState::NeedsInput
+        );
+        assert!(!store.scripts_approved("p", "first").unwrap());
+        store.approve_scripts("p", "first").unwrap();
+        assert!(store.scripts_approved("p", "first").unwrap());
+        store.approve_scripts("p", "changed").unwrap();
+        assert!(!store.scripts_approved("p", "first").unwrap());
+        assert!(!store.scripts_approved("other", "changed").unwrap());
     }
     #[test]
     fn checkpoint_preserves_last_state_without_claiming_process_survival() {
@@ -481,7 +562,7 @@ mod queue_tests {
                 .0
                 .pragma_query_value(None, "user_version", |row| row.get(0))
                 .unwrap();
-            assert_eq!(version, 4);
+            assert_eq!(version, 5);
             store.save_queued(&task("first", "p")).unwrap();
             store.save_queued(&task("second", "other")).unwrap();
             let mut first = task("first", "p");

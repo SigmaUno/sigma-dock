@@ -98,6 +98,30 @@ enum Commands {
     },
     Attach {
         worker_id: String,
+        /// setup, archive, or run:NAME; omit for the current lifecycle/agent terminal.
+        #[arg(long)]
+        script: Option<String>,
+    },
+    /// Review repository commands, or approve the exact hash returned by this command.
+    Scripts {
+        worker_id: String,
+        #[arg(long)]
+        approve: Option<String>,
+    },
+    /// Retry setup, or skip it and start the agent. Skipping executes no repository hook.
+    Setup {
+        worker_id: String,
+        #[arg(long)]
+        skip: bool,
+        #[arg(long)]
+        acknowledge_unknown: bool,
+    },
+    /// Start a named/default run script or stop one/all runs in this worker.
+    Run {
+        worker_id: String,
+        name: Option<String>,
+        #[arg(long)]
+        stop: bool,
     },
     Message {
         worker_id: String,
@@ -142,6 +166,11 @@ enum Commands {
         worker_id: String,
         #[arg(long)]
         cleanup: bool,
+        /// Continue after a failing archive hook; never bypasses approval or dirty-worktree protection.
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        acknowledge_unknown: bool,
     },
     Diff {
         worker_id: String,
@@ -350,7 +379,33 @@ fn main() -> Result<()> {
             return Ok(());
         }
         Commands::Status { worker_id } => ("get_worker_status", json!({"worker_id":worker_id})),
-        Commands::Attach { worker_id } => return attach(client, worker_id),
+        Commands::Attach { worker_id, script } => return attach(client, worker_id, script),
+        Commands::Scripts { worker_id, approve } => {
+            if let Some(hash) = approve {
+                (
+                    "approve_scripts",
+                    json!({"worker_id":worker_id,"hash":hash}),
+                )
+            } else {
+                ("workspace_scripts", json!({"worker_id":worker_id}))
+            }
+        }
+        Commands::Setup {
+            worker_id,
+            skip,
+            acknowledge_unknown,
+        } => (
+            "setup_worker",
+            json!({"worker_id":worker_id,"skip":skip,"acknowledge_unknown":acknowledge_unknown}),
+        ),
+        Commands::Run {
+            worker_id,
+            name,
+            stop,
+        } => (
+            "run_script",
+            json!({"worker_id":worker_id,"name":name,"stop":stop}),
+        ),
         Commands::Message { worker_id, message } => (
             "message_worker",
             json!({"worker_id":worker_id,"message":message}),
@@ -375,10 +430,12 @@ fn main() -> Result<()> {
             json!({"worker_id":worker_id,"prompt":prompt,"continue":continue_session,"acknowledge_unknown":acknowledge_unknown}),
         ),
         Commands::Stop { worker_id } => ("stop_worker", json!({"worker_id":worker_id})),
-        Commands::Archive { worker_id, cleanup } => (
-            "archive_worker",
-            json!({"worker_id":worker_id,"cleanup":cleanup}),
-        ),
+        Commands::Archive {
+            worker_id,
+            cleanup,
+            force,
+            acknowledge_unknown,
+        } => return archive(client, worker_id, cleanup, force, acknowledge_unknown),
         Commands::Diff { worker_id, stat } => ("diff", json!({"worker_id":worker_id,"stat":stat})),
         Commands::Summary { worker_id } => ("session_summary", json!({"worker_id":worker_id})),
         Commands::Prune { project_id } => ("prune", json!({"project_id":project_id})),
@@ -424,7 +481,7 @@ impl Drop for RawGuard {
         let _ = std::io::stdout().write_all(b"\x1b[?25h\x1b[?1049l");
     }
 }
-fn attach(client: Client, worker_id: String) -> Result<()> {
+fn attach(client: Client, worker_id: String, script: Option<String>) -> Result<()> {
     client.call("get_worker_status", json!({"worker_id":worker_id}))?;
     eprintln!("Attached. Press Ctrl-] to detach; the agent keeps running.");
     crossterm::terminal::enable_raw_mode()?;
@@ -433,6 +490,7 @@ fn attach(client: Client, worker_id: String) -> Result<()> {
     let input_client = client.clone();
     let input_worker = worker_id.clone();
     let input_running = running.clone();
+    let input_script = script.clone();
     thread::spawn(move || {
         let mut stdin = std::io::stdin();
         let mut bytes = [0; 4096];
@@ -447,7 +505,7 @@ fn attach(client: Client, worker_id: String) -> Result<()> {
             if input_client
                 .call(
                     "input",
-                    json!({"worker_id":input_worker,"bytes":&bytes[..size]}),
+                    json!({"worker_id":input_worker,"script":input_script,"bytes":&bytes[..size]}),
                 )
                 .is_err()
             {
@@ -457,22 +515,28 @@ fn attach(client: Client, worker_id: String) -> Result<()> {
         input_running.store(false, Ordering::Relaxed);
     });
     let mut cursor = 0;
+    let mut generation = None;
     let mut size = (0, 0);
     let mut stdout = std::io::stdout();
     let result = (|| -> Result<()> {
         while running.load(Ordering::Relaxed) {
             if let Ok(new_size) = crossterm::terminal::size()
                 && new_size != size
-            {
-                client.call(
-                    "resize",
-                    json!({"worker_id":worker_id,"cols":new_size.0,"rows":new_size.1}),
-                )?;
-                size = new_size;
-            }
-            let output: Output = serde_json::from_value(
-                client.call("output", json!({"worker_id":worker_id,"cursor":cursor}))?,
+                && client.call("resize", json!({"worker_id":worker_id,"script":script,"cols":new_size.0,"rows":new_size.1})).is_ok()
+            { size = new_size; }
+            let value = client.call(
+                "output",
+                json!({"worker_id":worker_id,"script":script,"cursor":cursor}),
             )?;
+            let current = value["generation"].as_u64();
+            if generation.is_some() && current != generation {
+                generation = current;
+                cursor = 0;
+                stdout.write_all(b"\x1bc")?;
+                continue;
+            }
+            generation = current;
+            let output: Output = serde_json::from_value(value)?;
             if output.truncated {
                 stdout.write_all(b"\x1bc")?;
             }
@@ -488,4 +552,40 @@ fn attach(client: Client, worker_id: String) -> Result<()> {
     })();
     running.store(false, Ordering::Relaxed);
     result
+}
+
+fn archive(
+    client: Client,
+    worker: String,
+    cleanup: bool,
+    force: bool,
+    acknowledge_unknown: bool,
+) -> Result<()> {
+    client.call("archive_worker", json!({"worker_id":worker,"cleanup":cleanup,"force":force,"acknowledge_unknown":acknowledge_unknown}))?;
+    let mut cursor = 0;
+    loop {
+        let status = client.call("get_worker_status", json!({"worker_id":worker}))?;
+        if let Ok(output) = client.call(
+            "output",
+            json!({"worker_id":worker,"script":"archive","cursor":cursor}),
+        ) {
+            let output: Output = serde_json::from_value(output)?;
+            std::io::stdout().write_all(&output.bytes)?;
+            std::io::stdout().flush()?;
+            cursor = output.cursor;
+        }
+        if status["worker"]["archived"] == true {
+            return Ok(());
+        }
+        match status["worker"]["workspace_scripts"]["phase"].as_str() {
+            Some("awaiting_approval") => anyhow::bail!(
+                "Archive is waiting for approval. Review `sdk scripts {worker}`, then approve its exact hash."
+            ),
+            Some("archive_failed") => anyhow::bail!(
+                "{}; inspect archive output and retry, or use --force for hook failure",
+                status["worker"]["workspace_scripts"]["error"]
+            ),
+            _ => thread::sleep(Duration::from_millis(100)),
+        }
+    }
 }

@@ -6,7 +6,10 @@ use std::{
     collections::VecDeque,
     io::{Read, Write},
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -25,12 +28,15 @@ struct State {
     exit_code: Option<u32>,
 }
 pub struct Session {
+    stopping: AtomicBool,
+    stop_complete: Arc<AtomicBool>,
     generation: u64,
     writer: Mutex<Box<dyn Write + Send>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     state: Arc<Mutex<State>>,
     pub pid: Option<u32>,
+    birth: Option<String>,
     idle_timeout: Duration,
 }
 impl Session {
@@ -57,6 +63,12 @@ impl Session {
         }
         let child = pair.slave.spawn_command(command)?;
         let pid = child.process_id();
+        let birth = pid.and_then(|pid| {
+            processes()
+                .into_iter()
+                .find(|(id, _, _)| *id == pid)
+                .map(|(_, _, birth)| birth)
+        });
         let child = Arc::new(Mutex::new(child));
         drop(pair.slave);
         let state = Arc::new(Mutex::new(State {
@@ -115,12 +127,15 @@ impl Session {
         });
         static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Ok(Self {
+            stopping: AtomicBool::new(false),
+            stop_complete: Arc::new(AtomicBool::new(false)),
             generation: NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             writer: Mutex::new(writer),
             master: Mutex::new(pair.master),
             child,
             state,
             pid,
+            birth,
             idle_timeout: Duration::from_secs(60),
         })
     }
@@ -154,12 +169,57 @@ impl Session {
         state.cols = cols;
         Ok(())
     }
+    /// portable-pty creates a session/process-group leader. Stop the whole group,
+    /// plus descendants that created their own session while their parent is alive.
     pub fn stop(&self) -> Result<()> {
-        let mut child = self.child.lock().unwrap();
-        if !self.state.lock().unwrap().exited {
-            child.kill()?;
+        if self.stopping.swap(true, Ordering::SeqCst) {
+            return Ok(());
         }
+        let Some(pid) = self.pid else {
+            return self.child.lock().unwrap().kill().map_err(Into::into);
+        };
+        // An exited terminal can be reviewed much later. Never signal a recycled leader PID.
+        let current = processes();
+        if self.birth.as_ref().is_some_and(|birth| {
+            current
+                .iter()
+                .any(|(id, _, now)| *id == pid && now != birth)
+        }) {
+            self.stop_complete.store(true, Ordering::SeqCst);
+            return Ok(());
+        }
+        let descendants = descendants(pid);
+        if self.state.lock().unwrap().exited && current.is_empty() {
+            self.stop_complete.store(true, Ordering::SeqCst);
+            return Ok(());
+        }
+        if let Err(error) = signal_group(pid, libc::SIGTERM) {
+            self.stopping.store(false, Ordering::SeqCst);
+            return Err(error);
+        }
+        signal_descendants(&descendants, libc::SIGTERM);
+        let complete = self.stop_complete.clone();
+        let birth = self.birth.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(2));
+            if !birth.as_ref().is_some_and(|birth| {
+                processes()
+                    .iter()
+                    .any(|(id, _, now)| *id == pid && now != birth)
+            }) {
+                let _ = signal_group(pid, libc::SIGKILL);
+            }
+            signal_descendants(&descendants, libc::SIGKILL);
+            complete.store(true, Ordering::SeqCst);
+        });
         Ok(())
+    }
+    pub fn is_stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
+    }
+    pub fn terminated(&self) -> bool {
+        self.facts().0 == SessionState::Exited
+            && (!self.stopping.load(Ordering::SeqCst) || self.stop_complete.load(Ordering::SeqCst))
     }
     pub fn facts(&self) -> (SessionState, Option<u32>) {
         let state = self.state.lock().unwrap();
@@ -252,6 +312,68 @@ impl Session {
             exited: state.exited && state.eof && offset + bytes.len() as u64 == state.cursor,
             bytes,
             truncated: cursor < start || cursor > state.cursor,
+        }
+    }
+}
+fn signal_group(pid: u32, signal: i32) -> Result<()> {
+    // SAFETY: a negative PID signals the PTY's process group, never the daemon's.
+    if unsafe { libc::kill(-(pid as i32), signal) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+fn processes() -> Vec<(u32, u32, String)> {
+    let Ok(output) = std::process::Command::new("/bin/ps")
+        .args(["-axo", "pid=,ppid=,lstart="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            Some((
+                fields.next()?.parse().ok()?,
+                fields.next()?.parse().ok()?,
+                fields.collect::<Vec<_>>().join(" "),
+            ))
+        })
+        .collect()
+}
+fn descendants(root: u32) -> Vec<(u32, String)> {
+    let all = processes();
+    let mut ids = vec![root];
+    loop {
+        let previous = ids.len();
+        for (pid, parent, _) in &all {
+            if ids.contains(parent) && !ids.contains(pid) {
+                ids.push(*pid);
+            }
+        }
+        if ids.len() == previous {
+            break;
+        }
+    }
+    all.into_iter()
+        .filter(|(pid, _, _)| *pid != root && ids.contains(pid))
+        .map(|(pid, _, birth)| (pid, birth))
+        .collect()
+}
+fn signal_descendants(descendants: &[(u32, String)], signal: i32) {
+    let current = processes();
+    for (pid, birth) in descendants {
+        if current
+            .iter()
+            .any(|(now, _, started)| now == pid && started == birth)
+        {
+            // SAFETY: verify the descendant's start time to avoid signalling a reused PID.
+            unsafe {
+                libc::kill(*pid as i32, signal);
+            }
         }
     }
 }

@@ -302,7 +302,7 @@ with tempfile.TemporaryDirectory(prefix='sigma-smoke-', dir='/tmp') as temp:
         workers.append(pending_worker)
         assert pending_worker['berth'] == 1 and not rpc('list_queue')
         with sqlite3.connect(state / 'state.sqlite') as database:
-            assert database.execute('PRAGMA user_version').fetchone()[0] == 4
+            assert database.execute('PRAGMA user_version').fetchone()[0] == 5
         # Project preference persists and overrides the remote default branch.
         run('git', '-C', str(publisher), 'checkout', '-b', 'release')
         run('git', '-C', str(publisher), 'commit', '--allow-empty', '-m', 'release base')
