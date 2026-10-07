@@ -73,7 +73,9 @@ def main():
         plistlib.dump(info, file)
     shutil.copy2(ROOT / 'LICENSE', resources / 'LICENSE')
     shutil.copy2(ROOT / 'packaging/macos/INSTALL.txt', resources / 'INSTALL.txt')
-    for name in BINARIES:
+    # Sign nested helpers first. Signing the main executable inside an app
+    # also discovers the enclosing bundle and requires its helpers to be signed.
+    for name in BINARIES[1:]:
         command = ['codesign', '--force', '--sign', identity or '-']
         if identity: command += ['--options', 'runtime', '--timestamp']
         run(*command, str(macos / name))
