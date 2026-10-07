@@ -29,14 +29,27 @@ Add repository Actions secrets:
 
 The packaging job imports the certificate into a temporary keychain, signs every executable and the app with hardened runtime, signs the DMG, submits it using `notarytool`, and staples the accepted ticket. Credentials are cleaned up even on failure. Partially configured notarization fails visibly. `crates_token` is unrelated to Apple signing and is not used by the macOS build.
 
-For a local bundle test using built binaries:
+## Build a local installer
+
+On macOS, install Rust, Python 3 and Xcode command-line tools (`xcode-select --install` if needed), then run from the repository root:
 
 ```sh
-python3 scripts/package_macos.py --bin-dir target/debug --output /tmp/sigmadock-bundle --version 0.1.0 --build-id COMMIT --arch arm64 --app-only
-python3 scripts/macos_bundle_smoke.py /tmp/sigmadock-bundle/SigmaDock.app
+MACOSX_DEPLOYMENT_TARGET=13.0 cargo build --locked --release \
+  -p sigma-dock-ui -p sigma-dockerd -p sigma-dock-cli -p sigma-dock-mcp
+
+version=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+python3 scripts/package_macos.py --bin-dir target/release \
+  --version "$version" --build-id "$(git rev-parse --short=12 HEAD)" \
+  --arch "$(uname -m)"
 ```
 
-Use your actual commit ID and native architecture. Omit `--app-only` to make a DMG. Packaging requires macOS command-line tools; macOS GitHub runners provide the full toolchain.
+The output is `dist/SigmaDock.app`, a DMG and its SHA-256 checksum. Open the DMG, drag the app into Applications, then launch it. This creates a native Apple Silicon or Intel test installer for the machine running the build. Apple signing credentials are not required; the app is ad-hoc signed and not notarized. Git and your chosen agent CLI still need to be installed separately. The GitHub workflow builds the universal installer containing both architectures.
+
+Add `--app-only` to the packaging command to skip DMG creation. To smoke-test the bundled daemon, CLI, worker and PTY without launching the GUI:
+
+```sh
+python3 scripts/macos_bundle_smoke.py dist/SigmaDock.app
+```
 
 Production packaging requires an explicit Apple `Accepted` result, retains JSON notarization diagnostics as a CI artifact, validates the stapled DMG, then mounts the final image and verifies the copied app’s Developer ID identity, hardened runtime, Gatekeeper assessment, and bundled daemon/PTY smoke test. Checksums are generated after these checks. Production publication has no ad-hoc fallback. These checks do not replace browser-download qualification on clean Apple Silicon and Intel Macs.
 

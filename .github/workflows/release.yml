@@ -34,10 +34,10 @@ jobs:
           if git rev-parse "refs/tags/v$version" >/dev/null 2>&1; then
             test "$(git rev-list -n 1 "v$version")" = "$GITHUB_SHA"
           fi
-      - name: Preserve build commit before its branch advances
+      - name: Preserve release tag before its branch advances
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/ensure_build_ref.py
+        run: python3 scripts/ensure_build_ref.py --tag "v$RELEASE_VERSION"
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
@@ -58,5 +58,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if ! gh release view "v$RELEASE_VERSION" >/dev/null 2>&1; then
-            gh release create "v$RELEASE_VERSION" --target "$GITHUB_SHA" --title "SigmaDock $RELEASE_VERSION" --prerelease --generate-notes
+            gh release create "v$RELEASE_VERSION" --verify-tag --title "SigmaDock $RELEASE_VERSION" --prerelease --generate-notes
           fi

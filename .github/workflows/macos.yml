@@ -38,10 +38,13 @@ jobs:
                   raise SystemExit('Production requires a Developer ID Application identity')
           PY
       - uses: actions/checkout@v4
-      - name: Preserve build commit before its branch advances
+      - name: Preserve release tag before its branch advances
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/ensure_build_ref.py
+        run: |
+          tag="macos-${GITHUB_SHA:0:12}"
+          if [[ "$GITHUB_REF_TYPE" = tag ]]; then tag="$GITHUB_REF_NAME"; fi
+          python3 scripts/ensure_build_ref.py --tag "$tag"
   build:
     needs: distribution-policy
     strategy:
@@ -168,7 +171,7 @@ jobs:
           tag="macos-${GITHUB_SHA:0:12}"
           if [[ "$GITHUB_REF_TYPE" = tag ]]; then tag="$GITHUB_REF_NAME"; fi
           if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" --target "$GITHUB_SHA" --title "SigmaDock macOS build ${GITHUB_SHA:0:12}" --prerelease --notes-file packaging/macos/INSTALL.txt
+            gh release create "$tag" --verify-tag --title "SigmaDock macOS build ${GITHUB_SHA:0:12}" --prerelease --notes-file packaging/macos/INSTALL.txt
           fi
           gh release upload "$tag" dist/*.dmg dist/*.sha256 --clobber
       - name: Retain notarization diagnostics
