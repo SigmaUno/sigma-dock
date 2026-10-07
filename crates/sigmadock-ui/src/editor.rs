@@ -10,6 +10,12 @@ pub enum Editor {
     Cursor,
     VsCode,
     Sublime,
+    /// JetBrains IDEs, through the launcher inside the app or a Toolbox script.
+    Idea,
+    RustRover,
+    GoLand,
+    PyCharm,
+    WebStorm,
     Xcode,
     /// `custom_command` from the preferences.
     Custom,
@@ -18,11 +24,16 @@ pub enum Editor {
 }
 
 /// Detection order when no editor is chosen.
-const KNOWN: [Editor; 5] = [
+const KNOWN: [Editor; 10] = [
     Editor::Zed,
     Editor::Cursor,
     Editor::VsCode,
     Editor::Sublime,
+    Editor::Idea,
+    Editor::RustRover,
+    Editor::GoLand,
+    Editor::PyCharm,
+    Editor::WebStorm,
     Editor::Xcode,
 ];
 
@@ -49,6 +60,11 @@ impl Editor {
             Self::Cursor => "Cursor",
             Self::VsCode => "VS Code",
             Self::Sublime => "Sublime Text",
+            Self::Idea => "IntelliJ IDEA",
+            Self::RustRover => "RustRover",
+            Self::GoLand => "GoLand",
+            Self::PyCharm => "PyCharm",
+            Self::WebStorm => "WebStorm",
             Self::Xcode => "Xcode",
             Self::Custom => "Custom command",
             Self::System => "Default app",
@@ -71,6 +87,35 @@ impl Editor {
                 &["/Applications/Sublime Text.app/Contents/SharedSupport/bin/subl"],
                 "subl",
             ),
+            // Community editions share the launcher name; Toolbox scripts are found on the search path.
+            Self::Idea => (
+                &[
+                    "/Applications/IntelliJ IDEA.app/Contents/MacOS/idea",
+                    "/Applications/IntelliJ IDEA Ultimate.app/Contents/MacOS/idea",
+                    "/Applications/IntelliJ IDEA CE.app/Contents/MacOS/idea",
+                ],
+                "idea",
+            ),
+            Self::RustRover => (
+                &["/Applications/RustRover.app/Contents/MacOS/rustrover"],
+                "rustrover",
+            ),
+            Self::GoLand => (
+                &["/Applications/GoLand.app/Contents/MacOS/goland"],
+                "goland",
+            ),
+            Self::PyCharm => (
+                &[
+                    "/Applications/PyCharm.app/Contents/MacOS/pycharm",
+                    "/Applications/PyCharm Professional Edition.app/Contents/MacOS/pycharm",
+                    "/Applications/PyCharm CE.app/Contents/MacOS/pycharm",
+                ],
+                "pycharm",
+            ),
+            Self::WebStorm => (
+                &["/Applications/WebStorm.app/Contents/MacOS/webstorm"],
+                "webstorm",
+            ),
             Self::Xcode => (
                 &["/Applications/Xcode.app/Contents/Developer/usr/bin/xed"],
                 "xed",
@@ -84,11 +129,11 @@ impl Editor {
         bundled
             .iter()
             .map(PathBuf::from)
-            .chain(home.iter().filter_map(|home| {
-                // Per-user installs land in ~/Applications.
+            .chain(home.iter().flat_map(|home| {
+                // Per-user installs, including JetBrains Toolbox apps, land in ~/Applications.
                 bundled
-                    .first()
-                    .and_then(|path| path.strip_prefix('/'))
+                    .iter()
+                    .filter_map(|path| path.strip_prefix('/'))
                     .map(|path| home.join(path))
             }))
             .chain(search_path(name))
@@ -107,8 +152,12 @@ fn search_path(name: &str) -> Vec<PathBuf> {
         return Vec::new();
     }
     let path = std::env::var_os("PATH").unwrap_or_default();
+    let toolbox = std::env::var_os("HOME").map(|home| {
+        PathBuf::from(home).join("Library/Application Support/JetBrains/Toolbox/scripts")
+    });
     std::env::split_paths(&path)
         .chain(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from))
+        .chain(toolbox)
         .map(|dir| dir.join(name))
         .collect()
 }
@@ -182,17 +231,7 @@ impl EditorPreferences {
                 editor.label()
             )
         })?;
-        let args = match (editor, file) {
-            (_, None) => vec![worktree],
-            (Editor::Zed | Editor::Sublime, Some((path, line))) => vec![format!("{path}:{line}")],
-            (Editor::Cursor | Editor::VsCode, Some((path, line))) => {
-                // Open the worktree as the window's folder so the file lands in context.
-                vec![worktree, "-g".into(), format!("{path}:{line}")]
-            }
-            (Editor::Xcode, Some((path, line))) => vec!["-l".into(), line.to_string(), path],
-            (Editor::Custom | Editor::System, Some(_)) => unreachable!(),
-        };
-        Ok((program, args))
+        Ok((program, editor_args(editor, worktree, file)))
     }
     /// Launch the editor without waiting for it; a reaper thread collects the launcher.
     pub fn open(&self, target: &Target) -> Result<Editor> {
@@ -208,6 +247,25 @@ impl EditorPreferences {
             .with_context(|| format!("Could not start {}", program.display()))?;
         std::thread::spawn(move || child.wait());
         Ok(editor)
+    }
+}
+
+/// Arguments for a detected editor: the worktree alone, or the file at a 1-based line.
+fn editor_args(editor: Editor, worktree: String, file: Option<(String, u32)>) -> Vec<String> {
+    match (editor, file) {
+        (_, None) => vec![worktree],
+        (Editor::Zed | Editor::Sublime, Some((path, line))) => vec![format!("{path}:{line}")],
+        (Editor::Cursor | Editor::VsCode, Some((path, line))) => {
+            // Open the worktree as the window's folder so the file lands in context.
+            vec![worktree, "-g".into(), format!("{path}:{line}")]
+        }
+        (Editor::Xcode, Some((path, line))) => vec!["-l".into(), line.to_string(), path],
+        // The project folder first, so the file opens inside the worktree's project.
+        (
+            Editor::Idea | Editor::RustRover | Editor::GoLand | Editor::PyCharm | Editor::WebStorm,
+            Some((path, line)),
+        ) => vec![worktree, "--line".into(), line.to_string(), path],
+        (Editor::Custom | Editor::System, Some(_)) => unreachable!(),
     }
 }
 
@@ -296,6 +354,30 @@ mod tests {
         };
         assert!(empty.validate().is_err());
         assert!(EditorPreferences::default().validate().is_ok());
+    }
+
+    #[test]
+    fn jetbrains_editors_open_the_project_then_the_file_at_a_line() {
+        let worktree = || "/work/tree with space".to_owned();
+        let file = Some(("/work/tree with space/src/a b.rs".to_owned(), 7));
+        let args = editor_args(Editor::Idea, worktree(), file);
+        assert_eq!(
+            args,
+            vec![
+                "/work/tree with space",
+                "--line",
+                "7",
+                "/work/tree with space/src/a b.rs"
+            ]
+        );
+        assert_eq!(
+            editor_args(Editor::PyCharm, worktree(), None),
+            vec!["/work/tree with space"]
+        );
+        assert_eq!(
+            serde_json::to_value(Editor::RustRover).unwrap(),
+            "rust_rover"
+        );
     }
 
     #[test]
