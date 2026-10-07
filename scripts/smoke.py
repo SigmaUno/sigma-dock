@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -102,16 +103,42 @@ with tempfile.TemporaryDirectory(prefix='sigma-smoke-', dir='/tmp') as temp:
         w = workers[1]
         rpc('input', {'worker_id': w['id'], 'bytes': list(b'exit\n')})
         wait_for(lambda: exited(w))
+        saved = rpc('session_context', {'worker_id': w['id']})
+        assert saved and saved['recorded_at'] and saved['state'] == 'exited'
         # Persisted exited worker can restart in the same worktree.
         daemon.terminate(); daemon.wait(timeout=5)
         daemon = start()
         assert exited(w)
+        recovered = rpc('session_context', {'worker_id': w['id']})
+        assert recovered['recorded_at'] == saved['recorded_at'] and recovered['text'] == saved['text']
+        assert any(entry['worker']['id'] == w['id'] and entry['runtime'] == 'stopped' for entry in rpc('list_unfinished'))
+        rpc('clear_session_context', {'worker_id': w['id']})
+        assert rpc('session_context', {'worker_id': w['id']}) is None
         rpc('resume_worker', {'worker_id': w['id']})
         assert rpc('get_worker_status', {'worker_id': w['id']})['worker']['facts']['session'] == 'running'
+        rpc('resume_worker', {'worker_id': w['id']}, error=True)
+        rpc('input', {'worker_id': w['id'], 'bytes': list(b"printf 'BEFORE_CLEAR_CHECKPOINT\n'\n")})
+        wait_for(lambda: 'BEFORE_CLEAR_CHECKPOINT' in (rpc('session_context', {'worker_id': w['id']}) or {}).get('text', ''))
+        rpc('clear_session_context', {'worker_id': w['id']})
+        rpc('input', {'worker_id': w['id'], 'bytes': list(b"printf 'AFTER_CLEAR_CHECKPOINT\n'\n")})
+        wait_for(lambda: 'AFTER_CLEAR_CHECKPOINT' in (rpc('session_context', {'worker_id': w['id']}) or {}).get('text', ''))
+        assert 'BEFORE_CLEAR_CHECKPOINT' not in rpc('session_context', {'worker_id': w['id']})['text']
         # MCP is local, does not offer autonomous spawn by default.
         request = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list', 'params': {}}
         mcp = subprocess.run([str(BIN / 'sigma-dock-mcp')], env=env, input=json.dumps(request)+'\n', capture_output=True, text=True, check=True)
         assert 'spawn_worker' not in [t['name'] for t in json.loads(mcp.stdout)['result']['tools']]
+        rpc('stop_worker', {'worker_id': w['id']})
+        wait_for(lambda: exited(w))
+        # Simulate stale running metadata only after proving the real process exited.
+        daemon.terminate(); daemon.wait(timeout=5)
+        with sqlite3.connect(state / 'state.sqlite') as database:
+            recorded = json.loads(database.execute('SELECT data FROM workers WHERE id=?', (w['id'],)).fetchone()[0])
+            recorded['facts']['session'] = 'running'
+            database.execute('UPDATE workers SET data=? WHERE id=?', (json.dumps(recorded), w['id']))
+        daemon = start()
+        assert rpc('get_worker_status', {'worker_id': w['id']})['worker']['facts']['session'] == 'lost'
+        assert 'unknown' in rpc('resume_worker', {'worker_id': w['id']}, error=True)['message']
+        rpc('resume_worker', {'worker_id': w['id'], 'acknowledge_unknown': True})
         rpc('stop_worker', {'worker_id': w['id']})
         wait_for(lambda: exited(w))
         rpc('archive_worker', {'worker_id': w['id'], 'cleanup': True})

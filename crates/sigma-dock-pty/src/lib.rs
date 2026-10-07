@@ -1,7 +1,7 @@
 //! PTY ownership and bounded output replay independent of any UI.
 use anyhow::{Result, bail};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
-use sigma_dock_core::{Output, SessionState};
+use sigma_dock_core::{Output, SessionContext, SessionState, output_text, unix_time};
 use std::{
     collections::VecDeque,
     io::{Read, Write},
@@ -16,6 +16,7 @@ struct State {
     output: VecDeque<u8>,
     cursor: u64,
     last_activity: Instant,
+    activity_at: u64,
     needs_input: bool,
     exited: bool,
     eof: bool,
@@ -59,6 +60,7 @@ impl Session {
             output: VecDeque::new(),
             cursor: 0,
             last_activity: Instant::now(),
+            activity_at: unix_time(),
             needs_input: false,
             exited: false,
             eof: false,
@@ -76,6 +78,7 @@ impl Session {
                 let alert = detector.feed(&bytes[..size]);
                 let mut state = output_state.lock().unwrap();
                 state.last_activity = Instant::now();
+                state.activity_at = unix_time();
                 state.needs_input |= alert;
                 state.cursor += size as u64;
                 state.output.extend(&bytes[..size]);
@@ -126,6 +129,7 @@ impl Session {
         let mut state = self.state.lock().unwrap();
         state.needs_input = false;
         state.last_activity = Instant::now();
+        state.activity_at = unix_time();
         Ok(())
     }
     pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
@@ -159,6 +163,56 @@ impl Session {
             SessionState::Running
         };
         (status, state.exit_code)
+    }
+    pub fn checkpoint_key(&self) -> (u64, u64, SessionState) {
+        let state = self.state.lock().unwrap();
+        (
+            state.cursor,
+            state.activity_at,
+            if state.exited {
+                SessionState::Exited
+            } else if state.needs_input {
+                SessionState::NeedsInput
+            } else if state.last_activity.elapsed() > self.idle_timeout {
+                SessionState::Idle
+            } else {
+                SessionState::Running
+            },
+        )
+    }
+    pub fn checkpoint(&self, worker_id: &str, since: u64) -> SessionContext {
+        let state = self.state.lock().unwrap();
+        let offset = since
+            .saturating_sub(state.cursor - state.output.len() as u64)
+            .min(state.output.len() as u64) as usize;
+        let bytes: Vec<_> = state
+            .output
+            .iter()
+            .skip(offset)
+            .rev()
+            .take(16 * 1024)
+            .copied()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        SessionContext {
+            worker_id: worker_id.into(),
+            recorded_at: unix_time(),
+            last_activity: state.activity_at,
+            state: if state.exited {
+                SessionState::Exited
+            } else if state.needs_input {
+                SessionState::NeedsInput
+            } else if state.last_activity.elapsed() > self.idle_timeout {
+                SessionState::Idle
+            } else {
+                SessionState::Running
+            },
+            pid: self.pid,
+            text: output_text(&bytes),
+            truncated: state.cursor.saturating_sub(since) > bytes.len() as u64,
+        }
     }
     pub fn output(&self, cursor: u64) -> Output {
         let state = self.state.lock().unwrap();

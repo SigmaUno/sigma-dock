@@ -190,6 +190,46 @@ pub struct PlanningNotes {
     pub text: String,
     pub revision: u64,
 }
+/// A bounded local transcript checkpoint, never proof of a live process.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionContext {
+    pub worker_id: String,
+    pub recorded_at: u64,
+    pub last_activity: u64,
+    pub state: SessionState,
+    pub pid: Option<u32>,
+    pub text: String,
+    pub truncated: bool,
+}
+pub fn unix_time() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+/// Plain-text transcript excerpt, stripping CSI, OSC and other escape payloads.
+pub fn output_text(bytes: &[u8]) -> String {
+    struct Text(String);
+    impl vte::Perform for Text {
+        fn print(&mut self, c: char) {
+            self.0.push(c);
+        }
+        fn execute(&mut self, byte: u8) {
+            match byte {
+                b'\n' | b'\r' => self.0.push('\n'),
+                b'\t' => self.0.push('\t'),
+                8 => {
+                    self.0.pop();
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut text = Text(String::new());
+    vte::Parser::new().advance(&mut text, bytes);
+    task_text(&text.0, 16 * 1024)
+}
+
 /// Strip terminal control characters and bound task data on UTF-8 boundaries.
 pub fn task_text(text: &str, limit: usize) -> String {
     let mut clean: String = text
@@ -382,5 +422,17 @@ mod tests {
         let bounded = task_text(&"界".repeat(100), 32);
         assert!(bounded.len() <= 32);
         assert!(bounded.ends_with("[trimmed]"));
+    }
+}
+
+#[cfg(test)]
+mod transcript_tests {
+    #[test]
+    fn strips_escape_payloads_without_executing_them() {
+        assert_eq!(
+            super::output_text(b"\x1b[31mred\x1b[0m\x1b]0;secret-title\x07 text"),
+            "red text"
+        );
+        assert!(super::output_text(&vec![b'x'; 20000]).len() <= 16384);
     }
 }

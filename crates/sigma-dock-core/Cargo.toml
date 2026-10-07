@@ -14,3 +14,4 @@ description = "Domain model and local IPC for SigmaDock agent workspaces"
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+vte = "0.15"

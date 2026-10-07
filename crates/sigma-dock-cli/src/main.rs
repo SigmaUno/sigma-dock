@@ -85,12 +85,21 @@ enum Commands {
         worker_id: String,
         message: String,
     },
+    Unfinished,
+    Context {
+        worker_id: String,
+        #[arg(long)]
+        clear: bool,
+    },
     Resume {
         worker_id: String,
         #[arg(long)]
         prompt: Option<String>,
         #[arg(long = "continue")]
         continue_session: bool,
+        /// Confirm you verified an interrupted session's old process has stopped.
+        #[arg(long)]
+        acknowledge_unknown: bool,
     },
     Stop {
         worker_id: String,
@@ -229,13 +238,23 @@ fn main() -> Result<()> {
             "message_worker",
             json!({"worker_id":worker_id,"message":message}),
         ),
+        Commands::Unfinished => ("list_unfinished", json!({})),
+        Commands::Context { worker_id, clear } => (
+            if clear {
+                "clear_session_context"
+            } else {
+                "session_context"
+            },
+            json!({"worker_id":worker_id}),
+        ),
         Commands::Resume {
             worker_id,
             prompt,
             continue_session,
+            acknowledge_unknown,
         } => (
             "resume_worker",
-            json!({"worker_id":worker_id,"prompt":prompt,"continue":continue_session}),
+            json!({"worker_id":worker_id,"prompt":prompt,"continue":continue_session,"acknowledge_unknown":acknowledge_unknown}),
         ),
         Commands::Stop { worker_id } => ("stop_worker", json!({"worker_id":worker_id})),
         Commands::Archive { worker_id, cleanup } => (

@@ -5407,6 +5407,7 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
+ "vte",
 ]
 
 [[package]]

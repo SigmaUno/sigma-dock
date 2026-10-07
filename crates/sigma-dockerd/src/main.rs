@@ -46,6 +46,8 @@ struct Daemon {
     store: Store,
     workers: HashMap<String, Worker>,
     sessions: HashMap<String, Arc<Session>>,
+    context_floor: HashMap<String, u64>,
+    checkpoints: HashMap<String, (std::time::Instant, (u64, u64, SessionState))>,
     ports: PortPool,
     forges: HashMap<String, Arc<RestForge>>,
     state_dir: PathBuf,
@@ -58,6 +60,27 @@ impl Daemon {
     fn sync(&mut self) -> Result<()> {
         for (id, session) in &self.sessions {
             if let Some(worker) = self.workers.get_mut(id) {
+                let key = session.checkpoint_key();
+                let changed = self
+                    .checkpoints
+                    .get(id)
+                    .is_none_or(|(_, previous)| previous != &key);
+                let due = self
+                    .checkpoints
+                    .get(id)
+                    .is_none_or(|(last, _)| last.elapsed() >= Duration::from_secs(2));
+                let stopped = key.2 == SessionState::Exited
+                    && self
+                        .checkpoints
+                        .get(id)
+                        .is_none_or(|(_, previous)| previous.2 != SessionState::Exited);
+                if !worker.archived && changed && (due || stopped) {
+                    self.store.save_context(
+                        &session.checkpoint(id, self.context_floor.get(id).copied().unwrap_or(0)),
+                    )?;
+                    self.checkpoints
+                        .insert(id.clone(), (std::time::Instant::now(), key));
+                }
                 let (state, code) = session.facts();
                 if worker.facts.session != state || worker.facts.exit_code != code {
                     worker.facts.session = state;
@@ -206,6 +229,46 @@ impl Daemon {
                 workers.sort_by_key(|w| w.created_at);
                 Ok(serde_json::to_value(workers)?)
             }
+            "list_unfinished" => {
+                let mut values = Vec::new();
+                for worker in self.workers.values().filter(|worker| !worker.archived) {
+                    let runtime = self
+                        .sessions
+                        .get(&worker.id)
+                        .map(|session| {
+                            if session.facts().0 == SessionState::Exited {
+                                "stopped"
+                            } else {
+                                "running"
+                            }
+                        })
+                        .unwrap_or(if worker.facts.session == SessionState::Lost {
+                            "unknown"
+                        } else {
+                            "stopped"
+                        });
+                    values.push(json!({"worker":worker,"project":self.project(&worker.project_id)?,"context":self.store.context(&worker.id)?,"runtime":runtime,
+                        "conversation_supported":matches!(worker.agent.as_str(),"claude"|"codex"|"gemini"|"opencode")}));
+                }
+                values.sort_by_key(|value| {
+                    std::cmp::Reverse(value["worker"]["created_at"].as_u64().unwrap_or(0))
+                });
+                Ok(json!(values))
+            }
+            "session_context" => Ok(serde_json::to_value(
+                self.store.context(&self.worker(&params)?.id)?,
+            )?),
+            "clear_session_context" => {
+                let id = self.worker(&params)?.id.clone();
+                self.store.clear_context(&id)?;
+                if let Some(session) = self.sessions.get(&id) {
+                    let key = session.checkpoint_key();
+                    self.context_floor.insert(id.clone(), key.0);
+                    self.checkpoints
+                        .insert(id, (std::time::Instant::now(), key));
+                }
+                Ok(json!(true))
+            }
             "get_worker_status" => {
                 let worker = self.worker(&params)?;
                 Ok(
@@ -302,6 +365,13 @@ impl Daemon {
                 {
                     bail!("worker is still running");
                 }
+                if worker.facts.session == SessionState::Lost
+                    && params["acknowledge_unknown"] != true
+                {
+                    bail!(
+                        "previous process state is unknown; verify it stopped, then explicitly acknowledge_unknown before resuming"
+                    );
+                }
                 self.check_capacity()?;
                 let session = self.start_session(
                     &worker,
@@ -314,6 +384,8 @@ impl Daemon {
                     let _ = session.stop();
                     return Err(error);
                 }
+                self.context_floor.remove(&worker.id);
+                self.checkpoints.remove(&worker.id);
                 self.sessions.insert(worker.id.clone(), session);
                 self.workers.insert(worker.id.clone(), worker.clone());
                 Ok(serde_json::to_value(worker)?)
@@ -360,6 +432,9 @@ impl Daemon {
                     }
                     sigma_dock_git::remove(&project.path, &worker.worktree)?;
                 }
+                self.store.clear_context(&worker.id)?;
+                self.context_floor.remove(&worker.id);
+                self.checkpoints.remove(&worker.id);
                 worker.archived = true;
                 self.store.save_worker(&worker)?;
                 self.ports.release(worker.port);
@@ -654,6 +729,8 @@ fn main() -> Result<()> {
         store,
         workers,
         sessions: HashMap::new(),
+        checkpoints: HashMap::new(),
+        context_floor: HashMap::new(),
         ports,
         forges: HashMap::new(),
         state_dir: args.state_dir,

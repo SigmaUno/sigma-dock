@@ -29,6 +29,7 @@ This is an implementation roadmap, not a claim that every phase is complete.
 - [x] UI reconnects to running daemon sessions.
 - [x] Native project/worker creation form and lifecycle controls.
 - [ ] Desktop notifications and full text editing/IME in forms.
+- [x] Bounded local transcript checkpoints, unfinished-session UI, explicit unknown-state acknowledgement and context clearing.
 - [ ] Recover live PTYs across daemon restarts; currently explicit lost-state and manual resume.
 - [x] Signal-driven daemon shutdown stops sessions, reaps children and persists observed state.
 - [ ] Robust process-group cleanup for child tools that detach or ignore hangup.

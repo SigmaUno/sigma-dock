@@ -2,6 +2,7 @@
 mod appearance_ui;
 mod bootstrap;
 mod preferences;
+mod recovery_ui;
 mod theme;
 mod update_ui;
 mod updates;
@@ -118,6 +119,10 @@ struct Workspace {
     settings_focus: gpui::FocusHandle,
     settings_editor: Option<(usize, String)>,
     settings_error: Option<String>,
+    recovery_open: bool,
+    recovery_entries: Vec<serde_json::Value>,
+    recovery_error: Option<String>,
+    recovery_selected: Option<String>,
     theme: theme::Theme,
     _appearance_subscription: gpui::Subscription,
     checker: Arc<std::sync::Mutex<updates::Checker>>,
@@ -137,12 +142,23 @@ impl Workspace {
             loop {
                 cx.background_executor().timer(Duration::from_secs(2)).await;
                 let client = poll_client.clone();
-                let result = cx
-                    .background_executor()
-                    .spawn(async move { client.workers() })
-                    .await;
+                let result =
+                    cx.background_executor()
+                        .spawn(async move {
+                            (client.workers(), client.call("list_unfinished", json!({})))
+                        })
+                        .await;
                 if this
                     .update(cx, |this, cx| {
+                        let (result, recovery) = result;
+                        match recovery {
+                            Ok(value) => {
+                                this.recovery_entries =
+                                    serde_json::from_value(value).unwrap_or_default();
+                                this.recovery_error = None;
+                            }
+                            Err(error) => this.recovery_error = Some(error.to_string()),
+                        }
                         match result {
                             Ok(workers) => {
                                 this.workers = workers;
@@ -176,6 +192,10 @@ impl Workspace {
             cx.notify();
         });
         Self {
+            recovery_open: true,
+            recovery_entries: Vec::new(),
+            recovery_error: None,
+            recovery_selected: None,
             theme: theme::Theme::for_appearance(window.appearance()),
             _appearance_subscription: appearance_subscription,
             checker: Arc::new(std::sync::Mutex::new(updates::Checker::default())),
@@ -467,6 +487,19 @@ impl Render for Workspace {
                     cx.notify();
                 })),
         );
+        sidebar = sidebar.child(
+            div()
+                .id("show-unfinished")
+                .p_2()
+                .rounded_md()
+                .bg(rgb(self.theme.button))
+                .cursor_pointer()
+                .child("Unfinished sessions")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.recovery_open = !this.recovery_open;
+                    cx.notify();
+                })),
+        );
         let mut content = div().flex_1().h_full().flex().flex_col().gap_4().p_5();
         content = content.child(
             div()
@@ -493,6 +526,9 @@ impl Render for Workspace {
         }
         if let Some(update) = &self.available_update {
             content = content.child(self.update_notice(update, cx));
+        }
+        if self.recovery_open {
+            content = content.child(self.recovery_panel(cx));
         }
         if self.form_open {
             let mut form = div()
