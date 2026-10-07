@@ -1,4 +1,5 @@
-//! Catppuccin Latte/Mocha. Source and MIT license: packaging/licenses/Catppuccin.txt.
+//! Neutral light chrome with Catppuccin Latte terminal colors, and Catppuccin Mocha for dark.
+//! Catppuccin source and MIT license: packaging/licenses/Catppuccin.txt.
 use crate::preferences::Appearance;
 use gpui::WindowAppearance;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,26 +19,38 @@ pub struct Theme {
     pub error: u32,
     pub focus: u32,
     pub link: u32,
+    /// Board card background.
+    pub surface: u32,
+    /// Agent badge background.
+    pub chip: u32,
+    /// "Needs you" lane.
+    pub attention: u32,
+    /// "In review" lane.
+    pub review: u32,
     pub ansi: [u32; 16],
 }
 impl Theme {
-    pub fn latte() -> Self {
+    pub fn light() -> Self {
         Self {
-            base: 0xeff1f5,
-            sidebar: 0xdce0e8,
-            panel: 0xe6e9ef,
-            card: 0xccd0da,
-            button: 0xbcc0cc,
-            selection: 0xacb0be,
-            border: 0x9ca0b0,
-            text: 0x4c4f69,
-            muted: 0x5c5f77,
-            accent: 0x8839ef,
-            success: 0x40a02b,
-            warning: 0xdf8e1d,
-            error: 0xd20f39,
-            focus: 0x7287fd,
-            link: 0x1e66f5,
+            base: 0xf6f7f9,
+            sidebar: 0xf1f2f5,
+            panel: 0xeceef2,
+            card: 0xe6e8ec,
+            button: 0xe6e8ec,
+            selection: 0xdfe8fb,
+            border: 0xdfe2e7,
+            text: 0x1f2329,
+            muted: 0x5c636e,
+            accent: 0x1a64d6,
+            success: 0x2b8a3e,
+            warning: 0xb35c00,
+            error: 0xcf222e,
+            focus: 0x3b82f6,
+            link: 0x1a64d6,
+            surface: 0xffffff,
+            chip: 0xeceef1,
+            attention: 0xc75f00,
+            review: 0x7c5cd6,
             ansi: [
                 0x5c5f77, 0xd20f39, 0x40a02b, 0xdf8e1d, 0x1e66f5, 0xea76cb, 0x179299, 0xacb0be,
                 0x6c6f85, 0xd20f39, 0x40a02b, 0xdf8e1d, 0x1e66f5, 0xea76cb, 0x179299, 0xbcc0cc,
@@ -61,6 +74,10 @@ impl Theme {
             error: 0xf38ba8,
             focus: 0xb4befe,
             link: 0x89b4fa,
+            surface: 0x181825,
+            chip: 0x313244,
+            attention: 0xfab387,
+            review: 0xcba6f7,
             ansi: [
                 0x45475a, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xa6adc8,
                 0x585b70, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xbac2de,
@@ -69,7 +86,7 @@ impl Theme {
     }
     pub fn for_appearance(appearance: WindowAppearance) -> Self {
         match appearance {
-            WindowAppearance::Light | WindowAppearance::VibrantLight => Self::latte(),
+            WindowAppearance::Light | WindowAppearance::VibrantLight => Self::light(),
             WindowAppearance::Dark | WindowAppearance::VibrantDark => Self::mocha(),
         }
     }
@@ -87,15 +104,15 @@ impl Theme {
 mod tests {
     use super::*;
     #[test]
-    fn system_modes_choose_the_official_palette() {
+    fn system_modes_choose_the_matching_palette() {
         assert_eq!(
             Theme::for_appearance(WindowAppearance::Light).base,
-            0xeff1f5
+            0xf6f7f9
         );
         assert_eq!(Theme::for_appearance(WindowAppearance::Dark).base, 0x1e1e2e);
         assert_eq!(
             Theme::for_appearance(WindowAppearance::VibrantLight),
-            Theme::latte()
+            Theme::light()
         );
         assert_eq!(
             Theme::for_appearance(WindowAppearance::VibrantDark),
@@ -109,12 +126,12 @@ mod tests {
             follow_system: false,
             ..Appearance::default()
         };
-        assert_eq!(Theme::latte().terminal(&appearance).background, 0x123456);
+        assert_eq!(Theme::light().terminal(&appearance).background, 0x123456);
         assert_eq!(Theme::mocha().terminal(&appearance).background, 0x123456);
         appearance.follow_system = true;
         assert_eq!(
-            Theme::latte().terminal(&appearance).background,
-            Theme::latte().base
+            Theme::light().terminal(&appearance).background,
+            Theme::light().base
         );
         assert_eq!(
             Theme::mocha().terminal(&appearance).background,
@@ -139,10 +156,14 @@ mod tests {
             let b = luminance(b);
             (a.max(b) + 0.05) / (a.min(b) + 0.05)
         };
-        for theme in [Theme::latte(), Theme::mocha()] {
+        for theme in [Theme::light(), Theme::mocha()] {
             assert!(contrast(theme.text, theme.base) >= 4.5);
             assert!(contrast(theme.muted, theme.panel) >= 4.5);
             assert!(contrast(theme.base, theme.accent) >= 4.5);
+            assert!(contrast(theme.muted, theme.surface) >= 4.5);
+            for lane in [theme.link, theme.attention, theme.review, theme.success] {
+                assert!(contrast(lane, theme.surface) >= 3.0);
+            }
         }
     }
 }

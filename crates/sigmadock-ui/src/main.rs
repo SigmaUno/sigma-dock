@@ -1,5 +1,6 @@
 //! Native board and reconnectable terminal, backed by the daemon's PTYs.
 mod appearance_ui;
+mod board_ui;
 mod bootstrap;
 mod ci_ui;
 mod preferences;
@@ -16,7 +17,7 @@ use gpui::{
     div, prelude::*, px, rgb, size,
 };
 use serde_json::json;
-use sigmadock_core::{Client, Column, Output, Worker, column, socket_path};
+use sigmadock_core::{Client, Output, Project, Worker, socket_path};
 use sigmadock_terminal::{TerminalConfig, TerminalView};
 use std::{
     io::{self, Read, Write},
@@ -103,6 +104,9 @@ impl Read for RemoteReader {
 struct Workspace {
     client: Client,
     workers: Vec<Worker>,
+    projects: Vec<Project>,
+    selected_project: Option<String>,
+    daemon_connected: bool,
     error: Option<String>,
     terminal: Option<Entity<TerminalView>>,
     selected: Option<String>,
@@ -144,24 +148,34 @@ struct Workspace {
 impl Workspace {
     fn new(client: Client, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let initial = client.workers();
+        let daemon_connected = initial.is_ok();
         let (workers, error) = match initial {
             Ok(workers) => (workers, None),
             Err(error) => (Vec::new(), Some(error.to_string())),
         };
+        let projects = list_projects(&client).unwrap_or_default();
         let poll_client = client.clone();
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(2)).await;
                 let client = poll_client.clone();
-                let result =
-                    cx.background_executor()
-                        .spawn(async move {
-                            (client.workers(), client.call("list_unfinished", json!({})))
-                        })
-                        .await;
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        (
+                            client.workers(),
+                            client.call("list_unfinished", json!({})),
+                            list_projects(&client),
+                        )
+                    })
+                    .await;
                 if this
                     .update(cx, |this, cx| {
-                        let (result, recovery) = result;
+                        let (result, recovery, projects) = result;
+                        if let Ok(projects) = projects {
+                            this.projects = projects;
+                        }
+                        this.daemon_connected = result.is_ok();
                         match recovery {
                             Ok(value) => {
                                 this.recovery_entries =
@@ -230,6 +244,9 @@ impl Workspace {
             settings_error,
             client,
             workers,
+            projects,
+            selected_project: None,
+            daemon_connected,
             error,
             terminal: None,
             selected: None,
@@ -355,12 +372,17 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let result = cx.background_executor().spawn(async move {
                 let project = client.call("add_project", json!({"path":path}))?;
-                client.call("spawn_worker", json!({"project_id":project["id"],"title":title,"agent":agent,"prompt":if prompt.is_empty() { None } else { Some(prompt) }}))
+                let worker = client.call("spawn_worker", json!({"project_id":project["id"],"title":title,"agent":agent,"prompt":if prompt.is_empty() { None } else { Some(prompt) }}))?;
+                Ok::<_, anyhow::Error>((serde_json::from_value::<Project>(project).ok(), worker))
             }).await;
             let _ = this.update(cx, |this, cx| {
                 this.busy = false;
                 match result {
-                    Ok(value) => {
+                    Ok((project, value)) => {
+                        if let Some(project) = project {
+                            this.selected_project = Some(project.id.clone());
+                            if !this.projects.iter().any(|known| known.id == project.id) { this.projects.push(project); }
+                        }
                         if let Ok(worker) = serde_json::from_value::<Worker>(value) { this.workers.push(worker); }
                         this.form_open = false; this.fields[1].clear(); this.fields[2].clear();
                     }
@@ -472,70 +494,7 @@ impl Drop for Workspace {
 }
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut sidebar = div()
-            .w(px(220.))
-            .h_full()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .p_4()
-            .bg(rgb(self.theme.sidebar))
-            .child(
-                div()
-                    .text_xl()
-                    .text_color(rgb(self.theme.accent))
-                    .child("SigmaDock"),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(self.theme.muted))
-                    .child("LOCAL WORKSPACE"),
-            );
-        for worker in &self.workers {
-            let id = worker.id.clone();
-            sidebar = sidebar.child(
-                div()
-                    .id(SharedString::from(format!("side-{id}")))
-                    .cursor_pointer()
-                    .p_2()
-                    .rounded_md()
-                    .bg(rgb(self.theme.card))
-                    .child(worker.title.clone())
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_worker(id.clone(), window, cx)
-                    })),
-            );
-        }
-        sidebar = sidebar.child(
-            div()
-                .id("new-worker")
-                .cursor_pointer()
-                .p_3()
-                .rounded_md()
-                .bg(rgb(self.theme.accent))
-                .text_color(rgb(self.theme.base))
-                .child("+ New task")
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.form_open = !this.form_open;
-                    this.active_field = 0;
-                    this.form_focus.focus(window);
-                    cx.notify();
-                })),
-        );
-        sidebar = sidebar.child(
-            div()
-                .id("show-unfinished")
-                .p_2()
-                .rounded_md()
-                .bg(rgb(self.theme.button))
-                .cursor_pointer()
-                .child("Unfinished sessions")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.recovery_open = !this.recovery_open;
-                    cx.notify();
-                })),
-        );
+        let sidebar = self.sidebar(cx);
         let mut content = div()
             .id("workspace-content")
             .overflow_y_scroll()
@@ -543,41 +502,10 @@ impl Render for Workspace {
             .h_full()
             .flex()
             .flex_col()
-            .gap_4()
-            .p_5();
-        content = content.child(
-            div()
-                .flex()
-                .justify_between()
-                .items_center()
-                .child(div().text_xl().child("Workspace board"))
-                .child(
-                    div()
-                        .id("terminal-settings")
-                        .tab_index(0)
-                        .border_1()
-                        .border_color(rgb(self.theme.border))
-                        .focus(|style| style.border_color(rgb(self.theme.focus)))
-                        .p_2()
-                        .rounded_md()
-                        .bg(rgb(self.theme.button))
-                        .hover(|style| style.bg(rgb(self.theme.selection)))
-                        .cursor_pointer()
-                        .child("⚙ Settings")
-                        .tooltip(|_, cx| cx.new(|_| appearance_ui::SettingsTooltip).into())
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.toggle_settings(window, cx)),
-                        )
-                        .on_key_down(cx.listener(
-                            |this, event: &gpui::KeyDownEvent, window, cx| {
-                                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                    this.toggle_settings(window, cx);
-                                    cx.stop_propagation();
-                                }
-                            },
-                        )),
-                ),
-        );
+            .gap_6()
+            .px_8()
+            .py_6();
+        content = content.child(self.board_header(cx));
         if let Some(error) = &self.error {
             content = content.child(
                 div()
@@ -656,63 +584,7 @@ impl Render for Workspace {
             );
             content = content.child(form);
         }
-        let mut board = div().flex().gap_3();
-        for status in Column::ALL {
-            let status_color = match status {
-                Column::Working => self.theme.link,
-                Column::NeedsYou => self.theme.error,
-                Column::InReview => self.theme.warning,
-                Column::ReadyToMerge => self.theme.success,
-            };
-            let mut lane = div()
-                .flex_1()
-                .min_h(px(170.))
-                .flex()
-                .flex_col()
-                .gap_2()
-                .p_3()
-                .rounded_lg()
-                .bg(rgb(self.theme.panel))
-                .border_t_2()
-                .border_color(rgb(status_color))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(self.theme.muted))
-                        .child(status.label()),
-                );
-            for worker in self
-                .workers
-                .iter()
-                .filter(|worker| column(&worker.facts) == status)
-            {
-                let id = worker.id.clone();
-                lane = lane.child(
-                    div()
-                        .id(SharedString::from(format!("card-{id}")))
-                        .cursor_pointer()
-                        .p_3()
-                        .rounded_md()
-                        .bg(rgb(self.theme.button))
-                        .hover(|style| style.bg(rgb(self.theme.selection)))
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(worker.title.clone())
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(self.theme.muted))
-                                .child(format!("{} · :{}", worker.agent, worker.port)),
-                        )
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_worker(id.clone(), window, cx)
-                        })),
-                );
-            }
-            board = board.child(lane);
-        }
-        content = content.child(board);
+        content = content.child(self.board(cx));
         if let Some(terminal) = &self.terminal {
             let selected = self
                 .workers
@@ -821,6 +693,7 @@ impl Render for Workspace {
                     .child("Select a worker to connect to its terminal"),
             );
         }
+        content = content.child(self.footer());
         div()
             .size_full()
             .relative()
@@ -842,6 +715,11 @@ impl Render for Workspace {
                 root.child(self.settings_panel(cx))
             })
     }
+}
+fn list_projects(client: &Client) -> Result<Vec<Project>> {
+    Ok(serde_json::from_value(
+        client.call("list_projects", json!({}))?,
+    )?)
 }
 fn main() -> Result<()> {
     let args = Args::parse();
