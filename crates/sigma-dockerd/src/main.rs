@@ -539,6 +539,18 @@ fn external_call(state: &Arc<Mutex<Daemon>>, method: &str, params: &Value) -> Re
         }
         (worker.clone(), state.forges[&worker.id].clone())
     };
+    if method == "ci_preview" {
+        let report = forge.ci_preview(&worker.branch)?;
+        let daemon = state.lock().unwrap();
+        if daemon
+            .workers
+            .get(&worker.id)
+            .is_none_or(|current| current.archived || current.forge != worker.forge)
+        {
+            bail!("worker configuration changed while loading CI");
+        }
+        return Ok(serde_json::to_value(report)?);
+    }
     if method == "ci_feedback" || method == "send_ci_feedback" {
         let report = forge.ci_feedback(&worker.branch)?;
         if method == "send_ci_feedback" {
@@ -642,7 +654,9 @@ fn serve(mut stream: UnixStream, state: Arc<Mutex<Daemon>>) -> Result<()> {
         Err(anyhow::anyhow!("invalid JSON-RPC request"))
     } else if matches!(
         request["method"].as_str(),
-        Some("refresh_facts" | "review_feedback" | "ci_feedback" | "send_ci_feedback")
+        Some(
+            "refresh_facts" | "review_feedback" | "ci_feedback" | "send_ci_feedback" | "ci_preview"
+        )
     ) {
         external_call(
             &state,

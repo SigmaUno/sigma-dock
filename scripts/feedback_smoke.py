@@ -119,6 +119,9 @@ with open('received.txt','w') as out:
         rpc('configure_forge', {'worker_id': worker['id'], 'forge': {'kind': 'forgejo', 'api_url': 'http://127.0.0.1:'+str(server.server_address[1])+'/api/v1', 'owner': 'owner', 'repo': 'repo', 'token_env': 'SIGMA_TEST_NO_TOKEN', 'actions': True}})
         rpc('refresh_facts', {'worker_id': worker['id']})
         assert rpc('get_worker_status', {'worker_id': worker['id']})['worker']['facts']['checks'] == 'failed'
+        rich = rpc('ci_preview', {'worker_id': worker['id']})
+        assert rich['head_sha'] == sha and rich['current_head'] == sha and rich['refreshed_at']
+        assert any(entry['kind'] == 'job' and 'assertion failed' in entry['details'] for entry in rich['entries'])
         preview = rpc('ci_feedback', {'worker_id': worker['id']})
         assert preview['includes_job_logs'] and 'assertion failed' in preview['text']
         received = Path(worker['worktree'])/'received.txt'

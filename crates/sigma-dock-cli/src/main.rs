@@ -85,6 +85,9 @@ enum Commands {
         worker_id: String,
         message: String,
     },
+    CiPreview {
+        worker_id: String,
+    },
     Unfinished,
     Context {
         worker_id: String,
@@ -238,6 +241,7 @@ fn main() -> Result<()> {
             "message_worker",
             json!({"worker_id":worker_id,"message":message}),
         ),
+        Commands::CiPreview { worker_id } => ("ci_preview", json!({"worker_id":worker_id})),
         Commands::Unfinished => ("list_unfinished", json!({})),
         Commands::Context { worker_id, clear } => (
             if clear {

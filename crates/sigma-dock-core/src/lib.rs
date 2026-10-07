@@ -436,3 +436,23 @@ mod transcript_tests {
         assert!(super::output_text(&vec![b'x'; 20000]).len() <= 16384);
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CiEntry {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub state: String,
+    pub url: Option<String>,
+    pub details: String,
+    pub truncated: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CiPreview {
+    pub head_sha: String,
+    pub current_head: String,
+    pub refreshed_at: u64,
+    pub entries: Vec<CiEntry>,
+    pub warnings: Vec<String>,
+    pub truncated: bool,
+}

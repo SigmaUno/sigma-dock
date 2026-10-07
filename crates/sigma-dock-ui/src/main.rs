@@ -1,6 +1,7 @@
 //! Native board and reconnectable terminal, backed by the daemon's PTYs.
 mod appearance_ui;
 mod bootstrap;
+mod ci_ui;
 mod preferences;
 mod recovery_ui;
 mod theme;
@@ -119,6 +120,11 @@ struct Workspace {
     settings_focus: gpui::FocusHandle,
     settings_editor: Option<(usize, String)>,
     settings_error: Option<String>,
+    ci_open: bool,
+    ci_report: Option<sigma_dock_core::CiPreview>,
+    ci_loading: bool,
+    ci_error: Option<String>,
+    ci_expanded: Option<String>,
     recovery_open: bool,
     recovery_entries: Vec<serde_json::Value>,
     recovery_error: Option<String>,
@@ -192,6 +198,11 @@ impl Workspace {
             cx.notify();
         });
         Self {
+            ci_open: false,
+            ci_report: None,
+            ci_loading: false,
+            ci_error: None,
+            ci_expanded: None,
             recovery_open: true,
             recovery_entries: Vec::new(),
             recovery_error: None,
@@ -225,6 +236,11 @@ impl Workspace {
         }
     }
     fn open_worker(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.details.clear();
+        self.ci_open = false;
+        self.ci_report = None;
+        self.ci_error = None;
+        self.ci_expanded = None;
         self.connection.store(false, Ordering::Relaxed);
         self.connection = Arc::new(AtomicBool::new(true));
         let reader = RemoteReader {
@@ -277,6 +293,7 @@ impl Workspace {
         self.busy = true;
         self.error = None;
         let client = self.client.clone();
+        let owner = params["worker_id"].as_str().map(str::to_owned);
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -286,6 +303,13 @@ impl Workspace {
                 this.busy = false;
                 match result {
                     Ok(value) => {
+                        if owner
+                            .as_ref()
+                            .is_some_and(|owner| this.selected.as_ref() != Some(owner))
+                        {
+                            cx.notify();
+                            return;
+                        }
                         if let Some(text) = value
                             .as_str()
                             .or_else(|| value.get("text").and_then(serde_json::Value::as_str))
@@ -500,7 +524,15 @@ impl Render for Workspace {
                     cx.notify();
                 })),
         );
-        let mut content = div().flex_1().h_full().flex().flex_col().gap_4().p_5();
+        let mut content = div()
+            .id("workspace-content")
+            .overflow_y_scroll()
+            .flex_1()
+            .h_full()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .p_5();
         content = content.child(
             div()
                 .flex()
@@ -690,7 +722,11 @@ impl Render for Workspace {
                             .hover(|style| style.bg(rgb(self.theme.selection)))
                             .child(label)
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.run_action(method, json!({"worker_id":id}), cx)
+                                if method == "ci_feedback" {
+                                    this.load_ci(cx);
+                                } else {
+                                    this.run_action(method, json!({"worker_id":id}), cx)
+                                }
                             })),
                     );
                 }
@@ -709,14 +745,29 @@ impl Render for Workspace {
                 }
                 content = content.child(actions);
             }
+            if self.ci_open {
+                content = content.child(self.ci_panel(cx));
+            }
             if !self.details.is_empty() {
                 content = content.child(
                     div()
-                        .max_h(px(80.))
-                        .overflow_hidden()
+                        .id("feedback-detail")
+                        .max_h(px(120.))
+                        .overflow_y_scroll()
                         .text_sm()
                         .text_color(rgb(self.theme.muted))
-                        .child(self.details.clone()),
+                        .child(self.details.clone())
+                        .child(
+                            div()
+                                .id("copy-feedback-detail")
+                                .cursor_pointer()
+                                .child("Copy feedback")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                        this.details.clone(),
+                                    ))
+                                })),
+                        ),
                 );
             }
             content = content.child(div().flex_1().min_h(px(200.)).child(terminal.clone()));

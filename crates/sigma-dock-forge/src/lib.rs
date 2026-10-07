@@ -1,4 +1,5 @@
 //! Explicitly configured forge APIs only. Redirects are disabled to avoid credential leaks.
+mod ci;
 use anyhow::{Context, Result, bail};
 use reqwest::{Url, blocking::Client, redirect::Policy};
 use serde_json::Value;
@@ -27,6 +28,7 @@ pub trait Forge {
     fn facts(&self, branch: &str) -> Result<Facts>;
     fn feedback(&self, branch: &str) -> Result<String>;
     fn ci_feedback(&self, branch: &str) -> Result<CiFeedback>;
+    fn ci_preview(&self, branch: &str) -> Result<sigma_dock_core::CiPreview>;
 }
 pub struct RestForge {
     config: ForgeConfig,
@@ -208,7 +210,7 @@ impl RestForge {
                 continue;
             }
             let key = (
-                run["workflow_id"].as_str().unwrap_or("unknown").into(),
+                run["workflow_id"].to_string(),
                 run["event"].as_str().unwrap_or("unknown").into(),
             );
             if latest
@@ -447,6 +449,9 @@ impl Forge for RestForge {
         }
         Ok(task_text(&text, 32_000))
     }
+    fn ci_preview(&self, branch: &str) -> Result<sigma_dock_core::CiPreview> {
+        self.preview(branch)
+    }
     fn ci_feedback(&self, branch: &str) -> Result<CiFeedback> {
         let pull = self.pull(branch)?.context("no pull request for worker")?;
         let sha = pull["head"]["sha"].as_str().context("missing PR head")?;
@@ -582,7 +587,9 @@ mod tests {
         );
         assert_eq!(check_state(&json!({}), None), Checks::Unknown);
     }
-    fn mock(replies: Vec<(&str, &str, &str)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    pub(super) fn mock(
+        replies: Vec<(&str, &str, &str)>,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
         use std::{
             io::{BufRead, BufReader, Write},
             net::TcpListener,
@@ -631,7 +638,7 @@ mod tests {
         });
         (url, thread)
     }
-    fn local_forge(url: String) -> RestForge {
+    pub(super) fn local_forge(url: String) -> RestForge {
         RestForge::new(ForgeConfig {
             kind: "forgejo".into(),
             api_url: url,
@@ -812,5 +819,105 @@ mod tests {
             combine_checks(Checks::Passed, Checks::Pending),
             Checks::Pending
         );
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn github_preview_pins_commit_filters_reruns_and_detects_changed_head() {
+        let sha = "a".repeat(40);
+        let next = "b".repeat(40);
+        let pulls = json!([{"number":1,"head":{"ref":"sigma/task"}}]).to_string();
+        let pull = json!({"head":{"sha":sha}}).to_string();
+        let changed = json!({"head":{"sha":next}}).to_string();
+        let checks=json!({"total_count":3,"check_runs":[{"id":9,"name":"failed-check","head_sha":sha,"status":"completed","conclusion":"failure","output":{"summary":"assertion failed"}}, {"id":10,"name":"running-check","head_sha":sha,"status":"in_progress"}, {"id":11,"name":"older-check","head_sha":next,"conclusion":"failure"}]}).to_string();
+        let runs=json!({"total_count":3,"workflow_runs":[{"id":20,"workflow_id":1,"event":"push","head_sha":sha,"conclusion":"failure"},{"id":21,"name":"latest-workflow","workflow_id":1,"event":"push","head_sha":sha,"conclusion":"success"},{"id":22,"workflow_id":2,"event":"push","head_sha":next,"conclusion":"failure"}]}).to_string();
+        let jobs=json!({"total_count":2,"jobs":[{"id":33,"head_sha":sha,"name":"cancelled-job","conclusion":"cancelled","html_url":"https://github.com/owner/repo/actions/runs/21/job/33","steps":[{"name":"test step","conclusion":"skipped"}]},{"id":34,"head_sha":next,"name":"old-job","conclusion":"failure"}]}).to_string();
+        let (url, server) = tests::mock(vec![
+            ("200 OK", "", &pulls),
+            ("200 OK", "", &pull),
+            ("200 OK", "", &checks),
+            (
+                "200 OK",
+                "",
+                r#"[{"path":"src/main.rs","start_line":10,"message":"annotation"}]"#,
+            ),
+            (
+                "200 OK",
+                "",
+                r#"{"statuses":[{"id":3,"context":"legacy-status","state":"success"}]}"#,
+            ),
+            ("200 OK", "", &runs),
+            ("200 OK", "", &jobs),
+            ("200 OK", "", &pulls),
+            ("200 OK", "", &changed),
+        ]);
+        let mut forge = tests::local_forge(url);
+        forge.config.kind = "github".into();
+        let preview = forge.ci_preview("sigma/task").unwrap();
+        assert_eq!(preview.head_sha, sha);
+        assert_eq!(preview.current_head, next);
+        assert_eq!(preview.entries.len(), 5);
+        assert!(
+            preview
+                .entries
+                .iter()
+                .find(|item| item.name == "failed-check")
+                .unwrap()
+                .details
+                .contains("annotation")
+        );
+        assert!(
+            preview
+                .entries
+                .iter()
+                .any(|item| item.name == "cancelled-job"
+                    && item.state == "cancelled"
+                    && item.details.contains("skipped"))
+        );
+        assert!(
+            preview
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("stale"))
+        );
+        let requests = server.join().unwrap();
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.contains("/actions/runs/21/jobs"))
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request.contains("/actions/runs/20/jobs")
+                    || request.contains("/logs"))
+        );
+    }
+    #[test]
+    fn forgejo_without_pr_uses_branch_head_and_does_not_fetch_disabled_actions() {
+        let sha = "a".repeat(40);
+        let branch = json!({"commit":{"sha":sha}}).to_string();
+        let (url, server) = tests::mock(vec![
+            ("200 OK", "", "[]"),
+            ("200 OK", "", &branch),
+            (
+                "200 OK",
+                "",
+                r#"{"statuses":[{"context":"build","state":"success"}]}"#,
+            ),
+            ("200 OK", "", "[]"),
+            ("200 OK", "", &branch),
+        ]);
+        let preview = tests::local_forge(url).ci_preview("sigma/task").unwrap();
+        assert_eq!(preview.head_sha, sha);
+        assert_eq!(preview.current_head, sha);
+        assert_eq!(preview.entries[0].state, "passed");
+        let requests = server.join().unwrap();
+        assert!(requests[1].contains("/branches/sigma%2Ftask"));
+        assert!(!requests.iter().any(|request| request.contains("/actions/")));
     }
 }
