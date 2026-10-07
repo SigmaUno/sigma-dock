@@ -537,12 +537,33 @@ impl Render for Workspace {
             div()
                 .flex()
                 .justify_between()
+                .items_center()
                 .child(div().text_xl().child("Workspace board"))
                 .child(
                     div()
-                        .text_sm()
-                        .text_color(rgb(self.theme.accent))
-                        .child("LOCAL · NO ANALYTICS"),
+                        .id("terminal-settings")
+                        .tab_index(0)
+                        .border_1()
+                        .border_color(rgb(self.theme.border))
+                        .focus(|style| style.border_color(rgb(self.theme.focus)))
+                        .p_2()
+                        .rounded_md()
+                        .bg(rgb(self.theme.button))
+                        .hover(|style| style.bg(rgb(self.theme.selection)))
+                        .cursor_pointer()
+                        .child("⚙ Settings")
+                        .tooltip(|_, cx| cx.new(|_| appearance_ui::SettingsTooltip).into())
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.toggle_settings(window, cx)),
+                        )
+                        .on_key_down(cx.listener(
+                            |this, event: &gpui::KeyDownEvent, window, cx| {
+                                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                    this.toggle_settings(window, cx);
+                                    cx.stop_propagation();
+                                }
+                            },
+                        )),
                 ),
         );
         if let Some(error) = &self.error {
@@ -799,31 +820,6 @@ impl Render for Workspace {
             .font_family(".SystemUIFont")
             .child(sidebar)
             .child(content)
-            .child(
-                div()
-                    .id("terminal-settings")
-                    .tab_index(0)
-                    .border_1()
-                    .border_color(rgb(self.theme.border))
-                    .focus(|style| style.border_color(rgb(self.theme.focus)))
-                    .absolute()
-                    .right(px(16.))
-                    .bottom(px(12.))
-                    .p_2()
-                    .rounded_md()
-                    .bg(rgb(self.theme.button))
-                    .hover(|style| style.bg(rgb(self.theme.selection)))
-                    .cursor_pointer()
-                    .child("⚙ Settings")
-                    .tooltip(|_, cx| cx.new(|_| appearance_ui::SettingsTooltip).into())
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle_settings(window, cx)))
-                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            this.toggle_settings(window, cx);
-                            cx.stop_propagation();
-                        }
-                    })),
-            )
             .when(self.settings_open, |root| {
                 root.child(self.settings_panel(cx))
             })
