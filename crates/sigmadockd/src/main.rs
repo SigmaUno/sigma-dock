@@ -5,8 +5,8 @@ use fs2::FileExt;
 use serde_json::{Value, json};
 use sigmadock_agents::{Executor, Harness, McpLaunch, orchestrator_command};
 use sigmadock_core::{
-    API_VERSION, Checks, Facts, ForgeConfig, Project, QueuedTask, SessionState, Worker, WorkerRole,
-    read_frame, state_dir, status, task_text,
+    API_VERSION, Checks, DaemonEvent, Facts, ForgeConfig, OutputSignal, Project, QueuedTask,
+    SessionState, Worker, WorkerRole, read_frame, state_dir, status, task_text,
 };
 use sigmadock_forge::{Forge, RestForge};
 use sigmadock_ports::PortPool;
@@ -43,8 +43,17 @@ struct Args {
     #[arg(long, default_value_t = 60)]
     idle_seconds: u64,
 }
+#[derive(Default)]
+struct EventStamp {
+    workers: HashMap<String, Value>,
+    projects: Value,
+    capacity: Value,
+    queue: Value,
+    outputs: HashMap<String, OutputSignal>,
+}
 struct Daemon {
-    events: events::Hub,
+    events: Arc<events::EventHub>,
+    event_stamp: EventStamp,
     store: Store,
     workers: HashMap<String, Worker>,
     sessions: HashMap<String, Arc<Session>>,
@@ -60,6 +69,65 @@ struct Daemon {
     idle_seconds: u64,
 }
 impl Daemon {
+    fn publish_events(&mut self) -> Result<()> {
+        let workers: HashMap<_, _> = self
+            .workers
+            .iter()
+            .map(|(id, worker)| Ok((id.clone(), serde_json::to_value(worker)?)))
+            .collect::<Result<_>>()?;
+        for (id, worker) in &workers {
+            if self.event_stamp.workers.get(id) != Some(worker) {
+                self.events.publish(DaemonEvent::WorkerChanged {
+                    worker_id: id.clone(),
+                });
+            }
+        }
+        let projects = serde_json::to_value(self.store.projects()?)?;
+        let capacity = serde_json::to_value(self.capacity()?)?;
+        let queue = json!(
+            self.store
+                .queue()?
+                .iter()
+                .map(|task| (&task.id, &task.last_error, task.starting))
+                .collect::<Vec<_>>()
+        );
+        for (changed, event) in [
+            (
+                projects != self.event_stamp.projects,
+                DaemonEvent::ProjectsChanged,
+            ),
+            (
+                capacity != self.event_stamp.capacity,
+                DaemonEvent::CapacityChanged,
+            ),
+            (queue != self.event_stamp.queue, DaemonEvent::QueueChanged),
+        ] {
+            if changed {
+                self.events.publish(event);
+            }
+        }
+        let outputs: HashMap<_, _> = self
+            .sessions
+            .iter()
+            .map(|(id, session)| (id.clone(), session.output_signal()))
+            .collect();
+        for (id, signal) in &outputs {
+            if self.event_stamp.outputs.get(id) != Some(signal) {
+                self.events.publish(DaemonEvent::OutputAvailable {
+                    worker_id: id.clone(),
+                    signal: *signal,
+                });
+            }
+        }
+        self.event_stamp = EventStamp {
+            workers,
+            projects,
+            capacity,
+            queue,
+            outputs,
+        };
+        Ok(())
+    }
     fn sync(&mut self) -> Result<()> {
         for (id, session) in &self.sessions {
             if let Some(worker) = self.workers.get_mut(id) {
@@ -308,7 +376,6 @@ impl Daemon {
                 self.store.context(&self.worker(&params)?.id)?,
             )?),
             "clear_session_context" => {
-                self.events.publish(sigmadock_core::events::Event::Resync);
                 let id = self.worker(&params)?.id.clone();
                 self.store.clear_context(&id)?;
                 if let Some(session) = self.sessions.get(&id) {
@@ -954,11 +1021,44 @@ fn deliver_ci(
     }
     Ok(())
 }
-fn serve(
-    mut stream: UnixStream,
-    state: Arc<Mutex<Daemon>>,
-    shutdown: Arc<AtomicBool>,
-) -> Result<()> {
+fn serve_subscription(mut stream: UnixStream, state: Arc<Mutex<Daemon>>, id: &Value) -> Result<()> {
+    let hub = state.lock().unwrap().events.clone();
+    let (subscription_id, receiver) = match hub.subscribe() {
+        Ok(subscription) => subscription,
+        Err(error) => {
+            writeln!(
+                stream,
+                "{}",
+                json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":error.to_string()}})
+            )?;
+            return Ok(());
+        }
+    };
+    let result = (|| -> Result<()> {
+        writeln!(
+            stream,
+            "{}",
+            json!({"jsonrpc":"2.0","id":id,"result":{"version":API_VERSION}})
+        )?;
+        loop {
+            let event = match receiver.recv_timeout(Duration::from_secs(5)) {
+                Ok(event) => event,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => DaemonEvent::Heartbeat,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+            writeln!(
+                stream,
+                "{}",
+                json!({"jsonrpc":"2.0","method":"event","params":event})
+            )?;
+        }
+        Ok(())
+    })();
+    hub.remove(subscription_id);
+    result
+}
+fn serve(mut stream: UnixStream, state: Arc<Mutex<Daemon>>) -> Result<()> {
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     let Some(frame) = read_frame(&mut BufReader::new(stream.try_clone()?))? else {
@@ -977,8 +1077,7 @@ fn serve(
     };
     let valid = request["jsonrpc"] == "2.0" && request["method"].is_string();
     if valid && request["method"] == "subscribe" && request.get("id").is_some() {
-        let receiver = state.lock().unwrap().events.subscribe();
-        return events::serve(stream, receiver, &shutdown, request["id"].clone());
+        return serve_subscription(stream, state, &request["id"]);
     }
     let result = if !valid {
         Err(anyhow::anyhow!("invalid JSON-RPC request"))
@@ -1077,7 +1176,8 @@ fn main() -> Result<()> {
         ports.reserve(worker.port);
     }
     let state = Arc::new(Mutex::new(Daemon {
-        events: events::Hub::default(),
+        events: Arc::new(events::EventHub::default()),
+        event_stamp: EventStamp::default(),
         store,
         workers,
         sessions: HashMap::new(),
@@ -1115,7 +1215,7 @@ fn main() -> Result<()> {
             if let Err(error) = daemon
                 .sync()
                 .and_then(|_| daemon.drain_queue())
-                .and_then(|_| events::observe(&mut daemon))
+                .and_then(|_| daemon.publish_events())
             {
                 eprintln!("local supervision error: {error}");
             }
@@ -1238,14 +1338,14 @@ fn main() -> Result<()> {
         connections.fetch_add(1, Ordering::SeqCst);
         let state = state.clone();
         let connections = connections.clone();
-        let connection_shutdown = shutdown.clone();
         thread::spawn(move || {
-            if let Err(error) = serve(stream, state, connection_shutdown) {
+            if let Err(error) = serve(stream, state) {
                 eprintln!("IPC: {error}");
             }
             connections.fetch_sub(1, Ordering::SeqCst);
         });
     }
+    state.lock().unwrap().events.close();
     let sessions: Vec<_> = state.lock().unwrap().sessions.values().cloned().collect();
     for session in &sessions {
         if session.facts().0 != SessionState::Exited {

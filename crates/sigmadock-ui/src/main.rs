@@ -3,7 +3,7 @@ mod appearance_ui;
 mod berths_ui;
 mod bootstrap;
 mod ci_ui;
-mod events_ui;
+mod events;
 mod icons;
 mod keyboard_ui;
 mod preferences;
@@ -30,6 +30,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 #[derive(Parser)]
 struct Args {
@@ -62,7 +63,9 @@ struct RemoteReader {
     offset: usize,
     ended: bool,
     connected: Arc<AtomicBool>,
-    wake: Arc<events_ui::OutputWake>,
+    events: events::EventFeed,
+    observed: Option<events::WakeStamp>,
+    more: bool,
 }
 impl Read for RemoteReader {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
@@ -82,7 +85,30 @@ impl Read for RemoteReader {
             if self.ended {
                 return Ok(0);
             }
-            let generation = self.wake.generation();
+            let stamp = if self.more {
+                self.events.stamp(&self.worker)
+            } else {
+                let Some(stamp) =
+                    self.events
+                        .wait_for_output(&self.worker, self.observed, &self.connected)
+                else {
+                    return Ok(0);
+                };
+                stamp
+            };
+            if let (Some(previous), Some(signal)) =
+                (self.observed.and_then(|stamp| stamp.signal), stamp.signal)
+                && previous.generation != signal.generation
+            {
+                self.cursor = 0;
+                self.pending = b"\x1bc".to_vec();
+                self.offset = 0;
+                self.observed = None;
+                self.more = true;
+                continue;
+            }
+            // Capture before the RPC so an event racing with the response is not lost.
+            self.observed = Some(stamp);
             let output: Output = serde_json::from_value(
                 self.client
                     .call(
@@ -94,13 +120,11 @@ impl Read for RemoteReader {
             .map_err(io::Error::other)?;
             self.cursor = output.cursor;
             self.ended = output.exited;
+            self.more = output.bytes.len() == 64 * 1024;
             self.pending = output.bytes;
             self.offset = 0;
             if output.truncated {
                 self.pending.splice(0..0, b"\x1bc".iter().copied());
-            }
-            if self.pending.is_empty() && !self.ended {
-                self.wake.wait(generation);
             }
         }
     }
@@ -112,6 +136,8 @@ fn full_capacity_message(max_workers: usize) -> String {
 }
 
 struct Workspace {
+    events: events::EventMonitor,
+    event_epoch: u64,
     client: Client,
     workers: Vec<Worker>,
     /// Archived workers, for the "Departed today" list.
@@ -138,8 +164,6 @@ struct Workspace {
     repo_picker_open: bool,
     details: String,
     connection: Arc<AtomicBool>,
-    output_wake: Arc<events_ui::OutputWake>,
-    event_shutdown: Arc<AtomicBool>,
     preferences: preferences::Preferences,
     preferences_path: PathBuf,
     settings_open: bool,
@@ -169,6 +193,47 @@ struct Workspace {
 impl Workspace {
     fn new(client: Client, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let initial = berths_ui::Snapshot::load(&client);
+        let event_monitor = events::EventMonitor::start(client.clone());
+        cx.spawn(async move |this, cx| {
+            let mut last_resync = std::time::Instant::now();
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(200))
+                    .await;
+                let Ok(request) = this.update(cx, |this, _| {
+                    let (epoch, dirty) = this.events.feed.take_refresh();
+                    if epoch != this.event_epoch {
+                        this.event_epoch = epoch;
+                        this.previews.clear();
+                    }
+                    (dirty || last_resync.elapsed() >= Duration::from_secs(30))
+                        .then(|| this.client.clone())
+                }) else {
+                    break;
+                };
+                let Some(client) = request else {
+                    continue;
+                };
+                last_resync = std::time::Instant::now();
+                let snapshot = cx
+                    .background_executor()
+                    .spawn(async move { berths_ui::Snapshot::load(&client) })
+                    .await;
+                if this
+                    .update(cx, |this, cx| {
+                        this.apply_snapshot(snapshot);
+                        if this.preferences.updates.due(updates::now()) {
+                            this.check_updates(false, cx);
+                        }
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
         let preferences_path = sigmadock_core::state_dir().join("preferences.json");
         let loaded = preferences::Preferences::load(&preferences_path);
         let settings_error = loaded
@@ -181,6 +246,8 @@ impl Workspace {
             cx.notify();
         });
         let mut workspace = Self {
+            events: event_monitor,
+            event_epoch: 0,
             usage_open: false,
             usage_report: None,
             usage_loading: false,
@@ -229,11 +296,9 @@ impl Workspace {
             repo_picker_open: false,
             details: String::new(),
             connection: Arc::new(AtomicBool::new(false)),
-            output_wake: Arc::new(events_ui::OutputWake::default()),
-            event_shutdown: Arc::new(AtomicBool::new(false)),
         };
         workspace.apply_snapshot(initial);
-        workspace.spawn_event_loop(cx);
+        workspace.spawn_preview_loop(cx);
         workspace.workspace_focus.focus(window);
         workspace
     }
@@ -248,7 +313,6 @@ impl Workspace {
         self.ci_error = None;
         self.ci_expanded = None;
         self.connection.store(false, Ordering::Relaxed);
-        self.output_wake.watch(id.clone());
         self.connection = Arc::new(AtomicBool::new(true));
         let reader = RemoteReader {
             client: self.client.clone(),
@@ -258,7 +322,9 @@ impl Workspace {
             offset: 0,
             ended: false,
             connected: self.connection.clone(),
-            wake: self.output_wake.clone(),
+            events: self.events.feed.clone(),
+            observed: None,
+            more: false,
         };
         let writer = RemoteWriter {
             client: self.client.clone(),
@@ -504,8 +570,6 @@ impl Workspace {
 impl Drop for Workspace {
     fn drop(&mut self) {
         self.connection.store(false, Ordering::Relaxed);
-        self.event_shutdown.store(true, Ordering::Relaxed);
-        self.output_wake.cancel_wait();
     }
 }
 impl Render for Workspace {
@@ -831,4 +895,79 @@ fn main() -> Result<()> {
         cx.activate(true);
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod reader_tests {
+    use super::*;
+    use sigmadock_core::{DaemonEvent, OutputSignal};
+    use std::{io::BufReader, os::unix::net::UnixListener, sync::atomic::AtomicUsize};
+    #[test]
+    fn terminal_fetches_after_output_events_and_does_not_poll_while_idle() {
+        let path =
+            std::env::temp_dir().join(format!("sigmadock-reader-{}.sock", std::process::id()));
+        let listener = UnixListener::bind(&path).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let server = std::thread::spawn(move || {
+            for (cursor, bytes) in [(5, b"hello"), (10, b"world")] {
+                let (mut socket, _) = listener.accept().unwrap();
+                let request: serde_json::Value = serde_json::from_slice(
+                    &sigmadock_core::read_frame(&mut BufReader::new(socket.try_clone().unwrap()))
+                        .unwrap()
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(request["method"], "output");
+                count.fetch_add(1, Ordering::Relaxed);
+                writeln!(socket, "{}", json!({"jsonrpc":"2.0","id":1,"result":{"cursor":cursor,"bytes":bytes.to_vec(),"exited":false,"truncated":false,"cols":80,"rows":24}})).unwrap();
+            }
+        });
+        let feed = events::EventFeed::default();
+        feed.emit_for_test(DaemonEvent::Resync);
+        let mut signal = OutputSignal {
+            cursor: 5,
+            cols: 80,
+            rows: 24,
+            generation: 1,
+            exited: false,
+        };
+        feed.emit_for_test(DaemonEvent::OutputAvailable {
+            worker_id: "w".into(),
+            signal,
+        });
+        let mut reader = RemoteReader {
+            client: Client {
+                socket: path.clone(),
+            },
+            worker: "w".into(),
+            cursor: 0,
+            pending: vec![],
+            offset: 0,
+            ended: false,
+            connected: Arc::new(AtomicBool::new(true)),
+            events: feed.clone(),
+            observed: None,
+            more: false,
+        };
+        let mut bytes = [0; 5];
+        assert_eq!(reader.read(&mut bytes).unwrap(), 5);
+        assert_eq!(&bytes, b"hello");
+        let waiter = std::thread::spawn(move || {
+            let mut bytes = [0; 5];
+            assert_eq!(reader.read(&mut bytes).unwrap(), 5);
+            bytes
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        signal.cursor = 10;
+        feed.emit_for_test(DaemonEvent::OutputAvailable {
+            worker_id: "w".into(),
+            signal,
+        });
+        assert_eq!(&waiter.join().unwrap(), b"world");
+        server.join().unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        std::fs::remove_file(path).unwrap();
+    }
 }
