@@ -104,6 +104,7 @@ struct Workspace {
     agent: String,
     form_focus: gpui::FocusHandle,
     busy: bool,
+    repo_picker_open: bool,
     details: String,
     connection: Arc<AtomicBool>,
 }
@@ -155,6 +156,7 @@ impl Workspace {
             agent: "claude".into(),
             form_focus: cx.focus_handle(),
             busy: false,
+            repo_picker_open: false,
             details: String::new(),
             connection: Arc::new(AtomicBool::new(false)),
         }
@@ -289,6 +291,46 @@ impl Workspace {
         cx.stop_propagation();
         cx.notify();
     }
+    fn choose_repository(&mut self, cx: &mut Context<Self>) {
+        if self.repo_picker_open || self.busy {
+            return;
+        }
+        self.repo_picker_open = true;
+        let selection = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose repository".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let result = selection.await;
+            let _ = this.update(cx, |this, cx| {
+                this.repo_picker_open = false;
+                match result {
+                    Ok(Ok(Some(paths))) => {
+                        if let Some(path) = paths.first() {
+                            if let Some(path) = path.to_str() {
+                                this.fields[0] = path.to_owned();
+                                this.active_field = 1;
+                                this.error = None;
+                            } else {
+                                this.error = Some("Choose a repository with a UTF-8 path".into());
+                            }
+                        }
+                    }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(error)) => {
+                        this.error = Some(format!("Could not open folder picker: {error}"))
+                    }
+                    Err(error) => {
+                        this.error = Some(format!("Folder picker closed unexpectedly: {error}"))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
     fn field(&self, index: usize, label: &'static str, cx: &mut Context<Self>) -> impl IntoElement {
         let text = if self.fields[index].is_empty() {
             label.into()
@@ -305,11 +347,15 @@ impl Workspace {
             } else {
                 0x1d2b3e
             }))
-            .cursor_text()
+            .when(index == 0, |field| field.cursor_pointer())
+            .when(index != 0, |field| field.cursor_text())
             .child(text)
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.active_field = index;
                 this.form_focus.focus(window);
+                if index == 0 {
+                    this.choose_repository(cx);
+                }
                 cx.notify();
             }))
     }
@@ -396,7 +442,7 @@ impl Render for Workspace {
                     div()
                         .flex()
                         .gap_2()
-                        .child(self.field(0, "Repository path", cx))
+                        .child(self.field(0, "Choose repository…", cx))
                         .child(self.field(1, "Task title", cx)),
                 )
                 .child(self.field(2, "Initial instruction (optional)", cx));
