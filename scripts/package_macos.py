@@ -119,9 +119,11 @@ def main():
         'CFBundleShortVersionString': args.version.split('-')[0],
         'CFBundleVersion': args.build_number, 'LSMinimumSystemVersion': '13.0',
         'NSHighResolutionCapable': True, 'SigmaDockSourceCommit': args.build_id,
+        'CFBundleIconFile': 'AppIcon',
     }
     with (app / 'Contents' / 'Info.plist').open('wb') as file:
         plistlib.dump(info, file)
+    shutil.copy2(ROOT / 'assets/icon/AppIcon.icns', resources / 'AppIcon.icns')
     shutil.copy2(ROOT / 'LICENSE', resources / 'LICENSE')
     shutil.copy2(ROOT / 'packaging/licenses/Catppuccin.txt', resources / 'Catppuccin-LICENSE.txt')
     for name in ('NOTICE', 'LICENSE-MIT', 'LICENSE-APACHE'):
