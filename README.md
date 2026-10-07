@@ -124,7 +124,7 @@ python3 scripts/feedback_smoke.py
 
 [Releasing crates](docs/RELEASING.md) · [Architecture](docs/ARCHITECTURE.md) · [Roadmap](docs/ROADMAP.md) · [Privacy verification](docs/PRIVACY.md)
 
-Terminal appearance is available from **⚙ Settings** in the bottom-right corner (Cmd/Ctrl+,). Change fonts, size, dark/light themes, individual RGB/ANSI colors, cursor shape/blinking, line spacing and padding without restarting workers. Preferences stay in the local state directory’s `preferences.json`; **Restore appearance defaults** resets this section.
+Terminal appearance is available from **⚙ Settings** in the top-right workspace header (Cmd/Ctrl+,). Change fonts, size, dark/light themes, individual RGB/ANSI colors, cursor shape/blinking, line spacing and padding without restarting workers. Preferences stay in the local state directory’s `preferences.json`; **Restore appearance defaults** resets this section.
 
 Update checks compare tagged semantic versions and require a compatible macOS installer. Preview enables prereleases; stable skips them. Development snapshots retain their Cargo version and source commit, but hashes are never ordered. [Update design and installation](docs/UPDATES.md) describes caching, privacy and the manual upgrade path.
 
