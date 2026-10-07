@@ -340,6 +340,8 @@
 pub mod clipboard;
 pub mod colors;
 pub mod event;
+mod fonts;
+pub use fonts::{DEFAULT_FAMILY as DEFAULT_MONOSPACE_FONT, register as register_fonts};
 pub mod input;
 pub mod mouse;
 pub mod render;
