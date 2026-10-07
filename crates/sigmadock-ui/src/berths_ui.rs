@@ -1384,7 +1384,7 @@ mod tests {
     }
 
     #[test]
-    fn status_follows_the_derived_column() {
+    fn status_follows_the_derived_status() {
         let input = status(&worker(Facts {
             session: SessionState::NeedsInput,
             ..Facts::default()

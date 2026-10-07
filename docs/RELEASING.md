@@ -18,6 +18,12 @@ The canonical homepage is https://sigmadock.dev. The [Homebrew preview tap](http
 
 Both distribution workflows verify the pushed release tag before long checks. This keeps the tested commit referenced if `main` advances and allows publication using `--verify-tag`, avoiding GitHub's [workflow-scoped release restriction](https://github.blog/changelog/2023-11-02-github-actions-enforcing-workflow-scope-when-creating-a-release/) without a new publishing token. An existing tag is never moved. Rerun failed jobs at the same tag for transient or credential failures. Code fixes require a new reviewed commit and version tag; never move an existing release tag.
 
+## Unreleased: worker status terminology
+
+The Rust API exposes `sigmadock_core::Status` and `status(&Facts)` for deriving a worker's status. Downstream Rust callers must migrate to these names. The four states (Working, Needs you, In review, Ready to merge), their precedence and their serialized snake_case values are unchanged; they describe workers displayed in berths.
+
+JSON-RPC `get_worker_status` returns `status` as the canonical derived-state field. The legacy `column` field is a deprecated alias with the same value, retained for the first release containing this change and removed in the following release. RPC and MCP consumers should migrate to `status` now; the MCP tool forwards both fields during the transition. The separate API-2 compatibility requirements below still apply.
+
 ## Unreleased: daemon API 2 and berths
 
 Issue #17 adds stable worker berth slots, global/per-project capacity and a persistent FIFO task queue. SQLite migrates to schema 4, retaining old workers with no assigned berth until their next session. The daemon API is now 2; UI/CLI/MCP clients refuse API-1 daemons. Finish running sessions and restart the matching daemon before using the new clients. Existing API-2 responses use `status`, with `column` retained as a deprecated alias for one release. Queue prompts remain in local state until cancellation or successful launch. See [architecture](ARCHITECTURE.md) for task failure/retry and project-removal behavior. Native queue presentation remains tracked in #21.
