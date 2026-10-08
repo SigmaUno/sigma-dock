@@ -18,7 +18,79 @@ const MONO: &str = "Menlo";
 /// How much faster the branch chip shrinks than the title when the header runs out of room.
 const BRANCH_SHRINK: f32 = 8.;
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum AgentTab {
+    #[default]
+    Changes,
+    Readiness,
+    Scripts,
+}
+
 impl Workspace {
+    fn agent_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mut tabs = div()
+            .flex()
+            .flex_none()
+            .gap_2()
+            .p_2()
+            .border_b_1()
+            .border_color(rgb(self.theme.border));
+        for (tab, key, label) in [
+            (AgentTab::Changes, "changes", "Changes"),
+            (AgentTab::Readiness, "readiness", "Readiness"),
+            (AgentTab::Scripts, "scripts", "Scripts"),
+        ] {
+            let count = self.checks.blocker_count();
+            let label = if tab == AgentTab::Readiness && count > 0 {
+                format!("{label} · {count}")
+            } else {
+                label.into()
+            };
+            tabs = tabs.child(
+                self.header_button(SharedString::from(format!("agent-tab-{key}")))
+                    .px_2()
+                    .text_xs()
+                    .tab_index(0)
+                    .focus(|style| style.border_color(rgb(self.theme.focus)))
+                    .when(self.agent_tab == tab, |button| {
+                        button.bg(rgb(self.theme.selection))
+                    })
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.select_agent_tab(tab, window, cx)
+                    }))
+                    .on_key_down(cx.listener(
+                        move |this, event: &gpui::KeyDownEvent, window, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                this.select_agent_tab(tab, window, cx);
+                                cx.stop_propagation();
+                            }
+                        },
+                    )),
+            );
+        }
+        tabs.into_any_element()
+    }
+
+    fn select_agent_tab(
+        &mut self,
+        tab: AgentTab,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        if tab == AgentTab::Readiness {
+            if let Some(worker) = self.selected.clone() {
+                self.open_checks(worker, window, cx);
+            }
+        } else {
+            self.agent_tab = tab;
+            if tab == AgentTab::Scripts {
+                self.load_scripts(cx);
+            }
+            cx.notify();
+        }
+    }
+
     pub(crate) fn header_button(&self, id: impl Into<gpui::ElementId>) -> Stateful<Div> {
         let theme = self.theme;
         div()
@@ -439,14 +511,25 @@ impl Workspace {
             .flex_col()
             .child(self.agent_header(worker.as_ref(), cx));
         let mut notices = div().flex().flex_col().gap_2().px_4().pt_2();
-        let mut any_notice = true;
-        notices = notices.child(self.scripts_panel(cx));
-        if let Some(error) = self.error_banner(cx) {
-            notices = notices.child(error);
+        let mut any_notice = false;
+        if let Some(worker) = &worker
+            && (worker.workspace_scripts.phase != sigmadock_core::workspace_scripts::Phase::Ready
+                || worker.workspace_scripts.error.is_some())
+        {
+            notices = notices.child(
+                self.header_button("script-phase-notice")
+                    .child(format!(
+                        "{} · Open Scripts",
+                        worker.workspace_scripts.phase.label()
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.select_agent_tab(AgentTab::Scripts, window, cx)
+                    })),
+            );
             any_notice = true;
         }
-        if self.checks.worker.is_some() {
-            notices = notices.child(self.checks_panel(cx));
+        if let Some(error) = self.error_banner(cx) {
+            notices = notices.child(error);
             any_notice = true;
         }
         if self.usage_open {
@@ -520,7 +603,21 @@ impl Workspace {
                     .max_w(px(560.))
                     .flex_none()
                     .h_full()
-                    .child(self.changes_pane(cx)),
+                    .flex()
+                    .flex_col()
+                    .child(self.agent_tabs(cx))
+                    .child(
+                        div().flex_1().min_h(px(0.)).child(match self.agent_tab {
+                            AgentTab::Changes => self.changes_pane(cx),
+                            AgentTab::Readiness => self.checks_panel(cx),
+                            AgentTab::Scripts => div()
+                                .id("agent-scripts-scroll")
+                                .h_full()
+                                .overflow_y_scroll()
+                                .child(self.scripts_panel(cx))
+                                .into_any_element(),
+                        }),
+                    ),
             )
             .into_any_element()
     }

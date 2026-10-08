@@ -198,6 +198,8 @@ Update checks compare tagged semantic versions and require a compatible macOS in
 
 The interface follows system appearance using Catppuccin Latte (light) and Mocha (dark), including live system-mode changes. New terminal preferences also follow the system palette. **Terminal colors: custom** and edited colors preserve your choices independently; existing preference files retain their saved colors. Catppuccin and Lucide icon attribution is included in app and crate packages.
 
+The agent view's right pane has **Changes**, **Readiness**, and **Scripts** tabs. Readiness shows the blocker count, Git/PR/CI/review checklist cards, relative check times, and failing checks inline. Refresh updates forge facts; feedback opens an exact-text preview with **Send to agent** and **Copy**. Script setup failures stay visible above the terminal with a link to Scripts.
+
 **CI preview** opens a native results pane for the selected worker, with checks/statuses/workflows/jobs, commit and refresh time, expandable details, copy buttons and source links. Refresh is independent of the terminal. Changed-head results are marked stale. GitHub shows API check output, annotations and job steps without following log-download redirects; Forgejo Actions remain opt-in and show bounded failed-job log excerpts where supported. `sdk ci-preview WORKER_ID` returns the same structured report; `sdk ci WORKER_ID` remains feedback preview.
 
 ### Repository workspace scripts

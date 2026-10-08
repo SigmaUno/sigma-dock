@@ -177,6 +177,7 @@ struct Workspace {
     /// Projects whose agents are hidden in the sidebar tree.
     collapsed: std::collections::HashSet<String>,
     diff: diff_ui::DiffState,
+    agent_tab: agent_ui::AgentTab,
     scripts: scripts_ui::ScriptsPane,
     terminal_script: Option<String>,
     inbox: inbox_ui::InboxState,
@@ -347,6 +348,7 @@ impl Workspace {
             collapsed: Default::default(),
             diff: Default::default(),
             scripts: Default::default(),
+            agent_tab: Default::default(),
             terminal_script: None,
             inbox: Default::default(),
             menu: None,
@@ -466,6 +468,8 @@ impl Workspace {
     fn open_worker(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected.as_ref() != Some(&id) {
             self.editor_override = None;
+            self.agent_tab = Default::default();
+            self.checks.reset_for_worker(id.clone());
         }
         self.settings_open = false;
         self.focused_berth = Some(id.clone());
@@ -515,6 +519,7 @@ impl Workspace {
             .map(|worker| worker.workspace_scripts.phase);
         self.load_scripts(cx);
         self.load_changes(cx);
+        self.load_checks(false, cx);
         cx.notify();
     }
 
@@ -949,9 +954,6 @@ impl Workspace {
         }
         if self.form_open {
             content = content.child(self.new_task_form(cx));
-        }
-        if self.checks.worker.is_some() {
-            content = content.child(self.checks_panel(cx));
         }
         let content = content.child(self.agent_list(cx)).child(self.footer());
         div()

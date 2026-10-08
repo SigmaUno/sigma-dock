@@ -140,7 +140,10 @@ impl Workspace {
                 .as_ref()
                 .is_some_and(|value| value["config"].is_null())
         {
-            return div().into_any_element();
+            return div()
+                .p_3()
+                .child("No workspace scripts configured for this project.")
+                .into_any_element();
         }
         let mut panel = div()
             .flex()
