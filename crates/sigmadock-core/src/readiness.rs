@@ -149,9 +149,8 @@ impl ReadinessReport {
             Checks::Failed if failures == 0 => {
                 result.blockers.push(("CI", "Observed CI failure".into()))
             }
-            Checks::Unknown | Checks::Pending => result
-                .unknown
-                .push(format!("Observed checks: {:?}", facts.checks)),
+            Checks::Unknown => result.unknown.push("Checks unavailable".into()),
+            Checks::Pending => result.unknown.push("Checks pending".into()),
             _ => {}
         }
         if let Some(error) = &self.ci_error {

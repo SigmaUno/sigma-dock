@@ -103,8 +103,9 @@ impl Workspace {
         let stale = report.head_sha != report.current_head
             || observed.is_some_and(|head| head != report.head_sha);
         panel = panel.child(format!(
-            "Inspected commit: {} · refreshed at Unix {}",
-            report.head_sha, report.refreshed_at
+            "Inspected commit: {} · {}",
+            report.head_sha,
+            crate::berths_ui::relative_time(report.refreshed_at, sigmadock_core::unix_time())
         ));
         if stale {
             panel = panel
