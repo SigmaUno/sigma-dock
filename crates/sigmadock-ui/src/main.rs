@@ -582,7 +582,7 @@ impl Workspace {
         {
             Some(if self.fork_source.is_some() {
                 format!(
-                    "All {} berths in this project are occupied. Enable ‘Queue if no berth is free’ to capture a fork now and start it when a berth opens.",
+                    "This project is running its limit of {} agents. Enable ‘Queue if the project is full’ to capture the fork now and start it when the project has a free slot.",
                     self.capacity.max_workers
                 )
             } else {
@@ -641,7 +641,7 @@ impl Workspace {
                     anyhow::bail!("{}", full_capacity_message(capacity.max_workers));
                 }
                 let worker = client.call("spawn_worker", json!({"project_id":project["id"],"title":title,"agent":agent,"base":if base.is_empty() { None } else { Some(base) },"prompt":if prompt.is_empty() { None } else { Some(prompt) }})).map_err(|error| {
-                    // Another client can take the final berth after the capacity check.
+                    // Another client can take the last free slot after the capacity check.
                     if error.to_string().contains("no free berth in this project") {
                         anyhow::anyhow!(full_capacity_message(capacity.max_workers))
                     } else {
@@ -658,7 +658,7 @@ impl Workspace {
                             this.selected_project = Some(project.id.clone());
                             if !this.projects.iter().any(|known| known.id == project.id) { this.projects.push(project); }
                         }
-                        this.task_notice = (value["queued"] == true).then(|| format!("Fork queued. It will start when a berth opens. Task {}", value["id"].as_str().unwrap_or_default()));
+                        this.task_notice = (value["queued"] == true).then(|| format!("Fork queued. It starts when the project has a free slot. Task {}", value["id"].as_str().unwrap_or_default()));
                         if let Ok(worker) = serde_json::from_value::<Worker>(value) {
                             if !this.capacity.live.contains(&worker.id) { this.capacity.live.push(worker.id.clone()); }
                             this.workers.push(worker);
@@ -843,7 +843,11 @@ impl Workspace {
                     "Include uncommitted changes",
                     self.fork_include_changes,
                 ),
-                ("fork-queue", "Queue if no berth is free", self.fork_queue),
+                (
+                    "fork-queue",
+                    "Queue if the project is full",
+                    self.fork_queue,
+                ),
             ] {
                 form = form.child(
                     div()
