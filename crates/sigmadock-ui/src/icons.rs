@@ -22,6 +22,7 @@ pub(crate) enum Icon {
     Settings,
     Stop,
     Terminal,
+    X,
 }
 
 macro_rules! embed {
@@ -51,6 +52,7 @@ const ICONS: &[(&str, &[u8])] = &[
     embed!("square"),
     embed!("square-terminal"),
     (APP_ICON, include_bytes!("../assets/brand/sigmadock-64.png")),
+    embed!("x"),
 ];
 /// The SigmaDock app icon, rendered in color (unlike the tinted Lucide masks).
 const APP_ICON: &str = "brand/sigmadock-64.png";
@@ -74,6 +76,7 @@ impl Icon {
             Self::Settings => "icons/settings.svg",
             Self::Stop => "icons/square.svg",
             Self::Terminal => "icons/square-terminal.svg",
+            Self::X => "icons/x.svg",
         }
     }
 }
@@ -134,6 +137,7 @@ mod tests {
             Icon::Settings,
             Icon::Stop,
             Icon::Terminal,
+            Icon::X,
         ] {
             let bytes = Assets.load(icon.path()).unwrap().expect("embedded icon");
             assert!(std::str::from_utf8(&bytes).unwrap().contains("<svg"));

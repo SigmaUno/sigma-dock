@@ -78,11 +78,11 @@ Live output replay is bounded to the latest 1 MiB per session and held in memory
 
 ## Readiness pane
 
-Choose **Readiness** on a berth, or press **⌘⇧K** with a berth or terminal focused. The pane combines local Git changes and ahead/behind/push counts, observed PR state, CI results and excerpts, unresolved review comments grouped by file, and merge conflicts. Its header shows **Ready**, **Blocked by N**, or **Unknown**. Failures take precedence over approval; missing, errored, incomplete or mismatched commit data never counts as passing. Readiness remains advisory and does not verify protected-branch rules or merge automatically.
+Choose **Readiness** on an agent row, the **Readiness** tab beside **Changes** in an open agent, or press **⌘⇧K**. The tab is a checklist of five cards, each marked passed, failed, pending or unknown with a one-line summary: **Git** (uncommitted files, commits ahead/behind the cached base, unpushed commits), **Pull request**, **CI** (for example "1 of 5 checks failing · commit a91c2e4", with failing jobs and their excerpts listed), **Review** (with unresolved comments grouped by file) and **Conflicts**. The tab shows how many blockers there are. Failures take precedence over approval; missing, errored, incomplete or mismatched commit data never counts as passing. Readiness remains advisory and does not verify protected-branch rules or merge automatically.
 
 Each feedback action opens an exact-text preview. Choose **Send to agent** to confirm, or cancel. CI uses the existing delivery guard; changed CI feedback must be previewed again. Git, PR, review and conflict plans use the existing bracketed-paste message path and reject previews after the local or observed PR HEAD changes. Review sends the displayed unresolved comments together; providers that omit comment resolution are shown as unknown.
 
-Readiness loads on demand without additional background forge polling or an implicit Git fetch. **Reload** reloads local Git and detail data; **Refresh forge facts** also runs the existing explicit facts refresh. Git comparisons use cached remote refs, and results may become stale as work continues. Press **Esc** to close the pane.
+Readiness loads on demand without additional background forge polling or an implicit Git fetch. **Reload** reloads local Git and detail data; **Refresh from forge** also runs the existing explicit facts refresh. Git comparisons use cached remote refs, and results may become stale as work continues. Press **Esc** to return to **Changes**.
 
 ## Worker base branches
 

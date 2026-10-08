@@ -668,7 +668,7 @@ impl Workspace {
             .px_4()
             .border_b_1()
             .border_color(rgb(theme.border))
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("Changes"))
+            .child(self.right_tabs(cx))
             .child(
                 div()
                     .id("refresh-changes")

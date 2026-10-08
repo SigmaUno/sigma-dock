@@ -233,6 +233,8 @@ struct Workspace {
     usage_loading: bool,
     usage_error: Option<String>,
     checks: checks_ui::ChecksPane,
+    /// Which pane the agent view shows beside the session.
+    right_tab: checks_ui::RightTab,
     checks_focus: gpui::FocusHandle,
     ci_open: bool,
     ci_report: Option<sigmadock_core::CiPreview>,
@@ -358,6 +360,7 @@ impl Workspace {
             usage_loading: false,
             usage_error: None,
             checks: Default::default(),
+            right_tab: Default::default(),
             checks_focus: cx.focus_handle(),
             ci_open: false,
             ci_report: None,
@@ -466,6 +469,8 @@ impl Workspace {
     fn open_worker(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected.as_ref() != Some(&id) {
             self.editor_override = None;
+            self.right_tab = checks_ui::RightTab::Changes;
+            self.checks.worker = None;
         }
         self.settings_open = false;
         self.focused_berth = Some(id.clone());
@@ -949,9 +954,6 @@ impl Workspace {
         }
         if self.form_open {
             content = content.child(self.new_task_form(cx));
-        }
-        if self.checks.worker.is_some() {
-            content = content.child(self.checks_panel(cx));
         }
         let content = content.child(self.agent_list(cx)).child(self.footer());
         div()
