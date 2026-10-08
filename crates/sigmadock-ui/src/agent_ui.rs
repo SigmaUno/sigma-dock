@@ -445,10 +445,6 @@ impl Workspace {
             notices = notices.child(error);
             any_notice = true;
         }
-        if self.checks.worker.is_some() {
-            notices = notices.child(self.checks_panel(cx));
-            any_notice = true;
-        }
         if self.usage_open {
             notices = notices.child(self.usage_panel(cx));
             any_notice = true;
@@ -520,7 +516,10 @@ impl Workspace {
                     .max_w(px(560.))
                     .flex_none()
                     .h_full()
-                    .child(self.changes_pane(cx)),
+                    .child(match self.right_tab {
+                        crate::checks_ui::RightTab::Changes => self.changes_pane(cx),
+                        crate::checks_ui::RightTab::Readiness => self.readiness_pane(cx),
+                    }),
             )
             .into_any_element()
     }
