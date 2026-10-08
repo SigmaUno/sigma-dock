@@ -185,12 +185,34 @@ impl Workspace {
         }
     }
 
+    pub(crate) fn focus_first_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.listed().is_empty() {
+            self.focus_slot(0, window, cx);
+        }
+    }
+
     pub(crate) fn workspace_key(
         &mut self,
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // `/` filters the agent list; only while the list is the visible view.
+        let key = &event.keystroke;
+        if key.key == "/"
+            && !key.modifiers.platform
+            && !key.modifiers.control
+            && !key.modifiers.alt
+            && self.terminal.is_none()
+            && self.view == crate::View::Berths
+            && !self.form_open
+            && !self.settings_open
+            && !self.search_focused
+        {
+            self.focus_search(window, cx);
+            cx.stop_propagation();
+            return;
+        }
         match workspace_shortcut(
             &event.keystroke,
             self.terminal.is_some(),
