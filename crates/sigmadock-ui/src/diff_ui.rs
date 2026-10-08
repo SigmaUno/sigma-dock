@@ -459,7 +459,12 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(crate) fn open_in_editor(&mut self, file: Option<(String, u32)>, cx: &mut Context<Self>) {
+    pub(crate) fn open_in_editor(
+        &mut self,
+        file: Option<(String, u32)>,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(worker) = self
             .selected
             .as_ref()
@@ -471,9 +476,16 @@ impl Workspace {
             worktree: worker.worktree.clone(),
             file: file.map(|(path, line)| (PathBuf::from(path), line)),
         };
-        if let Err(error) = self.preferences.editor.open(&target) {
-            self.error = Some(format!("{error}. Choose an editor in Settings (⌘,)."));
-        }
+        let editor = self.active_editor();
+        let result = if editor == crate::editor::Editor::Environment {
+            self.open_editor_terminal(&target, window, cx)
+        } else {
+            let mut preferences = self.preferences.editor.clone();
+            preferences.editor = Some(editor);
+            preferences.open(&target).map(|_| ())
+        };
+        self.editor_error = result.err().map(|error| format!("{error:#}"));
+        self.error = self.editor_error.clone();
         cx.notify();
     }
 
@@ -501,7 +513,7 @@ impl Workspace {
 
     fn open_button(&self, id: SharedString, label: Option<String>) -> gpui::Stateful<gpui::Div> {
         let theme = self.theme;
-        let editor = self.preferences.editor.resolved().label();
+        let editor = self.active_editor().label();
         div()
             .id(id)
             .flex()
@@ -518,7 +530,11 @@ impl Workspace {
             .hover(|style| style.border_color(rgb(theme.accent)))
             .text_xs()
             .text_color(rgb(theme.text))
-            .child(icon(Icon::ExternalLink, px(12.), rgb(theme.accent)))
+            .child(crate::editor_icons::editor_icon(
+                self.active_editor(),
+                px(12.),
+                theme.accent,
+            ))
             .children(label)
             .tooltip(move |_, cx| crate::keyboard_ui::tooltip(format!("Open in {editor}"), cx))
     }
@@ -564,8 +580,8 @@ impl Workspace {
                                 Some(format!("Open at {line}")),
                             )
                             .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    this.open_in_editor(Some((path.clone(), line)), cx)
+                                move |this, _, window, cx| {
+                                    this.open_in_editor(Some((path.clone(), line)), window, cx)
                                 },
                             )),
                         )
@@ -627,8 +643,8 @@ impl Workspace {
                                         Some(format!("Line {n}")),
                                     )
                                     .on_click(cx.listener(
-                                        move |this, _, _, cx| {
-                                            this.open_in_editor(Some((path.clone(), n)), cx)
+                                        move |this, _, window, cx| {
+                                            this.open_in_editor(Some((path.clone(), n)), window, cx)
                                         },
                                     )),
                                 ),
@@ -912,9 +928,9 @@ impl Workspace {
                         let path = path.clone();
                         row.child(
                             self.open_button(SharedString::from(format!("open-{f}")), None)
-                                .on_click(cx.listener(move |this, _, _, cx| {
+                                .on_click(cx.listener(move |this, _, window, cx| {
                                     cx.stop_propagation();
-                                    this.open_in_editor(Some((path.clone(), line)), cx)
+                                    this.open_in_editor(Some((path.clone(), line)), window, cx)
                                 })),
                         )
                     })

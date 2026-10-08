@@ -32,7 +32,11 @@ impl Workspace {
         cx.notify();
     }
     pub(crate) fn refresh_terminal_appearance(&mut self, cx: &mut Context<Self>) {
-        if let Some(terminal) = &self.terminal {
+        for terminal in self
+            .terminal
+            .iter()
+            .chain(self.editor_pane.iter().map(|pane| &pane.terminal))
+        {
             terminal.update(cx, |terminal, cx| {
                 terminal.update_config(
                     self.theme
@@ -511,6 +515,15 @@ impl Workspace {
                 .into_iter()
                 .map(|e| (Some(e), e.label().to_owned())),
         );
+        if !options
+            .iter()
+            .any(|(choice, _)| *choice == Some(Editor::Environment))
+        {
+            options.push((
+                Some(Editor::Environment),
+                Editor::Environment.label().into(),
+            ));
+        }
         options.push((Some(Editor::System), Editor::System.label().into()));
         options.push((Some(Editor::Custom), Editor::Custom.label().into()));
         for (choice, label) in options {
@@ -529,8 +542,23 @@ impl Workspace {
                         button.text_color(rgb(theme.base))
                     })
                     .text_sm()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .when_some(choice, |button, editor| {
+                        button.child(crate::editor_icons::editor_icon(
+                            editor,
+                            px(16.),
+                            if current == choice {
+                                theme.base
+                            } else {
+                                theme.text
+                            },
+                        ))
+                    })
                     .child(label)
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        this.editor_override = None;
                         this.preferences.editor.editor = choice;
                         this.settings_error = this
                             .preferences
