@@ -189,6 +189,13 @@ struct Workspace {
     workers: Vec<Worker>,
     /// Archived workers, for the "Departed today" list.
     departed: Vec<Worker>,
+    /// Tasks waiting for a free slot, from `list_queue`.
+    queue: Vec<berths_ui::QueueRow>,
+    /// Agent list group shown; `None` shows every group.
+    list_filter: Option<berths_ui::Group>,
+    list_query: String,
+    search_focus: gpui::FocusHandle,
+    search_focused: bool,
     capacity: Capacity,
     previews: std::collections::HashMap<String, berths_ui::Preview>,
     /// Berth highlighted from the needs-you strip or the last closed terminal.
@@ -388,6 +395,11 @@ impl Workspace {
             client,
             workers: Vec::new(),
             departed: Vec::new(),
+            queue: Vec::new(),
+            list_filter: None,
+            list_query: String::new(),
+            search_focus: cx.focus_handle(),
+            search_focused: false,
             capacity: Capacity::default(),
             previews: Default::default(),
             focused_berth: None,
@@ -968,6 +980,7 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.compact = window.viewport_size().width < px(COMPACT_WIDTH);
+        self.search_focused = self.search_focus.is_focused(window);
         self.prepare_berth_focus(cx);
         let sidebar = self.sidebar(cx);
         let main = if self.settings_open {

@@ -59,26 +59,81 @@ pub(crate) fn local_midnight(now: u64) -> u64 {
 pub(crate) enum Group {
     NeedsYou,
     Running,
+    /// Open pull request, approved or not; merged work counts as stopped.
+    InReview,
+    /// Tasks waiting for a free slot; never a worker.
+    Queued,
     Stopped,
 }
 
 impl Group {
-    fn title(self) -> &'static str {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::NeedsYou,
+        Self::Running,
+        Self::InReview,
+        Self::Queued,
+        Self::Stopped,
+    ];
+    pub(crate) fn title(self) -> &'static str {
         match self {
             Self::NeedsYou => "Needs you",
             Self::Running => "Running",
+            Self::InReview => "In review",
+            Self::Queued => "Queued",
             Self::Stopped => "Stopped",
         }
     }
 }
 
 pub(crate) fn group(worker: &Worker, live: bool) -> Group {
-    if derived_status(&worker.facts) == DerivedStatus::NeedsYou {
-        Group::NeedsYou
-    } else if live {
-        Group::Running
-    } else {
-        Group::Stopped
+    match derived_status(&worker.facts) {
+        DerivedStatus::NeedsYou => Group::NeedsYou,
+        DerivedStatus::InReview | DerivedStatus::ReadyToMerge
+            if worker.facts.pr != PullRequestState::Merged =>
+        {
+            Group::InReview
+        }
+        _ if live => Group::Running,
+        _ => Group::Stopped,
+    }
+}
+
+/// A task waiting in the daemon's queue, as `list_queue` reports it.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub(crate) struct QueueRow {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub agent: String,
+    pub base: String,
+    pub position: usize,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub starting: bool,
+}
+
+/// Case-insensitive match of every word in `query` against any of `fields`.
+pub(crate) fn matches_query(query: &str, fields: &[&str]) -> bool {
+    query.split_whitespace().all(|word| {
+        let word = word.to_lowercase();
+        fields
+            .iter()
+            .any(|field| field.to_lowercase().contains(&word))
+    })
+}
+
+fn load_queue(client: &Client) -> Result<Vec<QueueRow>> {
+    let mut rows: Vec<QueueRow> = Vec::new();
+    loop {
+        let page: Vec<QueueRow> = serde_json::from_value(
+            client.call("list_queue", json!({"offset": rows.len(), "limit": 100}))?,
+        )?;
+        let done = page.len() < 100;
+        rows.extend(page);
+        if done || rows.len() >= 1000 {
+            return Ok(rows);
+        }
     }
 }
 
@@ -283,6 +338,7 @@ pub(crate) struct Snapshot {
     pub recovery: Result<serde_json::Value>,
     pub projects: Result<Vec<Project>>,
     pub capacity: Result<Capacity>,
+    pub queue: Result<Vec<QueueRow>>,
 }
 
 impl Snapshot {
@@ -293,7 +349,8 @@ impl Snapshot {
                 workers: Err(anyhow::anyhow!(message.clone())),
                 recovery: Err(anyhow::anyhow!(message.clone())),
                 projects: Err(anyhow::anyhow!(message.clone())),
-                capacity: Err(anyhow::anyhow!(message)),
+                capacity: Err(anyhow::anyhow!(message.clone())),
+                queue: Err(anyhow::anyhow!(message)),
             };
         }
         Self {
@@ -307,6 +364,7 @@ impl Snapshot {
             capacity: client
                 .call("capacity", json!({}))
                 .and_then(|value| Ok(serde_json::from_value(value)?)),
+            queue: load_queue(client),
         }
     }
 }
@@ -314,6 +372,9 @@ impl Snapshot {
 impl Workspace {
     pub(crate) fn apply_snapshot(&mut self, snapshot: Snapshot) {
         self.daemon_connected = snapshot.workers.is_ok();
+        if let Ok(queue) = snapshot.queue {
+            self.queue = queue;
+        }
         if let Ok(projects) = snapshot.projects {
             self.projects = projects;
         }
@@ -1096,17 +1157,23 @@ impl Workspace {
         let theme = self.theme;
         let project = self.current_project();
         let name = project.map_or_else(|| "All agents".to_owned(), |p| p.name.clone());
-        let rows = self.listed();
+        let rows = self.scoped();
         let count = |group: Group| rows.iter().filter(|(g, _)| *g == group).count();
         let max = self.capacity.max_workers;
+        let queued = self.queued(false).len();
+        let queued = if queued > 0 {
+            format!(" · {queued} queued")
+        } else {
+            String::new()
+        };
         let summary = match project {
             Some(p) => format!(
-                "{} of {max} running · {} need you",
+                "{} of {max} running · {} need you{queued}",
                 self.berths(Some(&p.id)).len(),
                 count(Group::NeedsYou)
             ),
             None => format!(
-                "{} running · {} need you · up to {max} per project",
+                "{} running · {} need you{queued} · up to {max} per project",
                 self.capacity.live.len(),
                 count(Group::NeedsYou)
             ),
@@ -1177,8 +1244,8 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// Agents in the selected project (or all), in list order.
-    pub(crate) fn listed(&self) -> Vec<(Group, &Worker)> {
+    /// Agents in scope, ignoring the list filter, in list order.
+    pub(crate) fn scoped(&self) -> Vec<(Group, &Worker)> {
         list_order(
             self.workers
                 .iter()
@@ -1186,6 +1253,50 @@ impl Workspace {
                 .collect(),
             &self.capacity.live,
         )
+    }
+
+    /// Agents shown in the list: in scope, in the chosen group and matching the filter.
+    pub(crate) fn listed(&self) -> Vec<(Group, &Worker)> {
+        self.scoped()
+            .into_iter()
+            .filter(|(group, _)| self.list_filter.is_none_or(|filter| filter == *group))
+            .filter(|(_, worker)| {
+                matches_query(
+                    &self.list_query,
+                    &[
+                        &worker.title,
+                        &worker.branch,
+                        agent_label(&worker.agent),
+                        self.project_name(&worker.project_id).unwrap_or_default(),
+                    ],
+                )
+            })
+            .collect()
+    }
+
+    /// Queued tasks in scope, in queue order, matching the list filter.
+    pub(crate) fn queued(&self, filtered: bool) -> Vec<&QueueRow> {
+        self.queue
+            .iter()
+            .filter(|task| {
+                self.current_project()
+                    .is_none_or(|project| project.id == task.project_id)
+            })
+            .filter(|task| {
+                !filtered
+                    || (self
+                        .list_filter
+                        .is_none_or(|filter| filter == Group::Queued)
+                        && matches_query(
+                            &self.list_query,
+                            &[
+                                &task.title,
+                                agent_label(&task.agent),
+                                self.project_name(&task.project_id).unwrap_or_default(),
+                            ],
+                        ))
+            })
+            .collect()
     }
 
     fn list_row(&self, index: usize, worker: &Worker, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -1422,34 +1533,365 @@ impl Workspace {
     }
 
     /// Every agent in scope, grouped by what it needs, with today's archived ones last.
+    fn section_heading(&self, section: Group, count: usize) -> gpui::Div {
+        let theme = self.theme;
+        div()
+            .flex()
+            .justify_between()
+            .pt_3()
+            .px_1()
+            .text_xs()
+            .text_color(rgb(if section == Group::NeedsYou {
+                theme.attention
+            } else {
+                theme.muted
+            }))
+            .child(section.title().to_uppercase())
+            .child(count.to_string())
+    }
+
+    /// Group chips with counts and the `/` filter field.
+    fn list_filters(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let scoped = self.scoped();
+        let queued = self.queued(false).len();
+        let count = |group: Option<Group>| match group {
+            None => scoped.len() + queued,
+            Some(Group::Queued) => queued,
+            Some(group) => scoped.iter().filter(|(g, _)| *g == group).count(),
+        };
+        let mut row = div().flex().flex_wrap().items_center().gap_2();
+        for filter in std::iter::once(None).chain(Group::ALL.map(Some)) {
+            let on = self.list_filter == filter;
+            let label = filter.map_or("All", Group::title);
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("list-filter-{label}")))
+                    .px_2p5()
+                    .py_0p5()
+                    .rounded_full()
+                    .border_1()
+                    .cursor_pointer()
+                    .text_xs()
+                    .when(on, |chip| {
+                        chip.bg(rgb(theme.accent))
+                            .border_color(rgb(theme.accent))
+                            .text_color(rgb(theme.surface))
+                    })
+                    .when(!on, |chip| {
+                        chip.bg(rgb(theme.surface))
+                            .border_color(rgb(theme.border))
+                            .text_color(rgb(theme.muted))
+                            .hover(|style| style.border_color(rgb(theme.accent)))
+                    })
+                    .child(format!("{label} {}", count(filter)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.list_filter = filter;
+                        cx.notify();
+                    })),
+            );
+        }
+        let focused = self.search_focused;
+        let query = self.list_query.clone();
+        row.child(div().flex_1())
+            .child(
+                div()
+                    .id("list-search")
+                    .track_focus(&self.search_focus)
+                    .on_key_down(cx.listener(Self::search_key))
+                    .w(px(260.))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2p5()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(if focused { theme.focus } else { theme.border }))
+                    .bg(rgb(theme.surface))
+                    .cursor_text()
+                    .text_sm()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .ellipsis()
+                            .text_color(rgb(if query.is_empty() {
+                                theme.muted
+                            } else {
+                                theme.text
+                            }))
+                            .child(if query.is_empty() {
+                                "Filter agents…".to_owned()
+                            } else if focused {
+                                format!("{query}▏")
+                            } else {
+                                query
+                            }),
+                    )
+                    .child(
+                        div()
+                            .px_1()
+                            .rounded_sm()
+                            .bg(rgb(theme.chip))
+                            .text_xs()
+                            .font_family(MONO)
+                            .text_color(rgb(theme.muted))
+                            .child("/"),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.focus_search(window, cx))),
+            )
+            .into_any_element()
+    }
+
+    pub(crate) fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_focus.focus(window);
+        self.search_focused = true;
+        cx.notify();
+    }
+
+    fn search_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = &event.keystroke;
+        match key.key.as_str() {
+            "escape" => {
+                self.list_query.clear();
+                self.search_focused = false;
+                self.workspace_focus.focus(window);
+            }
+            "enter" | "down" => {
+                self.search_focused = false;
+                self.focus_first_row(window, cx);
+            }
+            "backspace" => {
+                self.list_query.pop();
+            }
+            _ if key.modifiers.platform || key.modifiers.control => {
+                if key.key == "v"
+                    && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+                {
+                    self.list_query.push_str(&text.replace(['\r', '\n'], " "));
+                } else {
+                    return;
+                }
+            }
+            _ => match &key.key_char {
+                Some(text) if self.list_query.len() < 200 => self.list_query.push_str(text),
+                _ => return,
+            },
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn queue_row(&self, task: &QueueRow, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let project = self
+            .project_name(&task.project_id)
+            .unwrap_or("project")
+            .to_owned();
+        let (pill, color, detail) = match (&task.last_error, task.starting) {
+            (Some(error), _) => ("Start failed", theme.error, error.clone()),
+            (None, true) => ("Starting", theme.link, "Creating the worktree…".to_owned()),
+            (None, false) => (
+                "Queued",
+                theme.muted,
+                format!(
+                    "Starts when {project} has a free slot · position {}",
+                    task.position
+                ),
+            ),
+        };
+        let button = |id: String, label: &'static str| {
+            div()
+                .id(SharedString::from(id))
+                .flex_none()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .cursor_pointer()
+                .text_xs()
+                .bg(rgb(theme.button))
+                .hover(|style| style.bg(rgb(theme.selection)))
+                .child(label)
+        };
+        let cancel_id = task.id.clone();
+        let retry_id = task.id.clone();
+        div()
+            .id(SharedString::from(format!("queued-{}", task.id)))
+            .flex()
+            .items_center()
+            .gap_3()
+            .px_4()
+            .py_2p5()
+            .rounded_lg()
+            .bg(rgb(theme.surface))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .child(
+                div()
+                    .size(px(22.))
+                    .flex_none()
+                    .rounded_md()
+                    .border_1()
+                    .border_dashed()
+                    .border_color(rgb(theme.empty)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .min_w(px(0.))
+                                    .ellipsis()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(task.title.clone()),
+                            )
+                            .when(self.selected_project.is_none(), |row| {
+                                row.child(
+                                    div()
+                                        .flex_none()
+                                        .px_1p5()
+                                        .rounded_sm()
+                                        .bg(rgb(theme.chip))
+                                        .text_xs()
+                                        .text_color(rgb(theme.muted))
+                                        .child(project.clone()),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .ellipsis()
+                            .text_xs()
+                            .font_family(MONO)
+                            .text_color(rgb(if task.last_error.is_some() {
+                                theme.error
+                            } else {
+                                theme.muted
+                            }))
+                            .child(detail),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(rgb(theme.chip))
+                    .text_xs()
+                    .text_color(rgb(theme.muted))
+                    .child(agent_label(&task.agent).to_owned()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .w(px(200.))
+                    .items_center()
+                    .gap_1()
+                    .text_xs()
+                    .font_family(MONO)
+                    .text_color(rgb(theme.muted))
+                    .child(icon(Icon::GitBranch, px(12.), rgb(theme.muted)))
+                    .child(div().min_w(px(0.)).ellipsis().child(task.base.clone())),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .w(px(130.))
+                    .items_center()
+                    .gap_1p5()
+                    .text_xs()
+                    .text_color(rgb(color))
+                    .child(self.dot(color, 7.))
+                    .child(pill),
+            )
+            .when(task.last_error.is_some(), |row| {
+                row.child(
+                    button(format!("retry-{}", task.id), "Retry")
+                        .tooltip(|_, cx| {
+                            crate::keyboard_ui::tooltip(
+                                "Check that no earlier attempt is still running, then try again"
+                                    .into(),
+                                cx,
+                            )
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.run_action(
+                                "retry_queued",
+                                json!({"id": retry_id, "acknowledge_unknown": true}),
+                                cx,
+                            )
+                        })),
+                )
+            })
+            .when(!task.starting, |row| {
+                row.child(
+                    button(format!("cancel-{}", task.id), "Cancel").on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            this.queue.retain(|task| task.id != cancel_id);
+                            this.run_action("cancel_queued", json!({"id": cancel_id}), cx)
+                        },
+                    )),
+                )
+            })
+            .into_any_element()
+    }
+
     pub(crate) fn agent_list(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
         let rows = self.listed();
-        let mut list = div().flex().flex_col().gap_2();
-        let mut current = None;
-        for (index, (section, worker)) in rows.iter().enumerate() {
-            if current != Some(*section) {
-                current = Some(*section);
-                let count = rows.iter().filter(|(group, _)| group == section).count();
-                list = list.child(
-                    div()
-                        .flex()
-                        .justify_between()
-                        .pt_3()
-                        .px_1()
-                        .text_xs()
-                        .text_color(rgb(if *section == Group::NeedsYou {
-                            theme.attention
-                        } else {
-                            theme.muted
-                        }))
-                        .child(section.title().to_uppercase())
-                        .child(count.to_string()),
-                );
+        let queued = self.queued(true);
+        let mut list = div().flex().flex_col().gap_2().child(self.list_filters(cx));
+        for section in Group::ALL {
+            if section == Group::Queued {
+                if !queued.is_empty() {
+                    list = list.child(self.section_heading(section, queued.len()));
+                    for task in &queued {
+                        list = list.child(self.queue_row(task, cx));
+                    }
+                }
+                continue;
             }
-            list = list.child(self.list_row(index, worker, cx));
+            let members: Vec<_> = rows
+                .iter()
+                .enumerate()
+                .filter(|(_, (group, _))| *group == section)
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
+            list = list.child(self.section_heading(section, members.len()));
+            for (index, (_, worker)) in members {
+                list = list.child(self.list_row(index, worker, cx));
+            }
         }
-        if rows.is_empty() {
+        if rows.is_empty() && queued.is_empty() && !self.list_query.is_empty() {
+            list = list.child(
+                div()
+                    .py_8()
+                    .text_center()
+                    .text_sm()
+                    .text_color(rgb(theme.muted))
+                    .child(format!("No agents match “{}”", self.list_query)),
+            );
+        } else if rows.is_empty() && queued.is_empty() {
             list = list.child(
                 div()
                     .flex()
@@ -1617,6 +2059,64 @@ mod tests {
                 (Group::Stopped, "c"),
             ]
         );
+    }
+
+    #[test]
+    fn open_pull_requests_group_as_in_review_and_merged_work_as_stopped() {
+        let review = worker(Facts {
+            pr: PullRequestState::Open,
+            ..Facts::default()
+        });
+        assert_eq!(group(&review, true), Group::InReview);
+        let ready = worker(Facts {
+            pr: PullRequestState::Open,
+            review: Review::Approved,
+            checks: Checks::Passed,
+            mergeable: Some(true),
+            ..Facts::default()
+        });
+        assert_eq!(group(&ready, false), Group::InReview);
+        let merged = worker(Facts {
+            pr: PullRequestState::Merged,
+            ..Facts::default()
+        });
+        assert_eq!(group(&merged, false), Group::Stopped);
+        let failing = worker(Facts {
+            pr: PullRequestState::Open,
+            checks: Checks::Failed,
+            ..Facts::default()
+        });
+        assert_eq!(group(&failing, true), Group::NeedsYou);
+        assert_eq!(group(&worker(Facts::default()), true), Group::Running);
+    }
+
+    #[test]
+    fn filter_words_must_all_match_some_field() {
+        assert!(matches_query("", &["anything"]));
+        assert!(matches_query(
+            "das RETRY",
+            &["Fix DAS sampler retry", "sigma/4f2c"]
+        ));
+        assert!(matches_query(
+            "celestia retry",
+            &["Fix DAS sampler retry", "celestia-node"]
+        ));
+        assert!(!matches_query(
+            "cache",
+            &["Fix DAS sampler retry", "celestia-node"]
+        ));
+    }
+
+    #[test]
+    fn queue_rows_read_list_queue_responses() {
+        let rows: Vec<QueueRow> = serde_json::from_value(serde_json::json!([{
+            "id": "q", "project_id": "p", "title": "Bump deps", "agent": "claude",
+            "base": "main", "fetch_base": true, "usage_reporting": false,
+            "created_at": 1, "last_error": null, "starting": false, "position": 3
+        }]))
+        .unwrap();
+        assert_eq!((rows[0].position, rows[0].base.as_str()), (3, "main"));
+        assert!(rows[0].last_error.is_none() && !rows[0].starting);
     }
 
     #[test]

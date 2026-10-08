@@ -122,7 +122,7 @@ GitHub feedback includes check output and annotations. Full GitHub job logs requ
 
 Automatic feedback is off by default and waits for an idle coding worker with failed CI. The daemon records an attempt before writing to the PTY to prevent duplicate delivery after partial writes or restarts; delivery errors remain visible in worker status. Idle is a heuristic. Forge content is untrusted task data and the harness retains its own permission controls. Conflict instructions do not run git or push changes automatically.
 
-The native window shows a list of **agents**, for all projects or the one selected in the sidebar, grouped into **Needs you**, **Running** and **Stopped**, with today's archived agents last. Each row shows the task, project, harness, branch, status, the latest line of terminal output, **Readiness** and one contextual action (**Reply**, **Send CI** or **Open PR**); click a row to open the agent. Each project runs at most its agent limit at once (ten by default, set in **Settings → Agents** or with `sdk max-workers N`); a full project does not limit the others.
+The native window shows a list of **agents**, for all projects or the one selected in the sidebar, grouped into **Needs you**, **Running**, **In review** (open pull request), **Queued** and **Stopped**, with today's archived agents last. Queued tasks show their position or start error, with **Cancel** and **Retry**. Chips filter by group, and `/` focuses a filter field that matches titles, branches, harnesses and projects. Each row shows the task, project, harness, branch, status, the latest line of terminal output, **Readiness** and one contextual action (**Reply**, **Send CI** or **Open PR**); click a row to open the agent. Each project runs at most its agent limit at once (ten by default, set in **Settings → Agents** or with `sdk max-workers N`); a full project does not limit the others.
 
 The sidebar lists each project with its agents underneath, plus an **Inbox**. Opening an agent splits the window into the sidebar, the agent's terminal session and its **Changes**: the unified patch against the merge base of the worker’s recorded base ref and HEAD, with **Committed**, **Uncommitted** (index and working tree), and **Untracked** sections. The file list shows status and added/removed counts. **Viewed** checkboxes persist locally across restarts and reset when a file’s content or diff changes; use Space or Enter when focused. Binary files have a visible note. Patches are limited to 100 file entries, 64 KiB per file and 256 KiB overall, with visible truncation notices; incomplete patches cannot be marked viewed. `sdk diff WORKER_ID` prints the same sections; `--stat` prints their summaries. Changes, files and individual lines open in your own editor (Zed, Cursor, VS Code, Sublime Text, JetBrains IDEs — IntelliJ IDEA, RustRover, GoLand, PyCharm and WebStorm, including Toolbox installs — Xcode, the default app or a custom command, chosen in Settings); SigmaDock has no built-in editor.
 
@@ -142,6 +142,7 @@ Keyboard navigation on macOS:
 | ⌘I | Open the Inbox |
 | ⌘⇧O | Open the agent's worktree in your editor |
 | ⌘1 | Show all agents |
+| / | Filter the agent list (Esc clears, ↓ moves to the first agent) |
 | ⌘2–⌘9 | Select the first eight projects in sidebar order |
 | ⌘N / ⌘, | New task / Settings |
 
